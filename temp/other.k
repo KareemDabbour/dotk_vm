@@ -1,0 +1,3 @@
+fn woah(){
+    print a;
+}

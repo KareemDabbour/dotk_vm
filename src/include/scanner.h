@@ -1,0 +1,143 @@
+#ifndef dotk_scanner_h
+#define dotk_scanner_h
+
+typedef enum
+{
+    // Single-character tokens.
+    TOKEN_LEFT_PAREN,
+    TOKEN_RIGHT_PAREN,
+    TOKEN_LEFT_BRACKET,
+    TOKEN_RIGHT_BRACKET,
+    TOKEN_LEFT_BRACE,
+    TOKEN_RIGHT_BRACE,
+    TOKEN_COMMA,
+    TOKEN_DOT,
+    TOKEN_COLON,
+    TOKEN_SEMICOLON,
+    TOKEN_PERCENT,
+    // One or two character tokens.
+    TOKEN_SLASH,
+    TOKEN_SLASH_EQUAL,
+    TOKEN_PIPE,
+    TOKEN_AMP,
+    TOKEN_STAR,
+    TOKEN_STAR_EQUAL,
+    TOKEN_STAR_STAR,
+    TOKEN_PLUS,
+    TOKEN_PLUS_EQUAL,
+    TOKEN_MINUS,
+    TOKEN_MINUS_EQUAL,
+    TOKEN_BANG,
+    TOKEN_BANG_EQUAL,
+    TOKEN_EQUAL,
+    TOKEN_EQUAL_EQUAL,
+    TOKEN_GREATER,
+    TOKEN_GREATER_EQUAL,
+    TOKEN_LESS,
+    TOKEN_LESS_EQUAL,
+    // Literals.
+    TOKEN_IDENTIFIER,
+    TOKEN_RAW_STRING,
+    TOKEN_TEMPLATE_STRING,
+    TOKEN_BASIC_STRING,
+    TOKEN_INTERPOLATION,
+    TOKEN_NUMBER,
+    // Keywords.
+    TOKEN_AND,
+    TOKEN_CLASS,
+    TOKEN_ELSE,
+    TOKEN_FALSE,
+    TOKEN_FOR,
+    TOKEN_FUN,
+    TOKEN_IF,
+    TOKEN_NIL,
+    TOKEN_OR,
+    TOKEN_PRINT,
+    TOKEN_RETURN,
+    TOKEN_SUPER,
+    TOKEN_THIS,
+    TOKEN_TRUE,
+    TOKEN_VAR,
+    TOKEN_WHILE,
+    TOKEN_SWITCH,
+    TOKEN_CASE,
+    TOKEN_DEFAULT,
+    TOKEN_IMPORT,
+
+    TOKEN_ERROR,
+    TOKEN_EOF
+} TokenType;
+
+static char *TOKEN_NAMES[] = {
+    [TOKEN_LEFT_PAREN] = "LEFT_PAREN",
+    [TOKEN_RIGHT_PAREN] = "RIGHT_PAREN",
+    [TOKEN_LEFT_BRACKET] = "LEFT_BRACKET",
+    [TOKEN_RIGHT_BRACKET] = "RIGHT_BRACKET",
+    [TOKEN_LEFT_BRACE] = "LEFT_BRACE",
+    [TOKEN_RIGHT_BRACE] = "RIGHT_BRACE",
+    [TOKEN_COMMA] = "COMMA",
+    [TOKEN_DOT] = "DOT",
+    [TOKEN_IMPORT] = "IMPORT",
+    [TOKEN_COLON] = "COLON",
+    [TOKEN_SEMICOLON] = "SEMICOLON",
+    [TOKEN_PERCENT] = "PERCENT",
+    [TOKEN_SLASH] = "SLASH",
+    [TOKEN_SLASH_EQUAL] = "SLASH_EQUAL",
+    [TOKEN_PIPE] = "PIPE",
+    [TOKEN_AMP] = "AMP",
+    [TOKEN_STAR] = "STAR",
+    [TOKEN_STAR_EQUAL] = "STAR_EQUAL",
+    [TOKEN_STAR_STAR] = "STAR_STAR",
+    [TOKEN_PLUS] = "PLUS",
+    [TOKEN_PLUS_EQUAL] = "PLUS_EQUAL",
+    [TOKEN_MINUS] = "MINUS",
+    [TOKEN_MINUS_EQUAL] = "MINUS_EQUAL",
+    [TOKEN_BANG] = "BANG",
+    [TOKEN_BANG_EQUAL] = "BANG_EQUAL",
+    [TOKEN_EQUAL] = "EQUAL",
+    [TOKEN_EQUAL_EQUAL] = "EQUAL_EQUAL",
+    [TOKEN_GREATER] = "GREATER",
+    [TOKEN_GREATER_EQUAL] = "GREATER_EQUAL",
+    [TOKEN_LESS] = "LESS",
+    [TOKEN_LESS_EQUAL] = "LESS_EQUAL",
+    [TOKEN_IDENTIFIER] = "IDENTIFIER",
+    [TOKEN_RAW_STRING] = "RAW_STRING",
+    [TOKEN_TEMPLATE_STRING] = "TEMPLATE_STRING",
+    [TOKEN_BASIC_STRING] = "BASIC_STRING",
+    [TOKEN_INTERPOLATION] = "INTERPOLATION",
+    [TOKEN_NUMBER] = "NUMBER",
+    [TOKEN_AND] = "AND",
+    [TOKEN_CLASS] = "CLASS",
+    [TOKEN_ELSE] = "ELSE",
+    [TOKEN_FALSE] = "FALSE",
+    [TOKEN_FOR] = "FOR",
+    [TOKEN_FUN] = "FUN",
+    [TOKEN_IF] = "IF",
+    [TOKEN_NIL] = "NIL",
+    [TOKEN_OR] = "OR",
+    [TOKEN_PRINT] = "PRINT",
+    [TOKEN_RETURN] = "RETURN",
+    [TOKEN_SUPER] = "SUPER",
+    [TOKEN_THIS] = "THIS",
+    [TOKEN_TRUE] = "TRUE",
+    [TOKEN_VAR] = "VAR",
+    [TOKEN_WHILE] = "WHILE",
+    [TOKEN_SWITCH] = "SWITCH",
+    [TOKEN_CASE] = "CASE",
+    [TOKEN_DEFAULT] = "DEFAULT",
+    [TOKEN_ERROR] = "ERROR",
+    [TOKEN_EOF] = "EOF"};
+
+typedef struct
+{
+    TokenType type;
+    const char *start;
+    int len;
+    int line;
+    int col;
+} Token;
+
+void initScanner(const char *source);
+Token scanToken();
+
+#endif
