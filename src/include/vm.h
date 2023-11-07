@@ -2,8 +2,15 @@
 #define dotk_vm_h
 
 #include "chunk.h"
+#include "io.h"
 #include "object.h"
 #include "table.h"
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <math.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#define BUFFER_SIZE 104857
 #define FRAMES_MAX 64 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
 
@@ -22,10 +29,12 @@ typedef struct _VM
     Value *stackTop;
     Table strings;
     Table globals;
+    Table imports;
     ObjString *initStr;
     ObjString *toStr;
+    ObjString *eqStr;
+    ObjString *clazzStr;
     ObjUpvalue *openUpvalues;
-
     uint8_t nextWideOp;
 
     size_t bytesAllocated;
@@ -46,7 +55,7 @@ typedef enum
 void initVM();
 void freeVM();
 
-InterpretResult interpret(const char *source, char *file);
+InterpretResult interpret(const char *source, char *file, bool printExpressions);
 extern VM vm;
 void push(Value value);
 Value pop();

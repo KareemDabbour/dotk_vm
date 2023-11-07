@@ -1,0 +1,63 @@
+import "stdlib.k";
+import "socket.k";
+
+var sock = Socket.withDefaults();
+sock.bindToPort(8080);
+sock.startListening();
+
+fn handlePost(r){
+    # TODO
+}
+
+fn handleGet(r){
+    var ret;
+    var pathStr = r.getPathStr();
+    if(!pathStr)
+        return ret;
+    var path = StringBuilder(".");
+
+    var queryParams;
+    path.append(pathStr);
+    if (pathStr[-1] == "/"){
+        path.append("index.html");
+    }else if (!Strings.containsChar(pathStr, ".")){
+        path.append("/").append("index.html");
+    }
+    ret = path.toStr();
+    return ret;
+}
+
+fn processRequest(req){
+
+    var request = Request.parse(req);
+    print(request);
+    switch(request.getType()){
+        case RequestType.GET 
+            return handleGet(request);
+        case RequestType.POST {
+            return handlePost(request);
+        }
+        default  {
+            print("UNKNOWN Request: " + request.toStr());
+        }
+    }
+    
+}
+
+fn handle(sock){
+    var request = sock.receive();
+    
+    var response = processRequest(request);
+    if (!response){
+        sock.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+    }else if(!sock.sendFile(response)){
+        sock.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+    }
+    sock.close();
+}
+while(true){
+    handle(sock.accept());
+}
+
+
+sock.close();

@@ -30,7 +30,7 @@ void freeValueArray(ValueArray *array)
     initValueArray(array);
 }
 
-void printValue(Value value)
+void printValue(Value value, int depth)
 {
     switch (value.type)
     {
@@ -44,7 +44,7 @@ void printValue(Value value)
         printf("%g", AS_NUM(value));
         break;
     case VAL_OBJ:
-        printObj(value);
+        printObj(value, depth);
         break;
     default:
         break;

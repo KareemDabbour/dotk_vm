@@ -16,6 +16,7 @@
 #define IS_CLOSURE(value) isObjType(value, OBJ_CLOSURE)
 #define IS_NATIVE(value) isObjType(value, OBJ_NATIVE)
 #define IS_LIST(value) isObjType(value, OBJ_LIST)
+#define IS_SLICE(value) isObjType(value, OBJ_SLICE)
 
 #define AS_CLASS(value) ((ObjClass *)AS_OBJ(value))
 #define AS_INSTANCE(value) ((ObjInstance *)AS_OBJ(value))
@@ -26,10 +27,12 @@
 #define AS_CLOSURE(value) ((ObjClosure *)AS_OBJ(value))
 #define AS_NATIVE(value) (((ObjNative *)AS_OBJ(value))->function)
 #define AS_LIST(value) ((ObjList *)AS_OBJ(value))
+#define AS_SLICE(value) ((ObjSlice *)AS_OBJ(value))
 typedef enum
 {
     OBJ_STRING = 0,
     OBJ_LIST,
+    OBJ_SLICE,
     OBJ_FUNCTION,
     OBJ_CLOSURE,
     OBJ_NATIVE,
@@ -39,9 +42,10 @@ typedef enum
     OBJ_BOUND_METHOD
 } ObjType;
 
-static const char *OBJECT_TYPES[9] = {
+static const char *OBJECT_TYPES[10] = {
     "STRING",
     "LIST",
+    "SLICE",
     "FUNCTION",
     "CLOSURE",
     "NATIVE",
@@ -90,7 +94,7 @@ typedef struct ObjClosure
     int upvalueCount;
 } ObjClosure;
 
-typedef Value (*NativeFn)(int argC, Value *argV);
+typedef Value (*NativeFn)(int argC, Value *argV, bool *hasError);
 
 typedef struct ObjNative
 {
@@ -103,7 +107,9 @@ typedef struct ObjClass
     Obj obj;
     ObjString *name;
     Value initializer;
-    Value toString;
+    Value toStr;
+    Value equals;
+    struct ObjClass *superclass;
     Table methods;
     Table staticVars;
 } ObjClass;
@@ -115,6 +121,14 @@ typedef struct _ObjList
     int capacity;
     Value *items;
 } ObjList;
+
+typedef struct _ObjSlice
+{
+    Obj obj;
+    int start;
+    int end;
+    int step;
+} ObjSlice;
 
 typedef struct ObjInstance
 {
@@ -134,6 +148,7 @@ ObjClass *newClass(ObjString *name);
 ObjClosure *newClosure(ObjFunction *function);
 ObjFunction *newFunction();
 ObjList *newList();
+ObjSlice *newSlice(int start, int end, int step);
 void appendToList(ObjList *list, Value value);
 void storeToList(ObjList *list, int index, Value value);
 Value indexFromList(ObjList *list, int index);
@@ -145,7 +160,7 @@ ObjNative *newNative(NativeFn function);
 ObjString *takeString(char *chars, int len);
 ObjString *copyString(const char *chars, int len);
 ObjUpvalue *newUpvalue(Value *slot);
-void printObj(Value value);
+void printObj(Value value, int depth);
 
 static inline bool isObjType(Value value, ObjType type)
 {

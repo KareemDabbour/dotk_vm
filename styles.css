@@ -1,0 +1,238 @@
+body {
+    background: linear-gradient(315deg, #217e80 50%, #ebb679 110%);
+    /* ; */
+    font-family: "ubuntu", "sans-serif";
+  }
+  
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 300;
+    line-height: 1.5;
+    margin: auto;
+    color: #ffffff;
+  }
+  
+  header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 5vh;
+    margin-bottom: 5vh;
+  }
+  
+  .nameEffect {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .name {
+    display: flex;
+  }
+  .char {
+    font-size: 7vh;
+  }
+  
+  .whitespace {
+    margin: 0.5em;
+  }
+  
+  header h2 {
+    font-size: 3vh;
+    text-align: center;
+  }
+  
+  main {
+    /* min-width: 30vw; */
+    width: max(60vw, 300px);
+    margin: 0 auto;
+  }
+  
+  main h1::after {
+    content: "";
+    margin: 1em 100% 1em 0;
+    height: 3px;
+    width: 141px;
+    background: #ebb679;
+    display: block;
+  }
+  
+  section {
+    /* max-width: 50vw; */
+    background: linear-gradient(45deg, #e84e4e 65%, #ebb679 110%);
+    margin: 2em auto;
+    border-radius: 1em;
+    padding: 2em;
+    box-shadow: 0 10px 15px #00000071;
+    transition: all 0.2s ease-in-out;
+  }
+  
+  section:hover {
+    transform: scale(1.03);
+    box-shadow: 0 15px 20px #00000071;
+  }
+  
+  .imgSpan {
+    display: inline-block;
+    position: relative;
+    width: 200px;
+    height: 200px;
+    overflow: hidden;
+    border-radius: 50%;
+    padding: 3px;
+    border: 3px solid #ebb679;
+  }
+  .contactItems {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+  }
+  
+  .contactItems img {
+    margin: auto;
+  }
+  
+  img {
+    display: block;
+    height: 4em;
+    width: 4em;
+    height: auto;
+  }
+  
+  .icon {
+    filter: brightness(0) invert(1);
+  }
+  
+  .portrait {
+    width: auto;
+    height: 107%;
+    margin-left: -20px;
+    margin-top: -5px;
+  }
+  
+  .educationDiv,
+  .experienceDiv {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin: 1em 0;
+    gap: 1em;
+  }
+  
+  .details {
+    display: flex;
+    flex-direction: column;
+  }
+  
+  .details h2,
+  .details h3,
+  .details h4 {
+    margin: 0%;
+  }
+  
+  /* This Idea was taken from: https://dev.to/jh3y/css-glitchy-text-reveal-in-3-minutes-24pb */
+  [data-char] {
+    color: transparent;
+    position: relative;
+    transition: all 0.2s;
+  }
+  [data-char]:after {
+    --txt: attr(data-char);
+  
+    -webkit-animation-name: glitch-switch;
+    animation-name: glitch-switch;
+  
+    -webkit-animation-duration: 0.25s;
+    animation-duration: 0.25s;
+  
+    -webkit-animation-delay: 0.3s;
+    animation-delay: 0.3s;
+  
+    -webkit-animation-timing-function: steps(1);
+    animation-timing-function: steps(1);
+  
+    -webkit-animation-iteration-count: var(--count);
+    animation-iteration-count: var(--count);
+  
+    -webkit-animation-fill-mode: backwards;
+    animation-fill-mode: backwards;
+  
+    content: var(--txt);
+    color: #ffffff;
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+  
+  @-webkit-keyframes glitch-switch {
+    0% {
+      content: var(--char-0);
+    }
+    10% {
+      content: var(--char-1);
+    }
+    20% {
+      content: var(--char-2);
+    }
+    30% {
+      content: var(--char-3);
+    }
+    40% {
+      content: var(--char-4);
+    }
+    50% {
+      content: var(--char-5);
+    }
+    60% {
+      content: var(--char-6);
+    }
+    70% {
+      content: var(--char-7);
+    }
+    80% {
+      content: var(--char-8);
+    }
+    90% {
+      content: var(--char-9);
+    }
+    100% {
+      content: var(--txt);
+    }
+  }
+  @keyframes glitch-switch {
+    0% {
+      content: var(--char-0);
+    }
+    10% {
+      content: var(--char-1);
+    }
+    20% {
+      content: var(--char-2);
+    }
+    30% {
+      content: var(--char-3);
+    }
+    40% {
+      content: var(--char-4);
+    }
+    50% {
+      content: var(--char-5);
+    }
+    60% {
+      content: var(--char-6);
+    }
+    70% {
+      content: var(--char-7);
+    }
+    80% {
+      content: var(--char-8);
+    }
+    90% {
+      content: var(--char-9);
+    }
+    100% {
+      content: var(--txt);
+    }
+  }

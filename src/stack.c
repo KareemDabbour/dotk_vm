@@ -8,8 +8,9 @@ Node *create_node(char *line)
     Node *temp;
     if ((temp = (Node *)malloc(sizeof(Node))) == NULL)
         return NULL;
-    temp->line = calloc(strlen(line), sizeof(char));
+    temp->line = calloc(strlen(line) + 1, sizeof(char));
     strcpy(temp->line, line);
+    temp->line[strlen(line)] = '\0';
     temp->next = NULL;
     temp->prev = NULL;
     return temp;
@@ -22,7 +23,16 @@ void init_stack(Stack *stack)
 }
 void free_stack(Stack *stack)
 {
-    // todo
+    Node *curr = stack->current_line;
+    while (curr != NULL)
+    {
+        Node *next = curr->next;
+        free(curr->line);
+        free(curr);
+        curr = next;
+    }
+    stack->current_line = NULL;
+    stack->size = 0;
 }
 char *get_next_line(Stack *stack)
 {

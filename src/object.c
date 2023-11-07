@@ -41,6 +41,15 @@ ObjList *newList()
     return list;
 }
 
+ObjSlice *newSlice(int start, int end, int step)
+{
+    ObjSlice *slice = ALLOCATE_OBJ(ObjSlice, OBJ_SLICE);
+    slice->start = start;
+    slice->end = end;
+    slice->step = step;
+    return slice;
+}
+
 void appendToList(ObjList *list, Value value)
 {
     // Grow the array if necessary
@@ -78,23 +87,19 @@ void deleteFromList(ObjList *list, int index)
     list->count--;
 }
 
-bool isValidListIndex(ObjList *list, int index)
-{
-    if (index < -list->count || index > list->count - 1)
-    {
-        return false;
-    }
-    return true;
-}
+inline bool isValidListIndex(ObjList *list, int index) { return !(index < -list->count || index > list->count - 1); }
 
 ObjClass *newClass(ObjString *name)
 {
     ObjClass *clazz = ALLOCATE_OBJ(ObjClass, OBJ_CLASS);
     clazz->name = name;
     clazz->initializer = NIL_VAL;
-    clazz->toString = NIL_VAL;
+    clazz->toStr = NIL_VAL;
+    clazz->equals = NIL_VAL;
+    clazz->superclass = NULL;
     initTable(&clazz->methods);
     initTable(&clazz->staticVars);
+    tableSet(&clazz->staticVars, vm.clazzStr, (Value){.type = VAL_OBJ, .as.obj = &clazz->name->obj});
     return clazz;
 }
 
@@ -207,15 +212,29 @@ static void printList(ObjList *list)
     printf("[");
     for (int i = 0; i < list->count - 1; i++)
     {
-        printValue(list->items[i]);
+        if (list->items[i].as.obj == &list->obj)
+        {
+            printf("[...], ");
+            continue;
+        }
+        printValue(list->items[i], 1);
         printf(", ");
     }
     if (list->count != 0)
-        printValue(list->items[list->count - 1]);
+    {
+        if (list->items[list->count - 1].as.obj == &list->obj)
+            printf("[...]");
+        else
+            printValue(list->items[list->count - 1], 1);
+    }
     printf("]");
 }
+static void printSlice(ObjSlice *slice)
+{
+    printf("Slice[%d:%d@%d]", slice->start, slice->end, slice->step);
+}
 
-static void printTable(Table table)
+static void printTable(Table table, int depth)
 {
     int fields = 0;
     for (int i = 0; i < table.capacity; i++)
@@ -223,7 +242,7 @@ static void printTable(Table table)
         if (table.entries[i].key != NULL)
         {
             printf("%s: ", table.entries[i].key->chars);
-            printValue(table.entries[i].value);
+            printValue(table.entries[i].value, depth);
 
             if (++fields < table.count)
                 printf(", ");
@@ -231,24 +250,25 @@ static void printTable(Table table)
     }
 }
 
-static void printCustomObj(ObjInstance *instance)
+static void printCustomObj(ObjInstance *instance, int depth)
 {
     if (instance == NULL)
     {
         printf("{}");
         return;
     }
-    printf("%s<%p>: {", instance->klass->name->chars, instance);
-    printf("static: {");
-    printTable(instance->klass->staticVars);
-    printf("}, ");
-    printf("fields: {");
-    printTable(instance->fields);
-    printf("}");
+    printf("%s@%p:{", instance->klass->name->chars, instance);
+    // printf("static: {");
+    // printTable(instance->klass->staticVars);
+    // printf("}, ");
+    // printf("fields: {");
+
+    printTable(instance->fields, depth);
+
     printf("}");
 }
 
-void printObj(Value value)
+void printObj(Value value, int depth)
 {
     switch (OBJ_TYPE(value))
     {
@@ -270,9 +290,12 @@ void printObj(Value value)
     case OBJ_INSTANCE:
     {
 #if DEBUG_PRINT_VERBOSE_CUSTOM_OBJECTS
-        printCustomObj((AS_INSTANCE(value)));
+        if (depth > 0)
+            printCustomObj((AS_INSTANCE(value)), depth - 1);
+        else
+            printf("%s@%p", AS_INSTANCE(value)->klass->name->chars, (void *)AS_INSTANCE(value));
 #else
-        printf("%s instance", AS_INSTANCE(value)->klass->name->chars);
+        printf("%s@%p", AS_INSTANCE(value)->klass->name->chars, (void *)AS_INSTANCE(value));
 #endif
         break;
     }
@@ -281,6 +304,9 @@ void printObj(Value value)
         break;
     case OBJ_LIST:
         printList(AS_LIST(value));
+        break;
+    case OBJ_SLICE:
+        printSlice(AS_SLICE(value));
         break;
     case OBJ_UPVALUE:
         printf("upvalue");

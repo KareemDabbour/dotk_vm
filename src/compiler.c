@@ -67,7 +67,8 @@ typedef enum _FunctionType
     TYPE_STATIC_METHOD,
     TYPE_INITIALIZER,
     TYPE_TO_STR,
-    TYPE_SCRIPT
+    TYPE_SCRIPT,
+    TYPE_ANONYMOUS
 } FunctionType;
 
 typedef struct _Compiler
@@ -75,7 +76,7 @@ typedef struct _Compiler
     struct _Compiler *enclosing;
     ObjFunction *function;
     FunctionType type;
-
+    bool isRepl;
     Local locals[UINT16_COUNT];
     int localCount;
     UpValue upValues[UINT16_COUNT];
@@ -91,6 +92,11 @@ typedef struct _ClassCompiler
 Parser parser;
 Compiler *current = NULL;
 ClassCompiler *currentClass = NULL;
+
+int innermostLoopStart = -1;
+int innermostLoopScopeDepth = 0;
+int innermostLoopEnd = -1;
+int breakAddress = -1;
 
 static void expression();
 static void declareVar();
@@ -263,7 +269,7 @@ static void patchJump(int offset)
     currentChunk()->code[offset + 1] = jump & 0xff;
 }
 
-static void initCompiler(Compiler *compiler, FunctionType type, char *file)
+static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool isRepl)
 {
     parser.file = file;
     compiler->enclosing = current;
@@ -271,9 +277,14 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file)
     compiler->type = type;
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
+    compiler->isRepl = isRepl;
     compiler->function = newFunction();
     current = compiler;
-    if (type != TYPE_SCRIPT)
+    if (type == TYPE_ANONYMOUS)
+    {
+        current->function->name = copyString("anonymous_fn", 13);
+    }
+    else if (type != TYPE_SCRIPT)
     {
         current->function->name = copyString(parser.prev.start, parser.prev.len);
     }
@@ -309,11 +320,11 @@ static ObjFunction *endCompiler()
 static void list(bool canAssign)
 {
     int itemCount = 0;
-    if (!check(TOKEN_RIGHT_BRACKET))
+    if (!check(TOKEN_RIGHT_BRACE))
     {
         do
         {
-            if (check(TOKEN_RIGHT_BRACKET))
+            if (check(TOKEN_RIGHT_BRACE))
                 break;
 
             parsePrecedence(PREC_OR);
@@ -324,10 +335,30 @@ static void list(bool canAssign)
         } while (match(TOKEN_COMMA));
     }
 
-    consume(TOKEN_RIGHT_BRACKET, "Expect ']' after list literal");
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after list literal");
 
     emitBytes(OP_BUILD_LIST, (uint8_t)itemCount);
     return;
+}
+
+static void defaultSizeList(bool canAssign)
+{
+    if (!check(TOKEN_RIGHT_BRACKET))
+    {
+        parsePrecedence(PREC_OR);
+    }
+    consume(TOKEN_RIGHT_BRACKET, "Expect ']' after default list builder");
+    if (check(TOKEN_LEFT_BRACE))
+    {
+        consume(TOKEN_LEFT_BRACE, "Expect '{' after default list builder");
+        expression();
+        emitBytes(OP_BUILD_DEFAULT_LIST, (uint8_t)1);
+        consume(TOKEN_RIGHT_BRACE, "Expect '}' after default list builder");
+    }
+    else
+    {
+        emitBytes(OP_BUILD_DEFAULT_LIST, (uint8_t)0);
+    }
 }
 
 static void subscript(bool canAssign)
@@ -373,6 +404,12 @@ static void binary(bool canAssign)
 
     switch (opType)
     {
+    case TOKEN_AMP:
+        emitByte(OP_BIN_AND);
+        break;
+    case TOKEN_PIPE:
+        emitByte(OP_BIN_OR);
+        break;
     case TOKEN_PLUS:
         emitByte(OP_ADD);
         break;
@@ -387,6 +424,9 @@ static void binary(bool canAssign)
         break;
     case TOKEN_SLASH:
         emitByte(OP_DIV);
+        break;
+    case TOKEN_SLASH_SLASH:
+        emitByte(OP_INT_DIV);
         break;
     case TOKEN_PERCENT:
         emitByte(OP_MOD);
@@ -499,7 +539,7 @@ static void block()
 static void function(FunctionType type)
 {
     Compiler compiler;
-    initCompiler(&compiler, type, parser.file);
+    initCompiler(&compiler, type, parser.file, current->isRepl);
     beginScope();
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
@@ -659,11 +699,30 @@ static void varDeclaration()
     defineVar(global);
 }
 
+static void constDeclaration()
+{
+    Token name = parser.current;
+    uint16_t global = parseVariable("Expect constant name");
+    consume(TOKEN_EQUAL, "Expect '=' after constant name");
+    expression();
+    consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
+    defineVar(global);
+}
+
 static void expressionStatement()
 {
     expression();
-    consume(TOKEN_SEMICOLON, "Expect ';' after expression");
-    emitByte(OP_POP);
+    if (current->isRepl)
+    {
+        if (match(TOKEN_SEMICOLON))
+            advance();
+        emitByte(OP_PRINT);
+    }
+    else
+    {
+        consume(TOKEN_SEMICOLON, "Expect ';' after expression");
+        emitByte(OP_POP);
+    }
 }
 
 #define MAX_CASES 256
@@ -699,7 +758,6 @@ static void switchStatement()
 
                 emitByte(OP_DUP);
                 expression();
-                consume(TOKEN_COLON, "Expect ':' after case expression");
 
                 emitByte(OP_EQUAL);
                 previousCaseSkip = emitJump(OP_JUMP_IF_FALSE);
@@ -709,7 +767,6 @@ static void switchStatement()
             else
             {
                 state = 2;
-                consume(TOKEN_COLON, "Expect ':' after 'default'");
                 previousCaseSkip = -1;
             }
         }
@@ -757,7 +814,11 @@ static void forStatement()
     else
         expressionStatement();
 
-    int loopStart = currentChunk()->size;
+    int surroundingLoopStart = innermostLoopStart;
+    int surroundingLoopScopeDepth = innermostLoopScopeDepth;
+    int lastBreakAddr = breakAddress;
+    innermostLoopStart = currentChunk()->size;
+    innermostLoopScopeDepth = current->scopeDepth;
 
     int exitJump = -1;
     if (!match(TOKEN_SEMICOLON))
@@ -778,8 +839,8 @@ static void forStatement()
         emitByte(OP_POP);
         consume(TOKEN_RIGHT_PAREN, "Expect ')' after clauses");
 
-        emitLoop(loopStart);
-        loopStart = incrementStart;
+        emitLoop(innermostLoopStart);
+        innermostLoopStart = incrementStart;
         patchJump(bodyJump);
     }
 
@@ -804,13 +865,19 @@ static void forStatement()
         endScope();
     }
 
-    emitLoop(loopStart);
+    emitLoop(innermostLoopStart);
 
     if (exitJump != -1)
     {
         patchJump(exitJump);
         emitByte(OP_POP); // pop the condition off the stack
     }
+    if (breakAddress != -1)
+        patchJump(breakAddress);
+
+    breakAddress = lastBreakAddr;
+    innermostLoopStart = surroundingLoopStart;
+    innermostLoopScopeDepth = surroundingLoopScopeDepth;
 
     endScope();
 }
@@ -861,17 +928,32 @@ static void returnStatement()
 
 static void whileStatement()
 {
-    int loopStart = currentChunk()->size;
+    beginScope();
+
+    int surroundingLoopStart = innermostLoopStart;
+    int surroundingBreakAddr = breakAddress;
+    int surroundingLoopScopeDepth = innermostLoopScopeDepth;
+    int surroundingLoopEnd = innermostLoopEnd;
+    innermostLoopStart = currentChunk()->size;
+    innermostLoopScopeDepth = current->scopeDepth;
+
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while' ");
     expression();
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition");
 
-    int exitJump = emitJump(OP_JUMP_IF_FALSE);
+    innermostLoopEnd = emitJump(OP_JUMP_IF_FALSE);
     emitByte(OP_POP);
     statement();
-    emitLoop(loopStart);
-    patchJump(exitJump);
+    emitLoop(innermostLoopStart);
+    patchJump(innermostLoopEnd);
     emitByte(OP_POP);
+    if (breakAddress != -1)
+        patchJump(breakAddress);
+    breakAddress = surroundingBreakAddr;
+    innermostLoopStart = surroundingLoopStart;
+    innermostLoopScopeDepth = surroundingLoopScopeDepth;
+    innermostLoopEnd = surroundingLoopEnd;
+    endScope();
 }
 
 static void synchronize()
@@ -903,55 +985,79 @@ static void synchronize()
 static void declaration()
 {
     if (match(TOKEN_CLASS))
-    {
         classDeclaration();
-    }
     else if (match(TOKEN_FUN))
-    {
         funDeclaration();
-    }
     else if (match(TOKEN_VAR))
-    {
         varDeclaration();
-    }
+    else if (match(TOKEN_CONST))
+        constDeclaration();
     else if (match(TOKEN_IMPORT))
-    {
         importStatement();
-    }
     else
-    {
         statement();
-    }
     if (parser.panicMode)
         synchronize();
+}
+
+static void continueStatement()
+{
+    if (innermostLoopStart == -1)
+    {
+        error("Can't use 'continue' outside of a loop.");
+        return;
+    }
+
+    consume(TOKEN_SEMICOLON, "Expect ';' after 'continue'.");
+
+    // Discard any locals created inside the loop.
+    for (int i = current->localCount - 1;
+         i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
+         i--)
+    {
+        emitByte(OP_POP);
+    }
+
+    // Jump to top of current innermost loop.
+    emitLoop(innermostLoopStart);
+}
+
+static void breakStatement()
+{
+    if (innermostLoopStart == -1)
+    {
+        error("Can't use 'break' outside of a loop.");
+        return;
+    }
+
+    consume(TOKEN_SEMICOLON, "Expect ';' after 'break'.");
+    for (int i = current->localCount - 1;
+         i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
+         i--)
+    {
+        emitByte(OP_POP);
+    }
+    breakAddress = emitJump(OP_JUMP);
 }
 
 static void statement()
 {
     if (match(TOKEN_PRINT))
-    {
         printStatement();
-    }
     else if (match(TOKEN_FOR))
-    {
         forStatement();
-    }
     else if (match(TOKEN_IF))
-    {
         ifStatement();
-    }
     else if (match(TOKEN_SWITCH))
-    {
         switchStatement();
-    }
     else if (match(TOKEN_WHILE))
-    {
         whileStatement();
-    }
     else if (match(TOKEN_RETURN))
-    {
         returnStatement();
-    }
+    else if (match(TOKEN_CONTINUE))
+        continueStatement();
+    else if (match(TOKEN_BREAK))
+        breakStatement();
     else if (match(TOKEN_LEFT_BRACE))
     {
         beginScope();
@@ -960,9 +1066,7 @@ static void statement()
     }
 
     else
-    {
         expressionStatement();
-    }
 }
 
 static void number(bool canAssign)
@@ -1000,9 +1104,8 @@ static void rawString(bool canAssign)
 
 static void templateString(bool canAssign)
 {
-    // Template strings can have escape sequences.
-    // Need to scan token chars and build up new string with converted
-    // escape sequences.
+    // Template strings can have escape sequences. Need to scan token chars and build up new string with converted escape sequences.
+
     int tokenLen = parser.prev.len - 2;
     int realLen = 0;
 
@@ -1035,6 +1138,9 @@ static void templateString(bool canAssign)
             case 't':
                 new[realLen++] = '\t';
                 break;
+            case 'r':
+                new[realLen++] = '\r';
+                break;
             default:
                 break;
             }
@@ -1054,7 +1160,6 @@ static void basicString(bool canAssign)
 
 static void namedVariable(Token name, bool canAssign)
 {
-    // TODO MAKE THESE WIDABLE
 #define SHORT_HAND_ASSIGN(op)            \
     do                                   \
     {                                    \
@@ -1095,6 +1200,8 @@ static void namedVariable(Token name, bool canAssign)
         SHORT_HAND_ASSIGN(OP_SUB);
     else if (canAssign && match(TOKEN_SLASH_EQUAL))
         SHORT_HAND_ASSIGN(OP_DIV);
+    else if (canAssign && match(TOKEN_SLASH_SLASH_EQUAL))
+        SHORT_HAND_ASSIGN(OP_INT_DIV);
     else if (canAssign && match(TOKEN_STAR_EQUAL))
         SHORT_HAND_ASSIGN(OP_MULT);
     else
@@ -1116,6 +1223,10 @@ static void _this(bool canAssign)
     variable(false);
 }
 
+static void _const(bool canAssign)
+{
+}
+
 static void unary(bool canAssign)
 {
     TokenType opType = parser.prev.type;
@@ -1134,23 +1245,88 @@ static void unary(bool canAssign)
         return;
     }
 }
+
+static void slice(bool canAssign)
+{
+    if (check(TOKEN_RIGHT_BRACKET))
+        emitConst(NUM_VAL(-1.0));
+    else
+        expression();
+    if (match(TOKEN_AT))
+        expression();
+    else
+        emitConst(NUM_VAL(1.0));
+
+    emitByte(OP_BUILD_SLICE);
+}
+
+static void sliceNoStart(bool canAssign)
+{
+    emitConst(NUM_VAL(0.0));
+    if (check(TOKEN_RIGHT_BRACKET))
+        emitConst(NUM_VAL(-1.0));
+    else
+        expression();
+
+    if (match(TOKEN_AT))
+        expression();
+    else
+        emitConst(NUM_VAL(1.0));
+
+    emitByte(OP_BUILD_SLICE);
+}
+
+static void sliceJustStep(bool canAssign)
+{
+    emitConst(NUM_VAL(0.0));
+    emitConst(NUM_VAL(-1.0));
+    expression();
+
+    emitByte(OP_BUILD_SLICE);
+}
+
+static void sliceNoEnd(bool canAssign)
+{
+    emitConst(NUM_VAL(-1.0));
+    if (check(TOKEN_RIGHT_BRACKET))
+        emitConst(NUM_VAL(1.0));
+    else
+        expression();
+    emitByte(OP_BUILD_SLICE);
+}
+
+static void anonFunction(bool canAssign)
+{
+    if (current->scopeDepth > 0)
+        markInitialized();
+    function(TYPE_ANONYMOUS);
+}
+
 ParseRule rules[] = {
-    [TOKEN_LEFT_BRACKET] = {list, subscript, PREC_SUBSCRIPT},
+    [TOKEN_LEFT_BRACKET] = {defaultSizeList, subscript, PREC_SUBSCRIPT},
+    [TOKEN_COLON] = {sliceNoStart, slice, PREC_OR},
+    [TOKEN_COLON_AT] = {sliceJustStep, sliceNoEnd, PREC_OR},
     [TOKEN_RIGHT_BRACKET] = {NULL, NULL, PREC_NONE},
     [TOKEN_LEFT_PAREN] = {grouping, call, PREC_CALL},
     [TOKEN_RIGHT_PAREN] = {NULL, NULL, PREC_NONE},
-    [TOKEN_LEFT_BRACE] = {NULL, NULL, PREC_NONE},
+    [TOKEN_LEFT_BRACE] = {list, NULL, PREC_NONE},
     [TOKEN_RIGHT_BRACE] = {NULL, NULL, PREC_NONE},
     [TOKEN_COMMA] = {NULL, NULL, PREC_NONE},
     [TOKEN_DOT] = {NULL, dot, PREC_SUBSCRIPT},
     [TOKEN_MINUS] = {unary, binary, PREC_TERM},
+    [TOKEN_AMP] = {NULL, binary, PREC_TERM},
+    [TOKEN_PIPE] = {NULL, binary, PREC_TERM},
     [TOKEN_MINUS_EQUAL] = {NULL, binary, PREC_TERM},
     [TOKEN_PLUS] = {NULL, binary, PREC_TERM},
     [TOKEN_PLUS_EQUAL] = {NULL, binary, PREC_TERM},
     [TOKEN_PERCENT] = {NULL, binary, PREC_FACTOR},
     [TOKEN_SEMICOLON] = {NULL, NULL, PREC_NONE},
     [TOKEN_SLASH] = {NULL, binary, PREC_FACTOR},
+    [TOKEN_SLASH_EQUAL] = {NULL, binary, PREC_FACTOR},
+    [TOKEN_SLASH_SLASH] = {NULL, binary, PREC_FACTOR},
+    [TOKEN_SLASH_SLASH_EQUAL] = {NULL, binary, PREC_FACTOR},
     [TOKEN_STAR] = {NULL, binary, PREC_FACTOR},
+    [TOKEN_STAR_EQUAL] = {NULL, binary, PREC_FACTOR},
     [TOKEN_STAR_STAR] = {NULL, binary, PREC_POWER},
     [TOKEN_BANG] = {unary, NULL, PREC_NONE},
     [TOKEN_BANG_EQUAL] = {NULL, binary, PREC_EQUALITY},
@@ -1170,7 +1346,7 @@ ParseRule rules[] = {
     [TOKEN_ELSE] = {NULL, NULL, PREC_NONE},
     [TOKEN_FALSE] = {literal, NULL, PREC_NONE},
     [TOKEN_FOR] = {NULL, NULL, PREC_NONE},
-    [TOKEN_FUN] = {NULL, NULL, PREC_NONE},
+    [TOKEN_FUN] = {anonFunction, NULL, PREC_ASSIGNMENT},
     [TOKEN_IF] = {NULL, NULL, PREC_NONE},
     [TOKEN_NIL] = {literal, NULL, PREC_NONE},
     [TOKEN_OR] = {NULL, or_, PREC_OR},
@@ -1180,6 +1356,7 @@ ParseRule rules[] = {
     [TOKEN_THIS] = {_this, NULL, PREC_NONE},
     [TOKEN_TRUE] = {literal, NULL, PREC_NONE},
     [TOKEN_VAR] = {NULL, NULL, PREC_NONE},
+    [TOKEN_CONST] = {NULL, NULL, PREC_NONE},
     [TOKEN_WHILE] = {NULL, NULL, PREC_NONE},
     [TOKEN_ERROR] = {NULL, NULL, PREC_NONE},
     [TOKEN_EOF] = {NULL, NULL, PREC_NONE},
@@ -1193,6 +1370,7 @@ static void parsePrecedence(Precedence precedence)
     if (prefixRule == NULL)
     {
         error("Expect expression");
+        // emitByte(OP_NIL);
         return;
     }
     bool canAssign = precedence <= PREC_ASSIGNMENT;
@@ -1312,6 +1490,34 @@ static void declareVar()
     addLocal(*name);
 }
 
+// static void declareConst()
+// {
+//     Token *name = &parser.prev;
+//     if (current->scopeDepth == 0)
+//     {
+//         for (int i = currentChunk()->constants.size - 1; i >= 0; i--)
+//         {
+//             Value val = currentChunk()->constants.values[i];
+//             if (identifierEqual(name, &(val)))
+//                 error("There is already a constant with this name defined");
+//         }
+//     }
+//     for (int i = current->localCount - 1; i >= 0; i--)
+//     {
+//         Local *local = &current->locals[i];
+//         if (local->depth != -1 && local->depth < current->scopeDepth)
+//         {
+//             break;
+//         }
+//         if (identifierEqual(name, &local->name))
+//         {
+//             error("There is already a variable with this name defined");
+//         }
+//     }
+
+//     addLocal(*name);
+// }
+
 static uint16_t parseVariable(const char *errMsg)
 {
     consume(TOKEN_IDENTIFIER, errMsg);
@@ -1357,12 +1563,12 @@ static void importStatement()
     }
 }
 
-ObjFunction *compile(const char *source, char *file)
+ObjFunction *compile(const char *source, char *file, bool isRepl)
 {
     initScanner(source);
     Compiler compiler;
-    initCompiler(&compiler, TYPE_SCRIPT, file);
-
+    initCompiler(&compiler, TYPE_SCRIPT, file, isRepl);
+    compiler.isRepl = isRepl;
     parser.panicMode = false;
     parser.hadError = false;
     advance();

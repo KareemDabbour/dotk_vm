@@ -5,7 +5,8 @@ sources_dir = src
 out_dir = out
 sources = $(wildcard $(sources_dir)/*.c)
 objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources))
-flags = -g -lm
+# flags = -g -lm 
+flags = -lm -O3
 
 all: dir $(exec)
 
@@ -14,6 +15,10 @@ $(exec): $(objects)
 
 $(objects): $(out_dir)/%.o : $(sources_dir)/%.c
 	$(CC) -c $(flags) $< -o $@
+
+rebuild:
+	make clean
+	make all
 
 dir:
 	mkdir -p $(out_dir)

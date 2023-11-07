@@ -125,6 +125,8 @@ static TokenType identifierType()
 {
     switch (*scanner.start)
     {
+    case 'b':
+        return checkKeyword(1, 4, "reak", TOKEN_BREAK);
     case 'c':
         if (scanner.current - scanner.start > 1)
         {
@@ -135,6 +137,20 @@ static TokenType identifierType()
 
             case 'a':
                 return checkKeyword(2, 2, "se", TOKEN_CASE);
+            case 'o':
+            {
+
+                if (scanner.current - scanner.start > 2 && scanner.start[2] == 'n')
+                {
+                    switch (scanner.start[3])
+                    {
+                    case 's':
+                        return checkKeyword(4, 1, "t", TOKEN_CONST);
+                    case 't':
+                        return checkKeyword(4, 4, "inue", TOKEN_CONTINUE);
+                    }
+                }
+            }
             }
         }
         break;
@@ -266,6 +282,7 @@ static Token templateString()
             scanner.line++;
             scanner.col = 1;
         }
+
         else if (peek() == '\\' && peekNext() == '\\')
             advance();
         advance();
@@ -333,13 +350,16 @@ Token scanToken()
     case ';':
         return makeToken(TOKEN_SEMICOLON);
     case ':':
-        return makeToken(TOKEN_COLON);
+        return makeToken(
+            match('@') ? TOKEN_COLON_AT : TOKEN_COLON);
     case ',':
         return makeToken(TOKEN_COMMA);
     case '.':
         return makeToken(TOKEN_DOT);
     case '%':
         return makeToken(TOKEN_PERCENT);
+    case '@':
+        return makeToken(TOKEN_AT);
     case '-':
         return makeToken(
             match('=') ? TOKEN_MINUS_EQUAL : TOKEN_MINUS);
@@ -353,6 +373,14 @@ Token scanToken()
         return makeToken(
             match('|') ? TOKEN_OR : TOKEN_PIPE);
     case '/':
+    {
+        if (match('/'))
+            return makeToken(match('=') ? TOKEN_SLASH_SLASH_EQUAL : TOKEN_SLASH_SLASH);
+        else if (match('='))
+            return makeToken(TOKEN_SLASH_EQUAL);
+        else
+            return makeToken(TOKEN_SLASH);
+    }
         return makeToken(
             match('=') ? TOKEN_SLASH_EQUAL : TOKEN_SLASH);
     case '*':

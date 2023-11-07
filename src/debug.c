@@ -52,13 +52,13 @@ static int constInst(const char *name, Chunk *chunk, int offset)
         constant = constant << 8;
         constant |= chunk->code[offset + 2];
         printf("%-16s %4d '", name, constant);
-        printValue(chunk->constants.values[constant]);
+        printValue(chunk->constants.values[constant], 1);
         printf("'\n");
         return offset + 3;
     }
     uint8_t constant = chunk->code[offset + 1];
     printf("%-16s %4d '", name, constant);
-    printValue(chunk->constants.values[constant]);
+    printValue(chunk->constants.values[constant], 1);
     printf("'\n");
     return offset + 2;
 }
@@ -76,7 +76,7 @@ static int longConstInst(const char *name, Chunk *chunk, int offset)
                         (chunk->code[offset + 2] << 8) |
                         (chunk->code[offset + 3] << 16);
     printf("%-16s %4d '", name, constant);
-    printValue(chunk->constants.values[constant]);
+    printValue(chunk->constants.values[constant], 1);
     printf("'\n");
     return offset + 4;
 }
@@ -99,7 +99,7 @@ static int invokeInst(const char *name, Chunk *chunk, int offset)
         offset += 3;
     }
     printf("%-16s (%d args) %4d '", name, argc, constant);
-    printValue(chunk->constants.values[constant]);
+    printValue(chunk->constants.values[constant], 1);
     printf("'\n");
     return offset;
 }
@@ -128,6 +128,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_MOD", offset);
     case OP_DIV:
         return simpleInst("OP_DIVIDE", offset);
+    case OP_INT_DIV:
+        return simpleInst("OP_INT_DIVIDE", offset);
     case OP_NEGATE:
         return simpleInst("OP_NEGATE", offset);
     case OP_RETURN:
@@ -140,6 +142,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_FALSE", offset);
     case OP_NOT:
         return simpleInst("OP_NOT", offset);
+    case OP_BUILD_SLICE:
+        return simpleInst("OP_BUILD_SLICE", offset);
     case OP_EQUAL:
         return simpleInst("OP_EQUAL", offset);
     case OP_GREATER:
@@ -178,7 +182,7 @@ int disassembleInst(Chunk *chunk, int offset)
             constant = chunk->code[offset++];
         }
         printf("%-16s %4d ", "OP_CLOSURE", constant);
-        printValue(chunk->constants.values[constant]);
+        printValue(chunk->constants.values[constant], 1);
         printf("\n");
 
         ObjFunction *function = AS_FUN(chunk->constants.values[constant]);
@@ -227,6 +231,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return byteInst("OP_SET_UPVALUE", chunk, offset);
     case OP_BUILD_LIST:
         return byteInst("OP_BUILD_LIST", chunk, offset);
+    case OP_BUILD_DEFAULT_LIST:
+        return byteInst("OP_BUILD_DEFAULT_LIST", chunk, offset);
     case OP_CALL:
         return byteInst("OP_CALL", chunk, offset);
     case OP_INVOKE:

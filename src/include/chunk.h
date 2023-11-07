@@ -27,12 +27,15 @@ typedef enum
     OP_EQUAL,
     OP_LESS,
     OP_GREATER,
+    OP_BIN_OR,
+    OP_BIN_AND,
     OP_ADD,
     OP_SUB,
     OP_MULT,
     OP_POW,
     OP_MOD,
     OP_DIV,
+    OP_INT_DIV,
     OP_NOT,
     OP_NEGATE,
     OP_PRINT,
@@ -47,11 +50,13 @@ typedef enum
     OP_GET_SUPER,
     OP_SUPER_INVOKE,
     OP_BUILD_LIST,
+    OP_BUILD_DEFAULT_LIST,
     OP_INDEX_SUBSCR,
     OP_STORE_SUBSCR,
     OP_WIDE,
     OP_STATIC_VAR,
-    OP_IMPORT
+    OP_IMPORT,
+    OP_BUILD_SLICE
 } OpCode;
 
 typedef struct

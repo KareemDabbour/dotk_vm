@@ -24,6 +24,7 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 
     if (newSize == 0)
     {
+        // printf("KAREEM -- FREEING %p\n", pointer);
         free(pointer);
         return NULL;
     }
@@ -39,7 +40,7 @@ void markObj(Obj *object)
         return;
 #ifdef DEBUG_LOG_GC
     printf("%p mark ", (void *)object);
-    printValue(OBJ_VAL(object));
+    printValue(OBJ_VAL(object), 1);
     printf("\n");
 #endif
     object->isMarked = true;
@@ -73,7 +74,7 @@ static void blackenObject(Obj *object)
 {
 #ifdef DEBUG_LOG_GC
     printf("%p blacken ", (void *)object);
-    printValue(OBJ_VAL(object));
+    printValue(OBJ_VAL(object), 1);
     printf("\n");
 #endif
     switch (object->type)
@@ -82,7 +83,7 @@ static void blackenObject(Obj *object)
     {
         ObjClosure *closure = (ObjClosure *)object;
         markObj((Obj *)closure->function);
-        for (int i = 0; closure->upvalueCount; i++)
+        for (int i = 0; i < closure->upvalueCount; i++)
         {
             markObj((Obj *)closure->upvalues[i]);
         }
@@ -108,6 +109,7 @@ static void blackenObject(Obj *object)
     {
         ObjClass *klass = (ObjClass *)object;
         markObj((Obj *)klass->name);
+        markObj((Obj *)klass->superclass);
         markTable(&klass->methods);
         markTable(&klass->staticVars);
         break;
@@ -163,6 +165,12 @@ static void freeObject(Obj *object)
         ObjList *list = (ObjList *)object;
         FREE_ARRAY(Value *, list->items, list->count);
         FREE(ObjList, object);
+        break;
+    }
+    case OBJ_SLICE:
+    {
+        ObjSlice *slice = (ObjSlice *)object;
+        FREE(ObjSlice, object);
         break;
     }
     case OBJ_BOUND_METHOD:
