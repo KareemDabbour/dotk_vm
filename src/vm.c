@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 VM vm;
+Value prefixStr = NIL_VAL;
 FILE *file;
 static FILE *getFile()
 {
@@ -335,9 +336,8 @@ static char *valueToString(Value val)
         {
 
             ObjList *list = AS_LIST(val);
-            char str[1000]; // ALLOCATE(char, 100);
+            char str[1000] = {0};
             int index = 0;
-            // sprintf(str, "[");
             str[index++] = '[';
             for (int i = 0; i < list->count; i++)
             {
@@ -345,19 +345,15 @@ static char *valueToString(Value val)
                 while (*item != '\0')
                     str[index++] = *item++;
                 str[index++] = ',';
-                //     char *temp = ALLOCATE(char, strlen(str) + strlen(item) + 3);
-                //     sprintf(temp, "%s%s, ", str, item);
-                //     FREE_ARRAY(char, str, strlen(str) + 1);
-                //     FREE_ARRAY(char, item, strlen(item) + 1);
-                //     str = temp;
             }
             if (list->count > 0)
                 str[--index] = ']';
             else
                 str[index] = ']';
             str[++index] = '\0';
-            char *s = ALLOCATE(char, index - 1);
+            char *s = ALLOCATE(char, index);
             memcpy(s, str, index);
+            s[index] = '\0';
             return s;
         }
         case OBJ_CLASS:
@@ -366,7 +362,7 @@ static char *valueToString(Value val)
         {
             char *str = ALLOCATE(char, 100);
             sprintf(str, "%s<%p>", AS_INSTANCE(val)->klass->name->chars, (void *)AS_INSTANCE(val));
-            return AS_INSTANCE(val)->klass->name->chars;
+            return str;
         }
         case OBJ_FUNCTION:
             return AS_FUN(val)->name == NULL ? "<script>" : AS_FUN(val)->name->chars;
@@ -1327,18 +1323,22 @@ static bool isFalsey(Value value)
     return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0);
 }
 
+static ObjString *addTwoStrings(char *a, char *b, int lenA, int lenB)
+{
+    int length = lenA + lenB;
+    char *chars = ALLOCATE(char, length + 1);
+    memcpy(chars, a, lenA);
+    memcpy(chars + lenA, b, lenB);
+    chars[length] = '\0';
+
+    return takeString(chars, length);
+}
+
 static void concatenate()
 {
     ObjString *b = AS_STR(peek(0));
     ObjString *a = AS_STR(peek(1));
-
-    int length = a->len + b->len;
-    char *chars = ALLOCATE(char, length + 1);
-    memcpy(chars, a->chars, a->len);
-    memcpy(chars + a->len, b->chars, b->len);
-    chars[length] = '\0';
-
-    ObjString *result = takeString(chars, length);
+    ObjString *result = addTwoStrings(a->chars, b->chars, a->len, b->len);
     pop();
     pop();
     push(OBJ_VAL(result));
@@ -1590,7 +1590,7 @@ static InterpretResult run(bool isRepl)
         for (Value *slot = vm.stack; slot < vm.stackTop; slot++)
         {
             printf("[ ");
-            printValue(*slot, 1);
+            printValue(*slot, 0);
             printf(" ]");
         }
         printf("\n");
@@ -1996,16 +1996,61 @@ static InterpretResult run(bool isRepl)
                 break;
             }
 
-            printValue(pop(), 3);
+            printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
 
             printf("\n");
             break;
         }
         case OP_ADD:
         {
-            if (IS_STR(peek(0)) && IS_STR(peek(1)))
+            if (IS_STR(peek(1)))
             {
-                concatenate();
+                if (IS_STR(peek(0)))
+                    concatenate();
+                else if (IS_INSTANCE(peek(0)) && !IS_NIL(AS_INSTANCE(peek(0))->klass->toStr))
+                {
+                    *(frame->ip)--;
+                    if (!invoke(vm.toStr, 0))
+                        return INTERPRET_RUNTIME_ERROR;
+                    frame = &vm.frames[vm.frameCount - 1];
+                    break;
+                }
+                else
+                {
+                    Value notStr = pop();
+                    ObjString *str = AS_STR(pop());
+                    char *valStr = valueToString(notStr);
+                    push(OBJ_VAL(addTwoStrings(str->chars, valStr, str->len, strlen(valStr))));
+                    break;
+                }
+            }
+            else if (IS_STR(peek(0)))
+            {
+                // rotateStack();
+                if (prefixStr.type != VAL_NIL)
+                {
+                    push(prefixStr);
+                    prefixStr = NIL_VAL;
+                }
+                if (IS_INSTANCE(peek(1)) && !IS_NIL(AS_INSTANCE(peek(1))->klass->toStr))
+                {
+                    prefixStr = pop();
+                    *(frame->ip)--;
+                    if (!invoke(vm.toStr, 0))
+                        return INTERPRET_RUNTIME_ERROR;
+                    frame = &vm.frames[vm.frameCount - 1];
+                    // push(s);
+                    break;
+                }
+                else
+                {
+                    // rotateStack();
+                    ObjString *str = AS_STR(pop());
+                    Value notStr = pop();
+                    char *valStr = valueToString(notStr);
+                    push(OBJ_VAL(addTwoStrings(valStr, str->chars, strlen(valStr), str->len)));
+                    break;
+                }
             }
             else if (IS_LIST(peek(0)) && IS_LIST(peek(1)))
             {
@@ -2261,4 +2306,12 @@ void push(Value value)
 Value pop()
 {
     return *(--vm.stackTop);
+}
+
+void rotateStack()
+{
+    Value a = pop();
+    Value b = pop();
+    push(a);
+    push(b);
 }

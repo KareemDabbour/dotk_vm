@@ -112,6 +112,37 @@ class LinkedList <Iterable> {
     return null;
   }
 
+  removeIf(f){
+    var node = this.head;
+    while (node != null){
+        if (f(node.value)){
+            this.removeNode(node);
+            return node.value;
+        }
+        node = node.next;
+    }
+    return null;
+  }
+
+  removeNode(node){
+    if (node == null){
+      return;
+    }
+    var previous = node.previous;
+    var next = node.next;
+    if (previous != null){
+      previous.next = next;
+    } else {
+      this.head = next;
+    }
+    if (next != null){
+      next.previous = previous;
+    } else {
+      this.tail = previous;
+    }
+    this._length = this._length - 1;
+  }
+
   # Get the nth (0-based) element of the list. Because it's a linked
   # list (Lox doesn't have arrays), this is an O(n) operation.
   get(n) {
@@ -261,7 +292,10 @@ fn foreach(iterable, forFunc){
     return;
   }
     for(var i = iterable.iterator();i.hasNext();i.next()){
-      forFunc(i.get());
+      var ret = forFunc(i.get());
+      if (ret != null && !ret){
+        break;
+      }
     }
 }
 
@@ -273,7 +307,7 @@ class MapEntry{
     this.value = value;
   }
   toStr(){
-    return str(this.key) + ":" + str(this.value);
+    return this.key + ":" + this.value;
   }
 }
 
@@ -283,7 +317,7 @@ fn hashKey(key, capacity){
 }
 
 class Map{
-  INITIAL_CAPACITY = 8;
+  INITIAL_CAPACITY = 32;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
   init(){
@@ -347,6 +381,7 @@ class Map{
     for (var i = 0; i < len(oldValues); i+=1){
       var node = oldValues[i];
       while (node != null){
+        print node;
         this.put(node.key, node.value);
         node = node.next;
       }
@@ -383,7 +418,9 @@ class Map{
     # var ret = "Map:{ entries: [";
     if(this._size > 0){
       var cap = this.capacity;
-      var appendEntry = fn (entry){ret.append(entry.toStr()).append(", ");};
+      var appendEntry = fn (entry){
+        ret.append(entry.toStr()).append(", ");
+      };
 
       for (var i = 0; i < cap; i+= 1){
         # entryList = this.entries[i];
@@ -408,51 +445,100 @@ class Map{
   }
 }
 
-class Set{
-  INITIAL_CAPACITY = 8;
+
+
+class Set <Iterable>{
+  INITIAL_CAPACITY = 16;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
   init(){
     this.capacity = Set.INITIAL_CAPACITY;
-    this.entries = [this.capacity]{null};
+    this.entries = [this.capacity];
+    this.allEntries = [this.capacity];
     this._size = 0;
   }
 
   add(value){
-    
+    if(type(value) == "object" && instanceof(value, Set)){
+      if(value == this)
+        return this;
+      else{
+        var set = this;
+        foreach(value, fn (x){set.add(x);});
+      }
+    }
+
     if(this._size >= this.capacity * Set.MAX_LOAD_FACTOR){
       this.resize();
     }
 
     var hash = hashKey(value, this.capacity);
-
-
     var entryList = this.entries[hash];
     if(entryList == null){
       var entry = LinkedList();
       entry.append(value);
       this.entries[hash] = entry;
+      # print "needed new list for " + str(value);
     }else if (entryList.contains(value)){
+      # print "already in";
+      return value;
+    }else{
+      # print "appended new value: " + str(value);
       entryList.append(value);
     }
+    this.allEntries[this._size] = value;
     this._size = this._size + 1;
     return value;
   }
 
+  get(i){
+    if (i >= this._size || i < 0){
+      print_error("Index out of bounds");
+      return null;
+    }
+    return this.allEntries[i];
+  }
+
+  size(){
+    return this._size;
+  }
+
   resize(){
-    var oldValues = this.entries;
+
+    var oldAllValues = this.allEntries;
+    var oldSize = this._size;
+    this.allEntries = this.allEntries + [this.capacity];
+    # print "resizing from " + str(this.capacity) + " to " + str(this.capacity * Set.GROW_FACTOR);
     this.capacity = this.capacity * Set.GROW_FACTOR;
     this.entries = [this.capacity];
+    # this.allEntries = [this.capacity];
     this._size = 0;
-    for (var i = 0; i < this._size; i+=1){
-      var node = oldValues[i];
-        if (node){
-          node.foreach(fn (value){this.add(value);});
-        }
+
+    for (var i = 0; i < oldSize; i+=1){
+      var val = oldAllValues[i];
+      this.add(val);
     }
   }
 
   contains(value){
+    if (this._size == 0){
+      return false;
+    }
+    if(type(value) == "object" && instanceof(value, Set)){
+      if(value == this)
+        return true;
+      else{
+        var ret = true;
+        var set = this;
+        foreach(value, fn (x){
+          if (!set.contains(x)){
+            ret = false;
+            return false; # breaks out of the foreach loop 
+          }
+        });
+        return ret;
+      }
+    }
     var hash = hashKey(value, this.capacity);
     var entryList = this.entries[hash];
     if(entryList == null){
@@ -461,33 +547,54 @@ class Set{
     return entryList.contains(value);
   }
 
+  remove(value){
+    var hash = hashKey(value, this.capacity);
+    var entryList = this.entries[hash];
+    if(entryList == null){
+      return null;
+    }
+    var ret = entryList.removeIf(fn (other){return value == other;});
+    if (ret != null){
+      this._size = this._size - 1;
+    }
+    return ret;
+  }
+
+  intersection(otherSet){
+    var ret = Set();
+    for (var i = 0; i < this._size; i+=1){
+      var val = this.allEntries[i];
+      if (otherSet.contains(val)){
+        ret.add(val);
+      }
+    }
+    return ret;
+  }
+
+  difference(otherSet){
+    var ret = Set();
+    for (var i = 0; i < this._size; i+=1){
+      var val = this.allEntries[i];
+      if (!otherSet.contains(val)){
+        ret.add(val);
+      }
+    }
+    return ret;
+  }
+
   of(arr){
     var ret = Set();
     ret.capacity = max(len(arr) * 2, Set.INITIAL_CAPACITY);
-    ret._size = len(arr);
-    ret.entries = [ret.capacity]{null};
+    ret.entries = [ret.capacity];
+    ret.allEntries = [ret.capacity];
     for (var i = 0; i < len(arr); i+=1){
       ret.add(arr[i]);
     }
     return ret;
   }
 
-  toStr(){
-    var ret = StringBuilder("{");
-    if(this._size > 0){
-      var cap = this.capacity;
-      var appendEntry = fn (entry){ret.append(entry).append(", ");};
-
-      for (var i = 0; i < cap; i+= 1){
-        var entryList = this.entries[i];
-        if(entryList != null){
-          entryList.foreach(appendEntry);
-        }
-      }
-      ret.pop();
-    }
-    ret.append("}");
-    return ret.toStr();    
+  toStr(){  
+    return str(this.allEntries[:this._size]);
   }
 }
 
@@ -642,7 +749,7 @@ class ArrayList <Iterable> {
   }
 
   toStr(){
-    return this.entries[:this._size];
+    return str(this.entries[:this._size]);
   }
 
   equals(other){

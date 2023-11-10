@@ -1297,8 +1297,7 @@ static void sliceNoEnd(bool canAssign)
 
 static void anonFunction(bool canAssign)
 {
-    if (current->scopeDepth > 0)
-        markInitialized();
+    markInitialized();
     function(TYPE_ANONYMOUS);
 }
 

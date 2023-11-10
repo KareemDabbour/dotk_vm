@@ -207,17 +207,15 @@ static void printFunction(ObjFunction *function)
     printf("<%s>", function->name->chars);
 }
 
-static void printList(ObjList *list)
+static void printList(ObjList *list, int depth)
 {
     printf("[");
     for (int i = 0; i < list->count - 1; i++)
     {
         if (list->items[i].as.obj == &list->obj)
-        {
-            printf("[...], ");
-            continue;
-        }
-        printValue(list->items[i], 1);
+            printf("[...]");
+        else
+            printValue(list->items[i], depth - 1);
         printf(", ");
     }
     if (list->count != 0)
@@ -225,7 +223,7 @@ static void printList(ObjList *list)
         if (list->items[list->count - 1].as.obj == &list->obj)
             printf("[...]");
         else
-            printValue(list->items[list->count - 1], 1);
+            printValue(list->items[list->count - 1], depth - 1);
     }
     printf("]");
 }
@@ -242,7 +240,7 @@ static void printTable(Table table, int depth)
         if (table.entries[i].key != NULL)
         {
             printf("%s: ", table.entries[i].key->chars);
-            printValue(table.entries[i].value, depth);
+            printValue(table.entries[i].value, depth - 1);
 
             if (++fields < table.count)
                 printf(", ");
@@ -303,7 +301,7 @@ void printObj(Value value, int depth)
         printFunction(AS_BOUND_METHOD(value)->method->function);
         break;
     case OBJ_LIST:
-        printList(AS_LIST(value));
+        printList(AS_LIST(value), depth);
         break;
     case OBJ_SLICE:
         printSlice(AS_SLICE(value));

@@ -52,13 +52,13 @@ static int constInst(const char *name, Chunk *chunk, int offset)
         constant = constant << 8;
         constant |= chunk->code[offset + 2];
         printf("%-16s %4d '", name, constant);
-        printValue(chunk->constants.values[constant], 1);
+        printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
         printf("'\n");
         return offset + 3;
     }
     uint8_t constant = chunk->code[offset + 1];
     printf("%-16s %4d '", name, constant);
-    printValue(chunk->constants.values[constant], 1);
+    printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
     printf("'\n");
     return offset + 2;
 }
@@ -76,7 +76,7 @@ static int longConstInst(const char *name, Chunk *chunk, int offset)
                         (chunk->code[offset + 2] << 8) |
                         (chunk->code[offset + 3] << 16);
     printf("%-16s %4d '", name, constant);
-    printValue(chunk->constants.values[constant], 1);
+    printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
     printf("'\n");
     return offset + 4;
 }
@@ -99,7 +99,7 @@ static int invokeInst(const char *name, Chunk *chunk, int offset)
         offset += 3;
     }
     printf("%-16s (%d args) %4d '", name, argc, constant);
-    printValue(chunk->constants.values[constant], 1);
+    printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
     printf("'\n");
     return offset;
 }
@@ -182,7 +182,7 @@ int disassembleInst(Chunk *chunk, int offset)
             constant = chunk->code[offset++];
         }
         printf("%-16s %4d ", "OP_CLOSURE", constant);
-        printValue(chunk->constants.values[constant], 1);
+        printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
         printf("\n");
 
         ObjFunction *function = AS_FUN(chunk->constants.values[constant]);

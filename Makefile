@@ -6,7 +6,7 @@ out_dir = out
 sources = $(wildcard $(sources_dir)/*.c)
 objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources))
 # flags = -g -lm 
-flags = -lm -O3
+flags = -g -lm -O3
 
 all: dir $(exec)
 

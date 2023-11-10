@@ -59,5 +59,5 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions)
 extern VM vm;
 void push(Value value);
 Value pop();
-
+void rotateStack();
 #endif
