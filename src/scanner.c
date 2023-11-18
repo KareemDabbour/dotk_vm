@@ -87,7 +87,7 @@ static Token errorToken(const char *message)
     return token;
 }
 
-static void skipWhitespace()
+static int skipWhitespace()
 {
     for (;;)
     {
@@ -108,10 +108,21 @@ static void skipWhitespace()
             while (peek() != '\n' && !isAtEnd())
                 advance();
             break;
+        case '~':
+        {
+            advance();
+            while (peek() != '~' && !isAtEnd())
+                advance();
+            if (isAtEnd())
+                return -1;
+            advance();
+            break;
+        }
         default:
-            return;
+            return 0;
         }
     }
+    return 0;
 }
 
 static TokenType checkKeyword(int start, int len, const char *rest, TokenType type)
@@ -323,7 +334,15 @@ static Token basicString()
 
 Token scanToken()
 {
-    skipWhitespace();
+    int line = scanner.line;
+    int col = scanner.col;
+    if (skipWhitespace() < 0)
+    {
+        Token blockCommentErr = errorToken("Unterminted Block Comment");
+        blockCommentErr.line = line;
+        blockCommentErr.col = col;
+        return blockCommentErr;
+    }
     scanner.start = scanner.current;
     if (isAtEnd())
         return makeToken(TOKEN_EOF);
@@ -396,8 +415,14 @@ Token scanToken()
         return makeToken(
             match('=') ? TOKEN_BANG_EQUAL : TOKEN_BANG);
     case '=':
-        return makeToken(
-            match('=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL);
+    {
+        if (match('='))
+            return makeToken(TOKEN_EQUAL_EQUAL);
+        else if (match('>'))
+            return makeToken(TOKEN_ARROW);
+        else
+            return makeToken(TOKEN_EQUAL);
+    }
     case '<':
         return makeToken(
             match('=') ? TOKEN_LESS_EQUAL : TOKEN_LESS);

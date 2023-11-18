@@ -9,7 +9,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
+#include <sys/stat.h>
 #define BUFFER_SIZE 104857
 #define FRAMES_MAX 64 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
@@ -30,9 +30,12 @@ typedef struct _VM
     Table strings;
     Table globals;
     Table imports;
+    Table importFuncs;
     ObjString *initStr;
     ObjString *toStr;
     ObjString *eqStr;
+    ObjString *ltStr;
+    ObjString *gtStr;
     ObjString *clazzStr;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;

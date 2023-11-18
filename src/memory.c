@@ -19,12 +19,15 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
         collectGarbage();
 #endif
         if (vm.bytesAllocated > vm.nextGC)
+        {
+            // fprintf(stderr, "KAREEM -- COLLECTING GARBAGE from %ld. Next GC: %ld\n", vm.bytesAllocated, vm.nextGC);
+            // printf("KAREEM -- CALLLINGGNGNNG\n");
             collectGarbage();
+        }
     }
 
     if (newSize == 0)
     {
-        // printf("KAREEM -- FREEING %p\n", pointer);
         free(pointer);
         return NULL;
     }
@@ -77,6 +80,7 @@ static void blackenObject(Obj *object)
     printValue(OBJ_VAL(object), 1);
     printf("\n");
 #endif
+    markObj(object);
     switch (object->type)
     {
     case OBJ_CLOSURE:
@@ -105,6 +109,12 @@ static void blackenObject(Obj *object)
         markObj((Obj *)bound->method);
         break;
     }
+    case OBJ_SLICE:
+    {
+        ObjSlice *slice = (ObjSlice *)object;
+        // markObj(object);
+        break;
+    }
     case OBJ_CLASS:
     {
         ObjClass *klass = (ObjClass *)object;
@@ -118,7 +128,8 @@ static void blackenObject(Obj *object)
     {
         ObjInstance *instance = (ObjInstance *)object;
         markObj((Obj *)instance);
-        freeTable(&instance->fields);
+        markObj((Obj *)instance->klass);
+        markTable(&instance->fields);
         break;
     }
     case OBJ_FUNCTION:
@@ -129,8 +140,12 @@ static void blackenObject(Obj *object)
         break;
     }
     case OBJ_UPVALUE:
+    {
+        ObjUpvalue *upvalue = (ObjUpvalue *)object;
+
         markValue(((ObjUpvalue *)object)->closed);
         break;
+    }
     case OBJ_STRING:
     case OBJ_NATIVE:
         break;
@@ -226,8 +241,13 @@ static void markRoots()
     }
 
     markTable(&vm.globals);
+    // markTable(&vm.strings);
+    markTable(&vm.imports);
+    markTable(&vm.importFuncs);
     markCompilerRoots();
     markObj((Obj *)vm.initStr);
+    markObj((Obj *)vm.toStr);
+    markObj((Obj *)vm.eqStr);
 }
 
 void traceReferences()

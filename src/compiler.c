@@ -527,6 +527,25 @@ static void expression()
     parsePrecedence(PREC_ASSIGNMENT);
 }
 
+static void returnStatement()
+{
+    if (current->type == TYPE_SCRIPT)
+        error("Can't return from top-level code");
+
+    if (match(TOKEN_SEMICOLON))
+        emitReturn();
+    else
+    {
+        if (current->type == TYPE_INITIALIZER)
+            error("Can't return a value from a class's constructor.");
+
+        expression();
+        // consume(TOKEN_SEMICOLON, "Exepect ';' after return value");
+        match(TOKEN_SEMICOLON);
+        emitByte(OP_RETURN);
+    }
+}
+
 static void block()
 {
     while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF))
@@ -556,8 +575,14 @@ static void function(FunctionType type)
     }
 
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
-    consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
-    block();
+    // ADD => support. Make it a return stateMent;
+    if (match(TOKEN_ARROW))
+        returnStatement();
+    else
+    {
+        consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
+        block();
+    }
 
     ObjFunction *function = endCompiler();
     uint16_t constant = makeConstant(OBJ_VAL(function));
@@ -589,7 +614,8 @@ static void method()
         else
             emitByte(OP_NIL);
 
-        consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+        // consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+        match(TOKEN_SEMICOLON);
         emitBytes(OP_STATIC_VAR, constant);
     }
 }
@@ -694,7 +720,8 @@ static void varDeclaration()
     {
         emitByte(OP_NIL);
     }
-    consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+    // consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+    match(TOKEN_SEMICOLON);
 
     defineVar(global);
 }
@@ -705,7 +732,8 @@ static void constDeclaration()
     uint16_t global = parseVariable("Expect constant name");
     consume(TOKEN_EQUAL, "Expect '=' after constant name");
     expression();
-    consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
+    // consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
+    match(TOKEN_SEMICOLON);
     defineVar(global);
 }
 
@@ -720,7 +748,8 @@ static void expressionStatement()
     }
     else
     {
-        consume(TOKEN_SEMICOLON, "Expect ';' after expression");
+        // consume(TOKEN_SEMICOLON, "Expect ';' after expression");
+        match(TOKEN_SEMICOLON);
         emitByte(OP_POP);
     }
 }
@@ -781,10 +810,7 @@ static void switchStatement()
     }
 
     if (state == 1)
-    {
         patchJump(previousCaseSkip);
-        emitByte(OP_POP);
-    }
 
     for (int i = 0; i < caseCount; i++)
     {
@@ -904,26 +930,9 @@ static void ifStatement()
 static void printStatement()
 {
     expression();
-    consume(TOKEN_SEMICOLON, "Expect ';' after value.");
+    // consume(TOKEN_SEMICOLON, "Expect ';' after value.");
+    match(TOKEN_SEMICOLON);
     emitByte(OP_PRINT);
-}
-
-static void returnStatement()
-{
-    if (current->type == TYPE_SCRIPT)
-        error("Can't return from top-level code");
-
-    if (match(TOKEN_SEMICOLON))
-        emitReturn();
-    else
-    {
-        if (current->type == TYPE_INITIALIZER)
-            error("Can't return a value from a class's constructor.");
-
-        expression();
-        consume(TOKEN_SEMICOLON, "Exepect ';' after return value");
-        emitByte(OP_RETURN);
-    }
 }
 
 static void whileStatement()
@@ -1008,7 +1017,8 @@ static void continueStatement()
         return;
     }
 
-    consume(TOKEN_SEMICOLON, "Expect ';' after 'continue'.");
+    // consume(TOKEN_SEMICOLON, "Expect ';' after 'continue'.");
+    match(TOKEN_SEMICOLON);
 
     // Discard any locals created inside the loop.
     for (int i = current->localCount - 1;
@@ -1030,7 +1040,8 @@ static void breakStatement()
         return;
     }
 
-    consume(TOKEN_SEMICOLON, "Expect ';' after 'break'.");
+    // consume(TOKEN_SEMICOLON, "Expect ';' after 'break'.");
+    match(TOKEN_SEMICOLON);
     for (int i = current->localCount - 1;
          i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
          i--)
@@ -1557,7 +1568,8 @@ static void importStatement()
     if (match(TOKEN_TEMPLATE_STRING))
     {
         templateString(true);
-        consume(TOKEN_SEMICOLON, "Expect ';' after import");
+        // consume(TOKEN_SEMICOLON, "Expect ';' after import");
+        match(TOKEN_SEMICOLON);
         emitByte(OP_IMPORT);
     }
 }

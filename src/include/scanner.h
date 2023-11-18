@@ -35,6 +35,7 @@ typedef enum
     TOKEN_BANG_EQUAL,
     TOKEN_EQUAL,
     TOKEN_EQUAL_EQUAL,
+    TOKEN_ARROW,
     TOKEN_GREATER,
     TOKEN_GREATER_EQUAL,
     TOKEN_LESS,
@@ -138,6 +139,7 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_ERROR] = "ERROR",
     [TOKEN_CONTINUE] = "CONTINUE",
     [TOKEN_BREAK] = "BREAK",
+    [TOKEN_ARROW] = "ARROW",
     [TOKEN_EOF] = "EOF"};
 
 typedef struct

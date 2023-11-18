@@ -120,7 +120,7 @@ class RequestType{
     toStr(){
         return this.strVal;
     }
-    equals(other){  
+    eq(other){  
         switch(type(other)){
             case "int" {
                 return this.val == other;

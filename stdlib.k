@@ -6,28 +6,27 @@ class ListNode {
     this.next = null;
     this.previous = null;
   }
-
 }
-
+#TODO FIX ITERATOR!!!!
 class Iterable{
   iterator(){
     class Iterator{
       init(x){
-        this.i = 0;
+        this.i = -1;
         this.stuff = x;
       }
       hasNext(){
-        return this.i < this.stuff.size();
+        return (this.i + 1) < this.stuff.size()
       }
       next(){
-        this.i = this.i + 1;
-        if ((this.i) >= this.stuff.size()){
-          return null;
+        if (!this.hasNext()){
+          print_error("Iterator has no next element")
         }
-        return this.stuff.get(this.i);
+        this.i = this.i + 1;
+        return this.stuff.getI(this.i);
       }
       get(){
-        return this.stuff.get(this.i);
+        return this.stuff.getI(this.i);
       }
       toStr(){
         var ret = StringBuilder("{ \"i\": ");
@@ -37,6 +36,12 @@ class Iterable{
 
     }
     return Iterator(this);
+  }
+}
+
+class Collection <Iterable> {
+  init(){
+    print_error("Cannot instantiate abstract class Collection");
   }
 }
 
@@ -157,6 +162,10 @@ class LinkedList <Iterable> {
     }
     return null;
   }
+  
+  getI(i){
+    return this.get(i);
+  }
 
   # Return the length of the list. The length is tracked as the list
   # is appended to, so this is an O(1) operation.
@@ -197,7 +206,9 @@ class LinkedList <Iterable> {
   }
 }
 
-## Helper functions for working with lists.
+~ 
+Helper functions for working with lists.
+~
 class Arrays{
   mergeSort(arr){
     if(len(arr) <= 1){
@@ -269,7 +280,11 @@ class Arrays{
   }
 }
 
-var PI = 3.14;
+class Math{
+  PI = 3.14;  
+  e = 2.71828;
+}
+
 fn max(a, b){
   if (a > b){
     return a;
@@ -291,12 +306,19 @@ fn foreach(iterable, forFunc){
     print_error("foreach(iterable, forFunc) requires a function as its second argument" );
     return;
   }
-    for(var i = iterable.iterator();i.hasNext();i.next()){
-      var ret = forFunc(i.get());
-      if (ret != null && !ret){
-        break;
-      }
-    }
+  var iter = iterable.iterator();
+  while(iter.hasNext()){
+    var ret = forFunc(iter.next());
+    if (ret != null && !ret){
+      break;
+    } 
+  }
+    # for(var i = iterable.iterator();i.hasNext();i.next()){
+    #   var ret = forFunc(i.get());
+    #   if (ret != null && !ret){
+    #     break;
+    #   }
+    # }
 }
 
 ## A map implemented as a hash table with separate chaining.
@@ -309,6 +331,13 @@ class MapEntry{
   toStr(){
     return this.key + ":" + this.value;
   }
+  lt(other){
+    return this.value < other.value
+  }
+  gt(other){
+    return this.value > other.value
+  }
+
 }
 
 fn hashKey(key, capacity){
@@ -316,14 +345,19 @@ fn hashKey(key, capacity){
   return (ret % capacity);
 }
 
-class Map{
+class Map <Iterable>{
   INITIAL_CAPACITY = 32;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
   init(){
     this.capacity = Map.INITIAL_CAPACITY;
+    this.keys = Set();
+    this.entries = Set();
     this.entries = [this.capacity]{null};
     this._size = 0;
+  }
+  getI(i){
+    return this.get(this.keys.getI(i));
   }
   get(key){
     var hash = hashKey(key, this.capacity);
@@ -331,7 +365,7 @@ class Map{
     if (entryList == null){
       return null;
     }
-    var ret = entryList.findFirst(fn (other){return key == other.key;});
+    var ret = entryList.findFirst(fn (other) => key == other.key);
     
     if (ret != null){
       return ret.value;
@@ -349,7 +383,6 @@ class Map{
   put(key, value){
     var hash = hashKey(key, this.capacity);
     var entryList = this.entries[hash];
-    var inserted = false;
     if(entryList == null){
       var entry = LinkedList();
       entry.append(MapEntry(key, value, null));
@@ -366,12 +399,25 @@ class Map{
       entryList.append(MapEntry(key, value, null));
     }
     this._size = this._size + 1; 
-
+    this.keys.add(key); 
 
     if (((this._size) / this.capacity) >= Map.MAX_LOAD_FACTOR){
       this.resize();
     }
     return value;
+  }
+  remove(key){
+    var hash = hashKey(key, this.capacity);
+    var entryList = this.entries[hash];
+    if(entryList == null){
+      return null;
+    }
+    var ret = entryList.removeIf(fn (other){return key == other.key;});
+    if (ret != null){
+      this._size = this._size - 1;
+      this.keys.remove(key);
+    }
+    return ret;
   }
   resize(){
     var oldValues = this.entries;
@@ -445,8 +491,6 @@ class Map{
   }
 }
 
-
-
 class Set <Iterable>{
   INITIAL_CAPACITY = 16;
   GROW_FACTOR = 2;
@@ -491,7 +535,7 @@ class Set <Iterable>{
     return value;
   }
 
-  get(i){
+  getI(i){
     if (i >= this._size || i < 0){
       print_error("Index out of bounds");
       return null;
@@ -599,7 +643,7 @@ class Set <Iterable>{
 }
 
 class ArrayList <Iterable> {
-  INITIAL_CAPACITY = 8;
+  INITIAL_CAPACITY = 32;
   init(){
     this.capacity = ArrayList.INITIAL_CAPACITY;
     this._size = 0;
@@ -612,6 +656,14 @@ class ArrayList <Iterable> {
       return null;
     }
     return this.entries[i];
+  }
+
+  getLast(){
+    if (this._size == 0){
+      # print_error("Cannot get last element of empty list");
+      return null;
+    }
+    return this.entries[this._size - 1];
   }
 
   set(i, value){
@@ -662,9 +714,8 @@ class ArrayList <Iterable> {
     while (i < this._size){
       if (f(this.entries[i])){
         this.remove(i);
-      } else {
-        i = i + 1;
-      }
+      } 
+      i += 1; 
     }
     return this;
   }
@@ -714,7 +765,10 @@ class ArrayList <Iterable> {
     var ret = ArrayList();
     ret.capacity = max(len(arr) * 2, ArrayList.INITIAL_CAPACITY);
     ret._size = len(arr);
-    ret.entries = arr;
+    ret.entries = [ret.capacity];
+    for (var i = 0; i < len(arr); i+=1){
+      ret.entries[i] = arr[i];
+    }
     return ret;
   }
 
@@ -746,13 +800,14 @@ class ArrayList <Iterable> {
     for(var i = 0; i < len(res); i+=1){
       this.entries[i] = res[i];
     }
+    return this;
   }
 
   toStr(){
-    return str(this.entries[:this._size]);
+    return this.entries[:this._size];
   }
 
-  equals(other){
+  eq(other){
     if (type(other) != "object" || !instanceof(other, ArrayList)){
       return false;
     }
@@ -767,6 +822,15 @@ class ArrayList <Iterable> {
       }
     }
     return true;
+  }
+
+  contains(obj){
+    for (var i = 0; i < this._size; i+=1){
+      if (this.entries[i] == obj){
+        return true;
+      }
+    }
+    return false;
   }
 }
 
@@ -810,7 +874,6 @@ class Strings{
     }
     return false;
   }
-
   findFirst(str, substr){
     if (len(substr) > len(str)){
       return -1;
@@ -857,7 +920,6 @@ class Strings{
     }
     return ret.toArray();
   }
-
   split(str, delim){
     var ret = ArrayList();
     var strLen = len(str);
@@ -925,3 +987,5 @@ class Strings{
     return string[:end+1];
   }
 }
+
+

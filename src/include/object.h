@@ -109,6 +109,8 @@ typedef struct ObjClass
     Value initializer;
     Value toStr;
     Value equals;
+    Value greaterThan;
+    Value lessThan;
     struct ObjClass *superclass;
     Table methods;
     Table staticVars;
