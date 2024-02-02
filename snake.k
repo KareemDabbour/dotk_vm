@@ -3,7 +3,8 @@ import "file.k"
 
 # var rows = 30;
 var size = 30;
-var line = " " + join([size]{"---"}, "") + " ";
+var line = " " + ("".join([size]{"---"})) + " ";
+var highscoresFile = "snake_HS.csv";
 
 class Field{
     init(size){
@@ -36,7 +37,6 @@ class Field{
     }
     
     getEntityPos(){
-
         return this.entityPos;
     }
 
@@ -57,7 +57,7 @@ class Field{
 
     toStr(){
         this.clearBoard();
-        for (var i = 0; i < this.snakeCoords.size(); i += 1){
+        for (var i = 0; i < len(this.snakeCoords); i += 1){
             var coord = this.snakeCoords.get(i);
             this.board[coord[0]][coord[1]] = 1;
         }
@@ -132,7 +132,7 @@ class Snake {
 
     isAlive(){
         var head = this.coords.getLast();
-        for (var i = 0; i < this.coords.size() - 1; i += 1){
+        for (var i = 0; i < len(this.coords) - 1; i += 1){
             if (head == this.coords.get(i)){
                 return false;
             }
@@ -159,7 +159,7 @@ class Snake {
 
         newHead = this.wrap(newHead);
         this.coords.add(newHead);
-        # print "SNAKE: " + this.coords  + " SIZE: " + this.coords.size();
+        # print "SNAKE: " + this.coords  + " SIZE: " + len(this.coords);
         this.coords.remove(0);
         this.field.snakeCoords = this.coords;
 
@@ -282,4 +282,51 @@ if (g == "QUIT"){
     print "YOU DIED";
 }
 
-print "\nCONGRAULATIONS! YOU SCORED " + s.score + " POINTS!";
+print "\nYOU SCORED " + s.score + " POINTS!";
+
+var hs = File(highscoresFile, F_RW | F_CR, null);
+
+var scores = hs.readAll().trim()
+
+var lines = scores.split("\n");
+
+var m = Map()
+
+foreach(ArrayList.of(lines), fn(it){
+    var line = it.trim();
+    var parts = line.split(",");
+    if (len(parts) == 2) {
+        m.put(parts[0], int(parts[1]));
+    }
+});
+var oldScore = m.getOrDefault(s.name, 0)
+if (oldScore < s.score) {
+    m.put(s.name, s.score);
+    print "CONGRAULATIONS "+ s.name +"! YOU GOT NEW HIGH SCORE!";
+    print "OLD: " + oldScore + " NEW: " + s.score;
+}
+
+m.sortByValue(SortOrder.DESC);
+print line;
+print "HIGH SCORES: (TOP 3)";
+var iterator = m.entrySet.iterator()
+
+while(iterator.hasNext() && iterator.i <= 1){
+    var entry = iterator.next();
+    print entry.key + ": " + entry.value;
+}
+
+print line;
+
+hs.resetCursor();
+
+
+
+foreach(m.entrySet, fn(it){
+    hs.write(it.key + "," + it.value + "\n")
+})
+print "SCORE SAVED!";
+
+
+
+hs.close();

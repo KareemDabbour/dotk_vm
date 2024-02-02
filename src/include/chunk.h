@@ -65,8 +65,7 @@ typedef struct
     int line;
     int col;
     char *file;
-    char *lineStart;
-    int lineLen;
+    const char *lineStart;
 } Position;
 
 typedef struct
@@ -81,7 +80,7 @@ typedef struct
 } Chunk;
 
 void initChunk(Chunk *chunk);
-void writeChunk(Chunk *chunk, uint8_t byte, int line, int col, char *file);
+void writeChunk(Chunk *chunk, uint8_t byte, int line, int col, char *file, const char *lineStart);
 int addConst(Chunk *chunk, Value value);
 // int writeConst(Chunk *chunk, Value value, int line);
 Position getPos(Chunk *chunk, int inst);

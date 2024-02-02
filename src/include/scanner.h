@@ -15,6 +15,7 @@ typedef enum
     TOKEN_SEMICOLON,
     TOKEN_PERCENT,
     TOKEN_AT,
+    TOKEN_QUESTION,
     // One or two character tokens.
     TOKEN_COLON,
     TOKEN_COLON_AT,
@@ -86,6 +87,7 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_COMMA] = "COMMA",
     [TOKEN_DOT] = "DOT",
     [TOKEN_AT] = "@",
+    [TOKEN_QUESTION] = "?",
     [TOKEN_IMPORT] = "IMPORT",
     [TOKEN_COLON] = "COLON",
     [TOKEN_COLON_AT] = "COLON_AT",
@@ -146,6 +148,8 @@ typedef struct
 {
     TokenType type;
     const char *start;
+    // int startOffset;
+    // const char *lineStart;
     int len;
     int line;
     int col;

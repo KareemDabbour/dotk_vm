@@ -9,6 +9,9 @@
 			"include": "#ctrl-statements"
 		},
 		{
+			"include": "#class"
+		},
+		{
 			"include": "#comments"
 		},
 		{
@@ -25,106 +28,135 @@
 		},
 		{
 			"include": "#strings"
+		},
+		{
+			"include": "#rawStrings"
 		}
 	],
 	"repository": {
-		"ctrl-statements":{
-			"patterns":[{
-				"name":"keyword.control.dotk",
-                "match":"\\b(if|else|var|func|class|init|return|while|break|continue|for)\\b"
-			}]
+		"ctrl-statements": {
+			"patterns": [
+				{
+					"name": "keyword.control",
+					"match": "\\b(if|else|return|while|break|continue|for|import|var|fn|class|_get_|_set_|_size_|_hash_|toStr|_lt_|_gt_|_eq_|init)\\b"
+				}
+			]
 		},
-		"numbers":{
-			"patterns":[{
-                "match":"(-?[0-9][0-9\\.]*)",	
-				"name":"constant.numeric.dotk"
-			}]
+		"numbers": {
+			"patterns": [
+				{
+					"match": "(-?[0-9][0-9\\.]*)",
+					"name": "constant.numeric.dotk"
+				}
+			]
 		},
-		"variables":{
-			"patterns":[{
-                "match":"([a-zA-Z]+_*)+",	
-				"name":"variable.name.dotk"
-			}]
+		"variables": {
+			"patterns": [
+				{
+					"match": "([a-zA-Z]+_*)+",
+					"name": "variable.name.dotk"
+				}
+			]
 		},
-		"class":{
-			"patterns": [{
-				"name":"entity.name.class",
-				"match": "([A-Z]+[a-zA-Z]*_*)+"
-			}]
+		"class": {
+			"patterns": [
+				{
+					"name": "entity.name.class",
+					"match": "([A-Z]+[a-zA-Z]*_*)+"
+				}
+			]
 		},
 		"keywords": {
-			"patterns": [{
-				"name": "support.constant",
-				"match": "\\b(true|false|null)\\b"
-			}]
+			"patterns": [
+				{
+					"name": "support.constant",
+					"match": "\\b(true|false|null|bool|int|str|list|float)\\b"
+				}
+			]
 		},
 		"expression": {
 			"patterns": [
-				{"include": "#keywords"},
-				{"include": "#numbers"},
-				{"include": "#strings"},
-				{"include": "#paren-expression"}
+				{
+					"include": "#keywords"
+				},
+				{
+					"include": "#numbers"
+				},
+				{
+					"include": "#strings"
+				},
+				{
+					"include": "rawStrings"
+				},
+				{
+					"include": "#paren-expression"
+				}
 			]
 		},
-		"paren-expression":{
-			"patterns":[
+		"paren-expression": {
+			"patterns": [
 				{
-					"captures":{
-						"1":{
+					"captures": {
+						"1": {
 							"name": "support.function.dotk"
 						}
 					},
 					"match": "\\b(\\w+)(?:\\s+([-a-zA-Z0-9_]+))?\\s*(\\()",
-					"name":"punctuation.definition.parameters.dotk",
-					"patterns": [{"include": "#expression"}]
+					"name": "punctuation.definition.parameters.dotk",
+					"patterns": [
+						{
+							"include": "#expression"
+						}
+					]
 				}
 			]
 		},
 		"comments": {
 			"patterns": [
 				{
-				"begin": "\\~",
-				"beginCaptures": {
-					"0":{
-						"name": "punctuation.definition.comment.k"
-					}
-				},
-				"end": "\\~",
-				"name": "comment.block.dotk"
+					"begin": "\\~",
+					"beginCaptures": {
+						"0": {
+							"name": "punctuation.definition.comment.k"
+						}
+					},
+					"end": "\\~",
+					"name": "comment.block.dotk"
 				},
 				{
 					"captures": {
-					"0":{
-						"name":"punctuation.definition.comment.k"
+						"0": {
+							"name": "punctuation.definition.comment.k"
 						}
 					},
-			
-				"match": "\\~\\~",
-				"name": "comment.block.empty.k"
-			},{
-				"include": "#comments-inline"
-			}
-		]},
-		"comments-inline":{
-			"patterns":[
+					"match": "\\~\\~",
+					"name": "comment.block.empty.k"
+				},
+				{
+					"include": "#comments-inline"
+				}
+			]
+		},
+		"comments-inline": {
+			"patterns": [
 				{
 					"begin": "#",
 					"beginCaptures": {
-						"0":{
+						"0": {
 							"name": "punctuation.definition.comment.k"
 						}
 					},
 					"end": "\\n",
 					"name": "comment.inline.dotk"
+				},
+				{
+					"captures": {
+						"0": {
+							"name": "punctuation.definition.comment.k"
+						}
 					},
-					{
-						"captures": {
-						"0":{
-							"name":"punctuation.definition.comment.k"
-							}
-						},
-						"match": "\\#\\n",
-				"name": "comment.inline.empty.k"
+					"match": "\\#\\n",
+					"name": "comment.inline.empty.k"
 				}
 			]
 		},
@@ -139,19 +171,30 @@
 				}
 			]
 		},
-		"operators":{
+		"rawStrings": {
+			"name": "string.quoted.double.dotk",
+			"begin": "`",
+			"end": "`",
 			"patterns": [
 				{
-					"match": "!=|==|<=|>=|<|>",
-					"name":"keyword.operator.comparison.dotk"
+					"name": "constant.character.escape.dotk",
+					"match": "\\\\."
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{
+					"match": "!=|==|<=|>=|<|>|=>",
+					"name": "keyword.operator.comparison.dotk"
 				},
 				{
-					"match": "&&|\\|\\|",
-					"name":"keyword.operator.logical.dotk"
+					"match": "&&|\\|\\||!|&|\\|",
+					"name": "keyword.operator.logical.dotk"
 				},
 				{
 					"match": "\\+|-|/|//|\\*|%",
-					"name":"keyword.operator.dotk"
+					"name": "keyword.operator.dotk"
 				}
 			]
 		}

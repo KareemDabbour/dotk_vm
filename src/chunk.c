@@ -14,7 +14,7 @@ void initChunk(Chunk *chunk)
     initValueArray(&chunk->constants);
 }
 
-void writeChunk(Chunk *chunk, uint8_t byte, int line, int col, char *file)
+void writeChunk(Chunk *chunk, uint8_t byte, int line, int col, char *file, const char *lineStart)
 {
     if (chunk->capacity < chunk->size + 1)
     {
@@ -38,6 +38,7 @@ void writeChunk(Chunk *chunk, uint8_t byte, int line, int col, char *file)
     Position *position = &chunk->positions[chunk->posCount++];
     position->offset = chunk->size - 1;
     position->line = line;
+    position->lineStart = lineStart;
     position->col = col;
     position->file = file;
 }
@@ -66,24 +67,6 @@ int addConst(Chunk *chunk, Value value)
     pop(value);
     return chunk->constants.size - 1;
 }
-
-// int writeConst(Chunk *chunk, Value value, int line)
-// {
-//     int index = addConst(chunk, value);
-//     if (index < 256)
-//     {
-//         writeChunk(chunk, OP_CONSTANT, line);
-//         writeChunk(chunk, (uint8_t)index, line);
-//     }
-//     else
-//     {
-//         writeChunk(chunk, OP_CONSTANT_LONG, line);
-//         writeChunk(chunk, (uint8_t)(index & 0xff), line);
-//         writeChunk(chunk, (uint8_t)((index >> 8) & 0xff), line);
-//         writeChunk(chunk, (uint8_t)((index >> 16) & 0xff), line);
-//     }
-//     return index;
-// }
 
 void freeChunk(Chunk *chunk)
 {

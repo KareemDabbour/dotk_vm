@@ -133,5 +133,9 @@ class File{
 
 # seekFile(fd: fileDescriptor, offset: int, whence: int): void: Moves the file pointer to a specified location.
 }
-import "file.k"
-var s = File("p22", F_CR |F_RW, DEFAULT_PERMESSIONS)
+
+fn with(file, f){
+    var ret = f(file)
+    file.close()
+    return ret
+}

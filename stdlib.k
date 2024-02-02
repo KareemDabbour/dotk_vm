@@ -1,4 +1,3 @@
-import "StringBuilder.k";
 ## A simple linked list implementation.
 class ListNode {
   init(value) {
@@ -6,8 +5,33 @@ class ListNode {
     this.next = null;
     this.previous = null;
   }
+
+  _lt_(other){
+    return this.value < other.value
+  }
+  _gt_(other){
+    return this.value > other.value
+  }
+  _eq_(other){
+    if(type(other) != "object" || !instanceof(other, ListNode)){
+      return false;
+    }
+    return this.value == other.value
+  }
+  toStr(){
+    return this.value;
+  }
 }
-#TODO FIX ITERATOR!!!!
+
+class SortOrder{
+  ASC = "asc";
+  DESC = "desc";
+
+  init(){
+    print_error("Cannot instantiate abstract class SortOrder");
+  }
+}
+
 class Iterable{
   iterator(){
     class Iterator{
@@ -16,17 +40,17 @@ class Iterable{
         this.stuff = x;
       }
       hasNext(){
-        return (this.i + 1) < this.stuff.size()
+        return (this.i + 1) < len(this.stuff)
       }
       next(){
         if (!this.hasNext()){
           print_error("Iterator has no next element")
         }
-        this.i = this.i + 1;
-        return this.stuff.getI(this.i);
+        this.i += 1;
+        return this.stuff[this.i];
       }
       get(){
-        return this.stuff.getI(this.i);
+        return this.stuff[this.i];
       }
       toStr(){
         var ret = StringBuilder("{ \"i\": ");
@@ -36,6 +60,63 @@ class Iterable{
 
     }
     return Iterator(this);
+  }
+  foreach(f){
+    for (var i = 0; i < len(this); i+=1){
+      var ret = f(this[i])
+      if (ret != null && ret){
+        return ret;
+      }
+    }
+  }
+  enumerate(f){
+    for (var i = 0; i < len(this); i+=1){
+      var ret = f(i, this[i])
+      if (ret != null && ret){
+        return ret;
+      }
+    }
+  }
+  map(f){
+    for (var i = 0; i < len(this); i+=1){
+      this[i] = f(this[i]);
+    }
+    return this;
+  }
+  reduce(reduceFn, initialVal){
+    var ret = initialVal;
+    this.foreach(fn (x){
+      ret = reduceFn(ret, x);
+    });
+    return ret;
+  }
+  max(){
+    return Arrays.max(this);
+  }
+  min(){
+    return Arrays.min(this);
+  }
+  _eq_(other){
+    if(other == null){
+      return false;
+    }
+    if (type(other) != "list" && (type(other) == "object" && !instanceof(other, Iterable))){
+    # if the other object is not an iterable or a list, then it is not equal to this iterable
+    
+      return false;
+    }
+
+    if (len(other) != len(this)){
+      print "not equal length" + len(other) + " " + len(this);
+      return false;
+    }
+
+    for (var i = 0; i < len(this); i+=1){
+      if (this[i] != other[i]){
+        return false;
+      }
+    }
+    return true;
   }
 }
 
@@ -51,6 +132,7 @@ class LinkedList <Iterable> {
     this.head = null;
     this.tail = null;
     this._length = 0;
+    this.get = this._get_;
   }
 
   # Append value to the end of the list.
@@ -64,7 +146,23 @@ class LinkedList <Iterable> {
       this.tail.next = node;
       this.tail = node;
     }
-    this._length = this._length + 1;
+    # this._length = this._length + 1;
+    this._length += 1;
+    return this;
+  }
+  # add to the beginning of the list
+  prepend(value){
+    var node = ListNode(value);
+    if (this.head == null) {
+      this.head = node;
+      this.tail = node;
+    } else {
+      node.next = this.head;
+      this.head.previous = node;
+      this.head = node;
+    }
+    # this._length = this._length + 1;
+    this._length += 1;
     return this;
   }
 
@@ -145,12 +243,13 @@ class LinkedList <Iterable> {
     } else {
       this.tail = previous;
     }
-    this._length = this._length - 1;
+    # this._length = this._length - 1;
+    this._length -= 1;
   }
 
   # Get the nth (0-based) element of the list. Because it's a linked
   # list (Lox doesn't have arrays), this is an O(n) operation.
-  get(n) {
+  _get_(n){
     var node = this.head;
     var i = 0;
     while (node != null) {
@@ -162,14 +261,10 @@ class LinkedList <Iterable> {
     }
     return null;
   }
-  
-  getI(i){
-    return this.get(i);
-  }
 
   # Return the length of the list. The length is tracked as the list
   # is appended to, so this is an O(1) operation.
-  size() {
+  _size_() {
     return this._length;
   }
 
@@ -204,19 +299,26 @@ class LinkedList <Iterable> {
     ret.append("]");
     return ret.toStr();
   }
+  of(arr){
+    var ret = LinkedList();
+    for (var i = 0; i < len(arr); i+=1){
+      ret.append(arr[i]);
+    }
+    return ret;
+  }
 }
 
-~ 
-Helper functions for working with lists.
-~
+# ~ 
+# Helper functions for working with lists.
+# ~
 class Arrays{
   mergeSort(arr){
     if(len(arr) <= 1){
         return arr;
     }
     var mid = len(arr) // 2;
-    var left = arr[:mid];    
-    var right = arr[mid:];
+    var left =arr[:mid]# arr[:len(arr) // 2];    
+    var right = arr[mid:]#len(arr) // 2:];
     this.mergeSort(left);
     this.mergeSort(right);
     this.merge(arr, left, right);
@@ -269,20 +371,182 @@ class Arrays{
     }
     return ret;
   }
-
-  map(arr, f){
-    for (var i = 0; i < len(arr); i+=1){
-      arr[i] = f(arr[i]);
+  ranged(start, end, step){
+    if (step == null){
+      step = 1;
     }
+    var ret = ArrayList();
+    if (step == 0){
+      print_error("Error: step cannot be 0");
+      return ret;
+    }
+
+    if (start > end){
+      for (var i = start; i > end; i-= Math.abs(step)){
+        ret.add(i);
+      }
+    }else{
+      for (var i = start; i < end; i+= Math.abs(step)){
+        ret.add(i);
+      }
+    }
+    return ret;
   }
-  reduce(arr, f){
-    return ArrayList.of(arr).removeIf(f).toArray();
+  fill(size, value){
+    var ret = ArrayList();
+    for (var i = 0; i < size; i+=1){
+      ret.add(value);
+    }
+    return ret;
+  }
+  removeIf(arr, f){
+    return ArrayList.of(arr).removeAll(f).toArray();
+  }
+  max(arr){
+    if (len(arr) == 0){
+      return null;
+    }
+    var ret = arr[0];
+    for (var i = 1; i < len(arr); i+=1){
+      if (arr[i] > ret){
+        ret = arr[i];
+      }
+    }
+    return ret;
+  }
+  min(arr){
+    if (len(arr) == 0){
+      return null;
+    }
+    var ret = arr[0];
+    for (var i = 1; i < len(arr); i+=1){
+      if (arr[i] < ret){
+        ret = arr[i];
+      }
+    }
+    return ret;
+  
+  }
+  contains(arr, x){
+    for (var i = 0; i < len(arr); i+=1){
+      if (arr[i] == x){
+        return true;
+      }
+    }
+    return false;
   }
 }
 
+fn reduce(arr, reduceFn, initialVal){
+  var ret = initialVal;
+  foreach(arr, fn (x){
+    ret = reduceFn(ret, x);
+  });
+  return ret;
+}
+fn sum(arr){
+  var ret = 0;
+  for (var i = 0; i < len(arr); i+=1){
+    ret += arr[i];
+  }
+  return ret;
+}
+fn foreach_iter(iterable, forFunc){
+  print("Warning -- foreach_iter(iterable, forFunc) is deprecated. Use foreach(Collection<Iterable>, forFunc) instead")
+  if(!instanceof(iterable, Iterable)){
+    print_error("foreach(iterable, forFunc) requires an Iterable as its first argument");
+    return;
+  }
+  if (type(forFunc) != "function"){
+    print_error("foreach(iterable, forFunc) requires a function as its second argument" );
+    return;
+  }
+  var iter = iterable.iterator();
+  while(iter.hasNext()){
+    var ret = forFunc(iter.next());
+    if (ret != null && !ret){
+      return ret;
+    } 
+  }
+}
+fn foreach(arr, f){
+  for (var i = 0; i < len(arr); i+=1){
+    var ret = f(arr[i]);
+    if (ret != null && ret){
+      return ret;
+    }
+  }
+}
+fn enumerate(arr, f){
+  for (var i = 0; i < len(arr); i+=1){
+    var ret = f(i, arr[i]);
+    if (ret != null && ret){
+      return ret;
+    }
+  }
+}
+fn foreachRevese(arr, f){
+  for (var i = len(arr) - 1; i >= 0; i-=1){
+    var ret = f(arr[i]);
+    if (ret != null && ret){
+      return ret;
+    }
+  }
+}
+fn map(arr, f){
+  var ret = [len(arr)]
+  for (var i = 0; i < len(arr); i+=1){
+    ret[i] = f(arr[i]);
+  }
+  return ret;
+}
+
 class Math{
+  init(){print_error("Cannot instantiate abstract class Math")}
   PI = 3.14;  
   e = 2.71828;
+  INF = 1.0/0.0;
+  NEG_INF = -1.0/0.0;
+  floor(num){
+    if (num < 0){
+      return num // 1 - 1;
+    }
+    return num // 1;
+  }
+  ceil(num){
+    if (num < 0 || num == num // 1){
+      return num // 1;
+    }
+    return num//1 + 1;
+  }
+  sqrt(num){
+    return num >= 0 ? num ** 0.5 : 0/0
+  }
+  gcd(a, b){
+    if (a == 0){
+      return b;
+    }
+    return this.gcd(b % a, a);
+  }
+  lcm(a, b){
+    return (a * b) // this.gcd(a, b);
+  }
+  lcmAll(arr){
+    var ret = 1;
+    for (var i = 0; i < len(arr); i+=1){
+      ret = this.lcm(ret, arr[i]);
+    }
+    return ret;
+  }
+  abs(num){
+    return num < 0 ? -num : num;
+  }
+  sin(theta){
+    # Need to estimate sin(theta)
+
+    # sin(theta) = theta - theta^3/3! + theta^5/5! - theta^7/7! + ...
+    return theta - (theta**3)/6 + (theta**5)/120 - (theta**7)/5040
+  }
 }
 
 fn max(a, b){
@@ -297,72 +561,48 @@ fn min(a, b){
   }
   return b;
 }
-fn foreach(iterable, forFunc){
-  if(!instanceof(iterable, Iterable)){
-    print_error("foreach(iterable, forFunc) requires an Iterable as its first argument");
-    return;
-  }
-  if (type(forFunc) != "function"){
-    print_error("foreach(iterable, forFunc) requires a function as its second argument" );
-    return;
-  }
-  var iter = iterable.iterator();
-  while(iter.hasNext()){
-    var ret = forFunc(iter.next());
-    if (ret != null && !ret){
-      break;
-    } 
-  }
-    # for(var i = iterable.iterator();i.hasNext();i.next()){
-    #   var ret = forFunc(i.get());
-    #   if (ret != null && !ret){
-    #     break;
-    #   }
-    # }
-}
 
 ## A map implemented as a hash table with separate chaining.
 
 class MapEntry{
-  init(key, value, next){
+  init(key, value){
     this.key = key;
     this.value = value;
   }
   toStr(){
-    return this.key + ":" + this.value;
+    return "{}: {}".format(this.key, this.value);
   }
-  lt(other){
+  _lt_(other){
     return this.value < other.value
   }
-  gt(other){
+  _gt_(other){
     return this.value > other.value
   }
-
+  _eq_(other){
+    if(type(other) != "object" || !instanceof(other, MapEntry)){
+      return false;
+    }
+    return this.value == other.value && this.key == other.key
+  }
 }
 
-fn hashKey(key, capacity){
-  var ret = hashStr(key);
-  return (ret % capacity);
-}
-
-class Map <Iterable>{
-  INITIAL_CAPACITY = 32;
+class Map {
+  INITIAL_CAPACITY = 64;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
   init(){
     this.capacity = Map.INITIAL_CAPACITY;
-    this.keys = Set();
-    this.entries = Set();
+    this.entrySet = ArrayList();
     this.entries = [this.capacity]{null};
     this._size = 0;
+    this.resizes = 0;
+    this.get = this._get_;
+    this.put = this._set_;
   }
-  getI(i){
-    return this.get(this.keys.getI(i));
-  }
-  get(key){
-    var hash = hashKey(key, this.capacity);
-    var entryList = this.entries[hash];
-    if (entryList == null){
+  _get_(key){
+    var hashR = hash(key) % this.capacity;
+    var entryList = this.entries[hashR];
+    if (null == entryList){
       return null;
     }
     var ret = entryList.findFirst(fn (other) => key == other.key);
@@ -373,125 +613,185 @@ class Map <Iterable>{
     
     return null;
   }
-  getOrDefault(key, defaultValue){
-    var ret = this.get(key);
-    if (ret == null){
-      return defaultValue;
-    }
-    return ret;
-  }
-  put(key, value){
-    var hash = hashKey(key, this.capacity);
-    var entryList = this.entries[hash];
+  _set_(key, value){
+    var hashR = hash(key) % this.capacity;
+    var entryList = this.entries[hashR];
     if(entryList == null){
       var entry = LinkedList();
-      entry.append(MapEntry(key, value, null));
-      this.entries[hash] = entry;
+      entry.append(MapEntry(key, value));
+      this.entries[hashR] = entry;
     }else{
       var node = entryList.head;
       while(node != null){
         if (node.value.key == key){
+          var i = this.entrySet.indexOf(MapEntry(key, node.value.value))
+          this.entrySet.set(i, MapEntry(key, value));
           node.value.value = value;
           return value;
         }
         node = node.next;
       }
-      entryList.append(MapEntry(key, value, null));
+      entryList.append(MapEntry(key, value));
     }
-    this._size = this._size + 1; 
-    this.keys.add(key); 
+    # this._size = this._size + 1; 
+    this._size += 1; 
+    this.entrySet.add(MapEntry(key, value));
 
     if (((this._size) / this.capacity) >= Map.MAX_LOAD_FACTOR){
       this.resize();
     }
     return value;
   }
-  remove(key){
-    var hash = hashKey(key, this.capacity);
-    var entryList = this.entries[hash];
-    if(entryList == null){
-      return null;
-    }
-    var ret = entryList.removeIf(fn (other){return key == other.key;});
-    if (ret != null){
-      this._size = this._size - 1;
-      this.keys.remove(key);
+  getOrDefault(key, defaultValue){
+    var ret = this[key];
+    if (ret == null){
+      return  defaultValue;
     }
     return ret;
   }
-  resize(){
-    var oldValues = this.entries;
-    this.capacity = this.capacity * Map.GROW_FACTOR;
-    this.entries = [this.capacity];
-    this._size = 0;
-    for (var i = 0; i < len(oldValues); i+=1){
-      var node = oldValues[i];
-      while (node != null){
-        print node;
-        this.put(node.key, node.value);
-        node = node.next;
-      }
+  compute(key, computeFn){
+    var ret = this[key];
+    
+    ret = computeFn(key, ret);
+    this[key] = ret;
+    
+    return ret;
+  }
+  computeIfAbsent(key, computeFn){
+    var ret = this[key];
+    if (ret == null){
+      ret = computeFn(key);
+      this[key] = ret;
     }
+    return ret;
+  }
+  computeIfPresent(key, computeFn){
+    var ret = this[key];
+    if (ret != null){
+      ret = computeFn(key, ret);
+      this[key] = ret;
+    }
+    return ret;
+  }
+  containsKey(key){
+    return bool(foreach(this.entrySet, fn (entry){
+      if (entry.key == key){
+        return true;
+      }
+    }));
+  }
+  sortByValue(order){
+    if(order == SortOrder.ASC)
+      this.entrySet.sort();
+    else if(order == SortOrder.DESC)
+      this.entrySet.sortDesc();
+    return this;
+  }
+  remove(key){
+    var hashRes = hash(key) % this.capacity;
+    var entryList = this.entries[hashRes];
+    if(entryList == null){
+      return null;
+    }
+    var keyFn = fn (other) => key == other.key
+    var ret = entryList.removeIf(keyFn);
+    if (ret){
+      this._size -= 1;
+      this.entrySet.removeIf(keyFn);
+      return ret.value;
+    }
+    return null
+  }
+  resize(){
+    this.resizes += 1;
+    var oldValues = this.entries;
+    var oldAllValues = this.entrySet;
+    this.capacity *= Map.GROW_FACTOR;
+    this.entries = [this.capacity];
+    this.entrySet = ArrayList();
+    this._size = 0;
+
+    var map = this;
+    oldAllValues.foreach(fn (entry){
+      map[entry.key] = entry.value
+    });
   }
   of(entryList){
     if (len(entryList)%2 != 0){
         print_error("Cannot create map from odd number of key value pairs");
         return null;
     }
-
     var keys = entryList[:@2];
-    for (var i = 0; i < len(keys); i+=1){
-      if (type(keys[i]) != "string"){
-        keys[i] = str(keys[i]);
-      }
-    }
     var values = entryList[1:@2];
-
     var ret = this.ofSize(max(len(entryList) * 2, Map.INITIAL_CAPACITY));
     for (var i = 0; i < len(keys); i+=1){
-      ret.put(keys[i], values[i]);
+      ret[keys[i]] = values[i]
     }
     return ret;
   }
   ofSize(s){
     var ret = Map();
-    ret.capacity = s;
-    ret.entries = [s]{null};
+    ret.capacity = max(s*2, Map.INITIAL_CAPACITY);
+    ret.entries = [ret.capacity];
     return ret;
   }
   toStr(){
     var ret = StringBuilder("{");
-    # var ret = "Map:{ entries: [";
     if(this._size > 0){
-      var cap = this.capacity;
-      var appendEntry = fn (entry){
-        ret.append(entry.toStr()).append(", ");
-      };
-
-      for (var i = 0; i < cap; i+= 1){
-        # entryList = this.entries[i];
-        var entryList = this.entries[i];
-        if(entryList != null){
-          entryList.foreach(appendEntry);
-        }
-        
-      }
+      var s = ret;
+      this.entrySet.foreach( fn (entry){
+        s.append(entry.toStr()).append(", ")
+      });
       ret.pop();
     }
-    ret.append("}");
-    # ret += "], size: " + str(this._size) + ", capacity: " + str(this.capacity) + "}";
-    # return ret;    
+    ret.append("}");  
     return ret.toStr();    
   }
-  size(){
+  _size_(){
     return this._size;
   }
   isEmpty(){
     return this._size == 0;
   }
+  parseFromStr(s){
+    var ret = Map();
+    var string = trim(s);
+    if (string[0] != "{"){
+      print_error("Error: parseFromStr(string) requires a string that starts with a {");
+      return null;
+    }
+    if (string[-1] != "}"){
+      print_error("Error: parseFromStr(string) requires a string that ends with a }");
+      return null;
+    }
+    string = string[1:-2];
+    var arr = string.split(",");
+    for (var i = 0; i < len(arr); i+=1){
+      var entry = split(arr[i], ":");
+      if (len(entry) != 2){
+        print_error("Error: parseFromStr(string) requires a string that contains key value pairs separated by :");
+        return null;
+      }
+      var key = trim(entry[0]);
+      var value = trim(entry[1]);
+      var keySlice = 1:-2@1
+      if (key[0] != "\"" || key[-1] != "\""){
+        keySlice = 0:-1@1
+        # print_error("Error: parseFromStr(string) requires a string that contains keys surrounded by \"");
+        # return null;
+      }
+      # if (value[0] != "\"" || value[-1] != "\""){
+
+      #}
+      key = key[keySlice];
+      #value = value[1:len(value)-1];
+      ret.put(key, value);
+    }
+    return ret;
+  }
 }
 
-class Set <Iterable>{
+class Set <Iterable> {
   INITIAL_CAPACITY = 16;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
@@ -507,35 +807,32 @@ class Set <Iterable>{
       if(value == this)
         return this;
       else{
-        var set = this;
-        foreach(value, fn (x){set.add(x);});
+        var addToSet = fn (x, s) => fn(x) {s.add(x)}
+        foreach(value, addToSet(this));
       }
     }
 
-    if(this._size >= this.capacity * Set.MAX_LOAD_FACTOR){
+    if(this._size >= this.capacity * Set.MAX_LOAD_FACTOR)
       this.resize();
-    }
+    
 
-    var hash = hashKey(value, this.capacity);
-    var entryList = this.entries[hash];
+    var hashRes = hash(value) % this.capacity;
+    var entryList = this.entries[hashRes];
     if(entryList == null){
       var entry = LinkedList();
       entry.append(value);
-      this.entries[hash] = entry;
-      # print "needed new list for " + str(value);
-    }else if (entryList.contains(value)){
-      # print "already in";
+      this.entries[hashRes] = entry;
+    }else if (entryList.contains(value))
       return value;
-    }else{
-      # print "appended new value: " + str(value);
+    else
       entryList.append(value);
-    }
+
     this.allEntries[this._size] = value;
     this._size = this._size + 1;
     return value;
   }
 
-  getI(i){
+  _get_(i){
     if (i >= this._size || i < 0){
       print_error("Index out of bounds");
       return null;
@@ -543,7 +840,26 @@ class Set <Iterable>{
     return this.allEntries[i];
   }
 
-  size(){
+  sort(){
+    var res = this.allEntries[:this._size];
+    Arrays.mergeSort(res);
+    for(var i = 0; i < len(res); i+=1){
+      this.allEntries[i] = res[i];
+    }
+    return res;
+  }
+
+  sortDesc(){
+    var res = this.allEntries[:this._size];
+    Arrays.mergeSort(res);
+    var l = len(res)
+    for(var i = 0; i < l; i+=1){
+      this.allEntries[i] = res[l-i-1];
+    }
+    return res;
+  }
+
+  _size_(){
     return this._size;
   }
 
@@ -552,10 +868,8 @@ class Set <Iterable>{
     var oldAllValues = this.allEntries;
     var oldSize = this._size;
     this.allEntries = this.allEntries + [this.capacity];
-    # print "resizing from " + str(this.capacity) + " to " + str(this.capacity * Set.GROW_FACTOR);
     this.capacity = this.capacity * Set.GROW_FACTOR;
     this.entries = [this.capacity];
-    # this.allEntries = [this.capacity];
     this._size = 0;
 
     for (var i = 0; i < oldSize; i+=1){
@@ -583,23 +897,31 @@ class Set <Iterable>{
         return ret;
       }
     }
-    var hash = hashKey(value, this.capacity);
-    var entryList = this.entries[hash];
-    if(entryList == null){
+    var hashRes = hash(value) % this.capacity;
+    var entryList = this.entries[hashRes];
+    if(null == entryList){
       return false;
     }
     return entryList.contains(value);
   }
 
   remove(value){
-    var hash = hashKey(value, this.capacity);
-    var entryList = this.entries[hash];
+    var hashRes = hash(value) % this.capacity;
+    var entryList = this.entries[hashRes];
     if(entryList == null){
       return null;
     }
-    var ret = entryList.removeIf(fn (other){return value == other;});
+    var ret = entryList.removeIf(fn (other) => value == other);
     if (ret != null){
-      this._size = this._size - 1;
+      var temp = Arrays.removeIf(
+          this.allEntries[:this._size], 
+          fn (other) => value == other
+        );
+      for (var i = 0; i < len(temp); i+=1){
+        this.allEntries[i] = temp[i];
+      }
+      this._size -= 1
+      this.allEntries[this._size] = null
     }
     return ret;
   }
@@ -648,16 +970,37 @@ class ArrayList <Iterable> {
     this.capacity = ArrayList.INITIAL_CAPACITY;
     this._size = 0;
     this.entries = [this.capacity]; 
+    this.set = this._set_
+    this.get = this._get_
   }
-
-  get(i){
-    if (i >= this._size){
-      print_error("Index out of bounds");
+  _get_(i){
+    if (type(i) == "slice"){
+      return this.entries[:this._size][i];
+    }
+    if(type(i) != "int"){
+      print_error("Error: ArrayList.get(i) requires an integer as its argument but the following type was passed in: " + type(i));
       return null;
+    }
+    if (i >= this._size || i < -this._size){
+      print_error("Index out of bounds. Index: " + i + " Size: " + this._size);
+      return null;
+    }else if (i < 0 ){
+      return this.entries[this._size + i];
     }
     return this.entries[i];
   }
+  _set_(i, value){
+    if (i >= this._size){
+      print_error("Index out of bounds");
+      return null;
+    } else if(i < 0){
+      this.entries[this._size + i] = value;
+      return value;
+    }
 
+    this.entries[i] = value;
+    return value;
+  }
   getLast(){
     if (this._size == 0){
       # print_error("Cannot get last element of empty list");
@@ -667,12 +1010,7 @@ class ArrayList <Iterable> {
   }
 
   set(i, value){
-    if (i >= this._size){
-      print_error("Index out of bounds");
-      return null;
-    }
-    this.entries[i] = value;
-    return value;
+    return this._set_(i, value);
   }
 
   add(value){
@@ -680,7 +1018,7 @@ class ArrayList <Iterable> {
       this.resize();
     }
     this.entries[this._size] = value;
-    this._size = this._size + 1;
+    this._size += 1;
     return value;
   }
 
@@ -709,19 +1047,61 @@ class ArrayList <Iterable> {
     this._size = this._size + 1;
     return value;
   }
+
+  findFirst(f){
+    for (var i = 0; i < this._size; i+=1){
+      if (f(this.entries[i])){
+        return this.entries[i];
+      }
+    }
+    return null;
+  }
+
+  indexOf(value){
+    for (var i = 0; i < this._size; i+=1){
+      if (this.entries[i] == value){
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  findAll(f){
+    var ret = ArrayList();
+    for (var i = 0; i < this._size; i+=1){
+      if (f(this.entries[i])){
+        ret.add(this.entries[i]);
+      }
+    }
+    return ret;
+  }
+
   removeIf(f){
     var i = 0;
     while (i < this._size){
       if (f(this.entries[i])){
-        this.remove(i);
+        return this.remove(i);
       } 
       i += 1; 
     }
+    # return this;
+  }
+
+  removeAll(f){
+    var i = 0;
+    while (i < this._size){
+      if (f(this.entries[i])){
+        this.remove(i);
+      } else{
+        i += 1; 
+      }
+    }
     return this;
   }
+
   remove(i){
     if (i >= this._size){
-      print_error("Index out of bounds");
+      print_error("Index out of bounds, cannot remove element at index " + i + " from list of size " + this._size);
       return null;
     }
     var ret = this.entries[i];
@@ -729,8 +1109,21 @@ class ArrayList <Iterable> {
       this.entries[j] = this.entries[j+1];
     }
     this.entries[this._size - 1] = null;
-    this._size = this._size - 1;
+    this._size -= 1;
     return ret;
+  }
+
+  removeElem(e){
+    if (this._size == 0){
+      return null;
+    }
+    var i = 0;
+    while (i < this._size){
+      if (this.entries[i] == e){
+        return this.remove(i);
+      } 
+      i += 1; 
+    }
   }
 
   clear(){
@@ -758,10 +1151,6 @@ class ArrayList <Iterable> {
   }
 
   of(arr){
-    if(type(arr) != "list"){
-      print_error("ArrayList.of(arr) takes in an array");
-      return null;
-    }
     var ret = ArrayList();
     ret.capacity = max(len(arr) * 2, ArrayList.INITIAL_CAPACITY);
     ret._size = len(arr);
@@ -776,7 +1165,7 @@ class ArrayList <Iterable> {
     return this.entries[:this._size];
   }
 
-  size(){
+  _size_(){
     return this._size;
   }
 
@@ -803,25 +1192,18 @@ class ArrayList <Iterable> {
     return this;
   }
 
-  toStr(){
-    return this.entries[:this._size];
+  sortDesc(){
+    var res = this.entries[:this._size];
+    Arrays.mergeSort(res);
+    var l = len(res)
+    for(var i = 0; i < l; i+=1){
+      this.entries[i] = res[l-i-1];
+    }
+    return this;
   }
 
-  eq(other){
-    if (type(other) != "object" || !instanceof(other, ArrayList)){
-      return false;
-    }
-
-    if (other.size() != this._size){
-      return false;
-    }
-
-    for (var i = 0; i < this._size; i+=1){
-      if (this.entries[i] != other.get(i)){
-        return false;
-      }
-    }
-    return true;
+  toStr(){
+    return str(this.entries[:this._size]);
   }
 
   contains(obj){
@@ -832,160 +1214,198 @@ class ArrayList <Iterable> {
     }
     return false;
   }
+
+  reverse(){
+    var temp = [this._size];
+    for (var i = 0; i < this._size; i+=1){
+      temp[i] = this.entries[this._size - i - 1];
+    }
+    for (var i = 0; i < this._size; i+=1){
+      this.entries[i] = temp[i];
+    }
+    return this;
+  }
+
+  counts(){
+    var ret = Map();
+    for (var i = 0; i < this._size; i+=1){
+      var val = this.entries[i];
+      ret.compute(val, fn(k, v) => v == null ? 1 : v + 1);
+    }
+    return ret;
+  }
+
+  clone(){
+    return ArrayList.of(this)
+  }
+}
+
+class SortedLinkedList{
+  init(){
+    this.head = null;
+    this.tail = null;
+    this._length = 0;
+  }
+  # Append value to appropiate spot in list (sorted).
+  add(value) {
+    var node = ListNode(value);
+    if (this.head == null) {
+      this.head = node;
+      this.tail = node;
+    } else {
+      var current = this.head;
+      var previous = null;
+      while (current != null && current.value < value) {
+        previous = current;
+        current = current.next;
+      }
+      if (previous == null) {
+        node.next = this.head;
+        this.head.previous = node;
+        this.head = node;
+      } else if (current == null) {
+        previous.next = node;
+        node.previous = previous;
+        this.tail = node;
+      } else {
+        previous.next = node;
+        node.previous = previous;
+        node.next = current;
+        current.previous = node;
+      }
+    }
+    # this._length = this._length + 1;
+    this._length += 1;
+    return this;
+  }
+
+  isEmpty(){
+    return this._length == 0;
+  }
+  # add to the beginning of the list
+  prepend(value){
+    var node = ListNode(value);
+    if (this.head == null) {
+      this.head = node;
+      this.tail = node;
+    } else {
+      node.next = this.head;
+      this.head.previous = node;
+      this.head = node;
+    }
+    # this._length = this._length + 1;
+    this._length += 1;
+    return this;
+  }
+
+  # Pop the last value off the list && return it. Do nothing if
+  # list if empty;
+  pop() {
+    if (this.tail == null) {
+      return;
+    }
+    var node = this.tail;
+    var previous = node.previous;
+    this.tail = previous;
+    if (previous != null) {
+      previous.next = null;
+    } else {
+      this.head = null;
+    }
+    this._length = this._length - 1;
+    return node.value;
+  }
+
+  popFirst(){
+    if (this.head == null) {
+      return;
+    }
+    var node = this.head;
+    var next = node.next;
+    this.head = next;
+    if (next != null) {
+      next.previous = null;
+    } else {
+      this.tail = null;
+    }
+    this._length = this._length - 1;
+    return node.value;
+  }
+
+  map(f){
+    var node = this.head;
+    while (node != null){
+        node.value = f(node.value);
+        node = node.next;
+    }
+  }
+
+  # Call f(value) for each value in the list, from first value
+  # appended to last. If f returns a truthy value, stop iterating.
+  foreach(f) {
+    var node = this.head;
+    while (node != null) {
+      if (f(node.value)) {
+        return;
+      }
+      node = node.next;
+    }
+  }
+
+  findFirst(f){
+    var node = this.head;
+    while (node != null){
+        if (f(node.value)){
+            return node.value;
+        }
+        node = node.next;
+    }
+    return null;
+  }
+
 }
 
 class Strings{
-  WHITE_SPACE = Set.of(list(" \n\t\r"));
-  containsChar(str, c){
-    for (var i = 0; i < len(str); i+=1){
-      if (str[i] == c){
-        return true;
-      }
-    }
-    return false;
-  }
-  contains(str, substr){
-    if (len(substr) > len(str)){
+
+  WHITE_SPACE = Set.of(" \n\t\r");
+
+  startsWith(string, substr){
+    if (len(substr) > len(string)){
       return false;
     }
-    var strLen = len(str);
-    var substrLen = len(substr);
-    if(substrLen == 0){
-      return true;
-    }
-    if(substrLen == 1){
-      return this.containsChar(str, substr);
-    }
-    for (var i = 0; i < strLen; i+=1){
-      if (str[i] == substr[0]){
-        var match = true;
-        var j = 0;
-        while(j < substrLen){
-          if (i+j >= strLen || str[i+j] != substr[j]){
-            match = false;
-            break;
-          }
-          j+=1;
-        }
-        if (match){
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-  findFirst(str, substr){
-    if (len(substr) > len(str)){
-      return -1;
-    }
-    var strLen = len(str);
-    var substrLen = len(substr);
-    for (var i = 0; i < strLen; i+=1){
-      if (str[i] == substr[0]){
-        var match = true;
-        var j = 0;
-        while(j < substrLen){
-          if (i+j >= strLen || str[i+j] != substr[j]){
-            match = false;
-            break;
-          }
-          j+=1;
-        }
-        if (match){
-          return i;
-        }
-      }
-    }
-    return -1;
-  }
-  splitByChar(str, delim){
-    var ret = ArrayList();
-    var strLen = len(str);
-    var delimLen = len(delim);
-    if(delimLen > 1){
-      print_error("splitByChar(str, char) only accepts a single character delimiter");
-      return ret.toArray();
-    }
-    if (delimLen > strLen){
-      ret.add(str);
-    }else{
-      var start = 0;
-      for(var i = 0; i <strLen; i+=1){
-        if (str[i] == delim){
-          ret.add(str[start:i]);
-          start = i+1;
-        }
-      }
-      ret.add(str[start:]);
-    }
-    return ret.toArray();
-  }
-  split(str, delim){
-    var ret = ArrayList();
-    var strLen = len(str);
-    var delimLen = len(delim);
-    if(delimLen == 1){
-      return this.splitByChar(str, delim);
-    }
-    if (delimLen > strLen){
-      ret.add(str);
-    }else{
-      var start = 0;
-      for(var i = 0; i < strLen; i+=1){
-        if ( str[i:i + delimLen] == delim){
-          ret.add(str[start:i]);
-          start = i+delimLen;
-        }
-      }
-      ret.add(str[start:]);
-    }
-    return ret.toArray();
-  }
-  isWhitespace(string){
-    for (var i = 0; i < len(string); i+=1){
-      if (!this.WHITE_SPACE.contains(string[i])){
+    for (var i = 0; i < len(substr); i+=1){
+      if (string[i] != substr[i]){
         return false;
       }
     }
     return true;
   }
-  hasWhitespace(string){
-    if(type(string) != "string"){
-      print_error("hasWhitespace(string) requires a string as its argument");
+
+  endsWith(string, substr){
+    if (len(substr) > len(string)){
       return false;
     }
-    for (var i = 0; i < len(string); i+=1){
-      if (this.WHITE_SPACE.contains(string[i])){
-        return true;
+    for (var i = 0; i < len(substr); i+=1){
+      if (string[len(string) - len(substr) + i] != substr[i]){
+        return false;
       }
     }
-    return false;
+    return true;
   }
-  trim(string){
-    var start = 0;
-    var end = len(string) - 1;
-    while (start < len(string) && this.WHITE_SPACE.contains(string[start])){
-      start += 1;
-    }
-    while (end >= 0 && this.WHITE_SPACE.contains(string[end])){
-      end -= 1;
-    }
-    return string[start:end+1];
+
+  isWhitespace(char){
+    return Strings.WHITE_SPACE.contains(char);
   }
-  trimLeft(string){
-    var start = 0;
-    while (start < len(string) && this.WHITE_SPACE.contains(string[start])){
-      start += 1;
-    }
-    return string[start:];
+
+  isDigit(char){
+    return char >= "0" && char <= "9";
   }
-  trimRight(string){
-    var end = len(string) - 1;
-    while (end >= 0 && this.WHITE_SPACE.contains(string[end])){
-      end -= 1;
-    }
-    return string[:end+1];
+
+  isAlpha(char){
+    return (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
   }
 }
 
-
+var STDIN = 0
+var STDOUT = 1
+var STDERR = 2

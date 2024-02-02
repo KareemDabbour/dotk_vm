@@ -248,6 +248,14 @@ static void markRoots()
     markObj((Obj *)vm.initStr);
     markObj((Obj *)vm.toStr);
     markObj((Obj *)vm.eqStr);
+    markObj((Obj *)vm.ltStr);
+    markObj((Obj *)vm.gtStr);
+    markObj((Obj *)vm.indexStr);
+    markObj((Obj *)vm.setStr);
+    markObj((Obj *)vm.sizeStr);
+    markObj((Obj *)vm.hashStr);
+    markObj((Obj *)vm.stringClass);
+    markObj((Obj *)vm.listClass);
 }
 
 void traceReferences()

@@ -41,7 +41,7 @@ void printValue(Value value, int depth)
         printf("null");
         break;
     case VAL_NUMBER:
-        printf("%g", AS_NUM(value));
+        printf("%.15g", AS_NUM(value));
         break;
     case VAL_OBJ:
         printObj(value, depth);

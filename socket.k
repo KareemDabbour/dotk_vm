@@ -1,4 +1,5 @@
 import "stdlib.k";
+import "json.k";
 
 class Socket{
     SOL_SOCKET = 1;
@@ -16,14 +17,20 @@ class Socket{
     SO_SNDBUF = 7;
     SO_SNDLOWAT = 19;
     SO_SNDTIMEO = 21;
-    SO_TYPE = 3;
+    SO_TYPE = 3
+    LOOPBACK = "localhost"
     init(){
         this.socket = null;
         this.port = null;
+        this.host = null;
     }
     bindToPort(port){
         this.port = port;
         return bind(this.socket, port);
+    }
+    setHost(host){
+        this.host = host;
+        return this;
     }
     setDefaultSocketOptions(){
         setSockOpt(this.socket, Socket.SOL_SOCKET, Socket.SO_REUSEADDR);
@@ -32,7 +39,7 @@ class Socket{
         if(type(level) != "int" || type(option) != "int"){
             print_error("level and option must be int");
         }
-        setsockopt(this.socket, level, option);
+        setSockOpt(this.socket, level, option);
     }
     startListening(){
         listen(this.socket);
@@ -44,6 +51,13 @@ class Socket{
         if(!new_sock)
             print_error("accept failed");
         return new_sock;
+    }
+    connect(){
+        if(!this.host)
+            print_error("No host");
+        if(!this.port)
+            print_error("No port");
+        return connect(this.socket, this.host, this.port);
     }
     close(){
         close(this.socket);
@@ -95,6 +109,7 @@ class Socket{
     withDefaults(){
         var ret = Socket();
         ret.socket = socket();
+        ret.setHost(Socket.LOOPBACK);
         if(ret.socket < 0){
             print_error("socket creation failed");
             return null;
@@ -120,7 +135,7 @@ class RequestType{
     toStr(){
         return this.strVal;
     }
-    eq(other){  
+    _eq_(other){  
         switch(type(other)){
             case "int" {
                 return this.val == other;
@@ -196,14 +211,14 @@ class Request{
     }
     parse(reqString){
         var delim = "\n";
-        if(Strings.contains(reqString, "\r")){
+        if(reqString.contains("\r")){
             delim = "\r\n";
         }
-        var lines = Strings.split(reqString, delim);
+        var lines = reqString.split(delim);
         var ret = Request();
         if(len(lines)){
 
-            var firstLine = Strings.split(lines[0], " ");
+            var firstLine = lines[0].split(" ");
             var firstLineLen = len(firstLine);
             if(firstLineLen > 0) ret.setType(RequestType.valueOf(firstLine[0]));
             if(firstLineLen > 1) ret.setPath(Path.parse(firstLine[1]));
@@ -220,15 +235,43 @@ class Request{
             # .append(", ");
         }
         if(!this.body.isEmpty()){
-            if(this.path)
-                sb.append(", ");
-            sb.append("Body: ")
+            sb.append(", Body: ")
             .append(this.body.toStr());
         }
         sb.append(" }");
         return sb.toStr();
     }
+    toHttpString(host){
+        var sb = StringBuilder(this.type.toStr());
+        sb
+        .append(" ")
+        .append(this.path.getPath())
+        .append(" HTTP/1.1\r\n")
+        .append("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\n")
 
+        .append("Accept-Encoding: gzip, deflate")
+        .append("\r\n")
+        .append("Accept-Language: en-US,en;q=0.9,fr-CA;q=0.8,fr;q=0.7")
+        .append("\r\n")
+        .append("Connection: keep-alive")
+        .append("\r\n")
+        .append("DNT: 1")
+        .append("\r\n")
+        .append("Host: ")
+        .append(host)
+        .append("\r\n")
+        .append("\r\n");
+        # if(!this.body.isEmpty()){
+        #     sb.append("Content-Length: ")
+        #     .append(len(this.body.toStr()))
+        #     .append("\r\n\r\n")
+        #     .append(this.body.toStr());
+        # }
+        # else{
+        #     sb.append("\r\n");
+        # }
+        return sb.toStr();
+    }
     parseBody(body){
         if (type(body) != "string"){
             print_error("body must be string");
@@ -237,9 +280,9 @@ class Request{
         if(Strings.isWhitespace(body)){
             return this;
         }
-        var params = Strings.split(body, "&");
+        var params = split(body, "&");
         for(var i = 0; i < len(params); i+=1){
-            var param = Strings.split(params[i], "=");
+            var param = split(params[i], "=");
             var val;
             if(len(param) > 1){
                 val = param[1];
@@ -250,6 +293,80 @@ class Request{
             this.body.put(param[0],val);
         }
         return this;
+    }
+}
+
+class Response{
+    init(){
+        this.statusCode = 0;
+        this.body = Map();
+    }
+
+    getStatusCode(){
+        return this.statusCode;
+    }
+    setStatusCode(statusCode){
+        if(type(statusCode) != "int"){
+            print_error("statusCode must be int");
+            return null;
+        }
+        this.statusCode = statusCode;
+        return this;
+    }
+    getBody(){
+        return this.body;
+    }
+    setBody(body){
+        if (!body && !instanceof(body, Map)){
+            print_error("body must be a Map");
+            return null;
+        }
+        this.body = body;
+        return this;
+    }
+    parse(resStr){
+        if(type(resStr) != "string"){
+            print_error("resStr must be string");
+            return null;
+        }
+        resStr = trim(resStr);
+        var delim = "\n";
+        if(contains(resStr, "\r")){
+            delim = "\r\n";
+        }
+        var lines = split(resStr, delim);
+        var ret = Response();
+        var parseBody = fn(bodyStr){
+            if (type(bodyStr) != "string"){
+                print_error("bodyStr must be string");
+                return;
+            }
+            if(Strings.isWhitespace(bodyStr)){
+                return;
+            }
+            var m = JSONParser(bodyStr).parse()
+            ret.setBody(m);
+        }
+        if(len(lines)){
+            var firstLine = split(lines[0], " ");
+            var firstLineLen = len(firstLine);
+            if(firstLineLen > 0) ret.setStatusCode(int(firstLine[1]));
+            parseBody(lines[-1]);
+        }
+
+        return ret;
+
+    }
+
+    toStr(){
+        var sb = StringBuilder("Response: { statusCode: ");
+        sb.append(this.statusCode);
+        if(!this.body.isEmpty()){
+            sb.append(", Body: ")
+            .append(this.body.toStr());
+        }
+        sb.append(" }");
+        return sb.toStr();
     }
 }
 
@@ -272,12 +389,12 @@ class Path{
     }
     parse(path){
         var ret = Path();
-        var params = Strings.split(path, "?");
+        var params = split(path, "?");
         ret.setPath(params[0]);
         if(len(params) > 1){
-            params = Strings.split(params[1], "&");
+            params = split(params[1], "&");
             for(var i = 0; i < len(params); i+=1){
-                var param = Strings.split(params[i], "=");
+                var param = split(params[i], "=");
                 var val;
                 if(len(param) > 1){
                     val = param[1];

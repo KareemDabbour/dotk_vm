@@ -1,12 +1,13 @@
 import "stdlib.k";
 import "socket.k";
+import "file.k";
 
 var sock = Socket.withDefaults();
 sock.bindToPort(8080);
 sock.startListening();
 
 fn handlePost(r){
-    # TODO
+    print(with(File(r.getPathStr()[1:], F_RW, null), fn(f) => f.write(r.body.toStr())))
 }
 
 fn handleGet(r){
@@ -20,7 +21,7 @@ fn handleGet(r){
     path.append(pathStr);
     if (pathStr[-1] == "/"){
         path.append("index.html");
-    }else if (!Strings.containsChar(pathStr, ".")){
+    }else if (!contains(pathStr, ".")){
         path.append("/").append("index.html");
     }
     ret = path.toStr();

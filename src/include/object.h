@@ -94,7 +94,7 @@ typedef struct ObjClosure
     int upvalueCount;
 } ObjClosure;
 
-typedef Value (*NativeFn)(int argC, Value *argV, bool *hasError);
+typedef Value (*NativeFn)(int argC, Value *argV, bool *hasError, bool *pushedValue);
 
 typedef struct ObjNative
 {
@@ -111,6 +111,10 @@ typedef struct ObjClass
     Value equals;
     Value greaterThan;
     Value lessThan;
+    Value indexFn;
+    Value setFn;
+    Value sizeFn;
+    Value hashFn;
     struct ObjClass *superclass;
     Table methods;
     Table staticVars;

@@ -8,10 +8,12 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <math.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
+
 #define BUFFER_SIZE 104857
-#define FRAMES_MAX 64 * 2 * 2
+#define FRAMES_MAX 64 * 2 * 2 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
 
 typedef struct _CallFrame
@@ -36,7 +38,13 @@ typedef struct _VM
     ObjString *eqStr;
     ObjString *ltStr;
     ObjString *gtStr;
+    ObjString *indexStr;
+    ObjString *setStr;
+    ObjString *sizeStr;
+    ObjString *hashStr;
     ObjString *clazzStr;
+    ObjClass *stringClass;
+    ObjClass *listClass;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
 
@@ -46,6 +54,8 @@ typedef struct _VM
     int grayCount;
     int grayCapacity;
     Obj **grayStack;
+    int importCount;
+    char **importSources;
 } VM;
 
 typedef enum

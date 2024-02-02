@@ -98,7 +98,13 @@ ObjClass *newClass(ObjString *name)
     clazz->equals = NIL_VAL;
     clazz->greaterThan = NIL_VAL;
     clazz->lessThan = NIL_VAL;
+    clazz->indexFn = NIL_VAL;
+    clazz->setFn = NIL_VAL;
+    clazz->sizeFn = NIL_VAL;
+    clazz->hashFn = NIL_VAL;
+
     clazz->superclass = NULL;
+
     initTable(&clazz->methods);
     initTable(&clazz->staticVars);
     // tableSet(&clazz->staticVars, vm.clazzStr, (Value){.type = VAL_OBJ, .as.obj = &clazz->name->obj});

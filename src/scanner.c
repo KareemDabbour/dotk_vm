@@ -112,7 +112,14 @@ static int skipWhitespace()
         {
             advance();
             while (peek() != '~' && !isAtEnd())
+            {
+                if (peek() == '\n')
+                {
+                    scanner.line++;
+                    scanner.col = 1;
+                }
                 advance();
+            }
             if (isAtEnd())
                 return -1;
             advance();
@@ -379,6 +386,8 @@ Token scanToken()
         return makeToken(TOKEN_PERCENT);
     case '@':
         return makeToken(TOKEN_AT);
+    case '?':
+        return makeToken(TOKEN_QUESTION);
     case '-':
         return makeToken(
             match('=') ? TOKEN_MINUS_EQUAL : TOKEN_MINUS);

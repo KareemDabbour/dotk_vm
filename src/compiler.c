@@ -77,9 +77,9 @@ typedef struct _Compiler
     ObjFunction *function;
     FunctionType type;
     bool isRepl;
-    Local locals[UINT16_COUNT];
+    Local locals[LOCALS_MAX];
     int localCount;
-    UpValue upValues[UINT16_COUNT];
+    UpValue upValues[UINT8_COUNT];
     int scopeDepth;
 } Compiler;
 
@@ -97,6 +97,9 @@ int innermostLoopStart = -1;
 int innermostLoopScopeDepth = 0;
 int innermostLoopEnd = -1;
 int breakAddress = -1;
+bool inTernary = false;
+int ternaryThen = -1;
+int ternaryElse = -1;
 
 static void expression();
 static void declareVar();
@@ -117,7 +120,7 @@ static uint16_t parseVariable(const char *errMsg);
 static int resolveLocal(Compiler *compiler, Token *name);
 static int resolveUpValue(Compiler *compiler, Token *name);
 
-static Chunk *currentChunk()
+static inline Chunk *currentChunk()
 {
     return &current->function->chunk;
 }
@@ -155,7 +158,6 @@ static void advance()
     for (;;)
     {
         parser.current = scanToken();
-        // printf("TOKEN: '%.*s', TOKEN TYPE: \"%s\", LINE: %d, COL: %d\n", parser.current.len, parser.current.start, TOKEN_NAMES[parser.current.type], parser.current.line, parser.current.col);
         if (parser.current.type != TOKEN_ERROR)
             break;
         errorAtCurrent(parser.current.start);
@@ -187,7 +189,7 @@ static bool match(TokenType type)
 
 static void emitByte(uint8_t byte)
 {
-    writeChunk(currentChunk(), byte, parser.prev.line, parser.prev.col, parser.file);
+    writeChunk(currentChunk(), byte, parser.prev.line, parser.prev.col, parser.file, parser.prev.start - parser.prev.col + 1);
 }
 
 static void emitWide(uint8_t byte, uint16_t constant)
@@ -282,7 +284,7 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     current = compiler;
     if (type == TYPE_ANONYMOUS)
     {
-        current->function->name = copyString("anonymous_fn", 13);
+        current->function->name = copyString("<anon_fn>", 10);
     }
     else if (type != TYPE_SCRIPT)
     {
@@ -487,12 +489,52 @@ static void dot(bool canAssign)
         expression();
         emitBytes(OP_SET_PROPERTY, name);
     }
-    else if (match(TOKEN_LEFT_PAREN))
+    else if (canAssign && match(TOKEN_LEFT_PAREN))
     {
         uint8_t argc = argList();
 
         emitBytes(OP_INVOKE, name);
         emitByte(argc);
+    }
+    else if (canAssign && match(TOKEN_PLUS_EQUAL))
+    {
+        emitByte(OP_DUP);
+        emitBytes(OP_GET_PROPERTY, name);
+        expression();
+        emitByte(OP_ADD);
+        emitBytes(OP_SET_PROPERTY, name);
+    }
+    else if (canAssign && match(TOKEN_MINUS_EQUAL))
+    {
+        emitByte(OP_DUP);
+        emitBytes(OP_GET_PROPERTY, name);
+        expression();
+        emitByte(OP_SUB);
+        emitBytes(OP_SET_PROPERTY, name);
+    }
+    else if (canAssign && match(TOKEN_STAR_EQUAL))
+    {
+        emitByte(OP_DUP);
+        emitBytes(OP_GET_PROPERTY, name);
+        expression();
+        emitByte(OP_MULT);
+        emitBytes(OP_SET_PROPERTY, name);
+    }
+    else if (canAssign && match(TOKEN_SLASH_EQUAL))
+    {
+        emitByte(OP_DUP);
+        emitBytes(OP_GET_PROPERTY, name);
+        expression();
+        emitByte(OP_DIV);
+        emitBytes(OP_SET_PROPERTY, name);
+    }
+    else if (canAssign && match(TOKEN_SLASH_SLASH_EQUAL))
+    {
+        emitByte(OP_DUP);
+        emitBytes(OP_GET_PROPERTY, name);
+        expression();
+        emitByte(OP_INT_DIV);
+        emitBytes(OP_SET_PROPERTY, name);
     }
     else
         emitBytes(OP_GET_PROPERTY, name);
@@ -540,7 +582,6 @@ static void returnStatement()
             error("Can't return a value from a class's constructor.");
 
         expression();
-        // consume(TOKEN_SEMICOLON, "Exepect ';' after return value");
         match(TOKEN_SEMICOLON);
         emitByte(OP_RETURN);
     }
@@ -575,7 +616,7 @@ static void function(FunctionType type)
     }
 
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
-    // ADD => support. Make it a return stateMent;
+
     if (match(TOKEN_ARROW))
         returnStatement();
     else
@@ -583,7 +624,6 @@ static void function(FunctionType type)
         consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
         block();
     }
-
     ObjFunction *function = endCompiler();
     uint16_t constant = makeConstant(OBJ_VAL(function));
     emitBytes(OP_CLOSURE, constant);
@@ -651,7 +691,18 @@ static void super_(bool canAssign)
         namedVariable(synthToken("super"), false);
         emitBytes(OP_GET_SUPER, name);
     }
-    // emitBytes(OP_GET_SUPER, name);
+}
+
+static void createBuiltinClass()
+{
+    Token className = synthToken("String");
+    uint16_t nameConst = identifierConst(&className);
+    declareVar();
+    emitBytes(OP_CLASS, nameConst);
+    defineVar(nameConst);
+    ClassCompiler classCompiler;
+    classCompiler.enclosing = currentClass;
+    classCompiler.hasSuperClass = false;
 }
 
 static void classDeclaration()
@@ -937,7 +988,7 @@ static void printStatement()
 
 static void whileStatement()
 {
-    beginScope();
+    // beginScope();
 
     int surroundingLoopStart = innermostLoopStart;
     int surroundingBreakAddr = breakAddress;
@@ -962,7 +1013,7 @@ static void whileStatement()
     innermostLoopStart = surroundingLoopStart;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;
     innermostLoopEnd = surroundingLoopEnd;
-    endScope();
+    // endScope();
 }
 
 static void synchronize()
@@ -1257,8 +1308,20 @@ static void unary(bool canAssign)
     }
 }
 
-static void slice(bool canAssign)
+static void sliceOrTernary(bool canAssign)
 {
+    if (inTernary)
+    {
+        int oldTern = ternaryElse;
+        ternaryElse = emitJump(OP_JUMP);
+        patchJump(ternaryThen);
+        emitByte(OP_POP);
+        expression();
+        patchJump(ternaryElse);
+        ternaryElse = oldTern;
+        inTernary = false;
+        return;
+    }
     if (check(TOKEN_RIGHT_BRACKET))
         emitConst(NUM_VAL(-1.0));
     else
@@ -1312,9 +1375,20 @@ static void anonFunction(bool canAssign)
     function(TYPE_ANONYMOUS);
 }
 
+static void trinary(bool canAssign)
+{
+    inTernary = true;
+    int oldTer = ternaryThen;
+    ternaryThen = emitJump(OP_JUMP_IF_FALSE);
+    emitByte(OP_POP); // pop the condition
+
+    expression();
+    ternaryThen = oldTer;
+}
+
 ParseRule rules[] = {
     [TOKEN_LEFT_BRACKET] = {defaultSizeList, subscript, PREC_SUBSCRIPT},
-    [TOKEN_COLON] = {sliceNoStart, slice, PREC_OR},
+    [TOKEN_COLON] = {sliceNoStart, sliceOrTernary, PREC_OR},
     [TOKEN_COLON_AT] = {sliceJustStep, sliceNoEnd, PREC_OR},
     [TOKEN_RIGHT_BRACKET] = {NULL, NULL, PREC_NONE},
     [TOKEN_LEFT_PAREN] = {grouping, call, PREC_CALL},
@@ -1356,7 +1430,7 @@ ParseRule rules[] = {
     [TOKEN_ELSE] = {NULL, NULL, PREC_NONE},
     [TOKEN_FALSE] = {literal, NULL, PREC_NONE},
     [TOKEN_FOR] = {NULL, NULL, PREC_NONE},
-    [TOKEN_FUN] = {anonFunction, NULL, PREC_ASSIGNMENT},
+    [TOKEN_FUN] = {anonFunction, NULL, PREC_NONE},
     [TOKEN_IF] = {NULL, NULL, PREC_NONE},
     [TOKEN_NIL] = {literal, NULL, PREC_NONE},
     [TOKEN_OR] = {NULL, or_, PREC_OR},
@@ -1371,6 +1445,7 @@ ParseRule rules[] = {
     [TOKEN_ERROR] = {NULL, NULL, PREC_NONE},
     [TOKEN_EOF] = {NULL, NULL, PREC_NONE},
     [TOKEN_IMPORT] = {NULL, NULL, PREC_NONE},
+    [TOKEN_QUESTION] = {NULL, trinary, PREC_ASSIGNMENT},
 };
 
 static void parsePrecedence(Precedence precedence)
@@ -1467,7 +1542,7 @@ static int resolveUpValue(Compiler *compiler, Token *name)
 
 static void addLocal(Token name)
 {
-    if (current->localCount == UINT16_COUNT)
+    if (current->localCount == LOCALS_MAX)
     {
         error("Too many local variables in function.");
         return;
@@ -1499,34 +1574,6 @@ static void declareVar()
 
     addLocal(*name);
 }
-
-// static void declareConst()
-// {
-//     Token *name = &parser.prev;
-//     if (current->scopeDepth == 0)
-//     {
-//         for (int i = currentChunk()->constants.size - 1; i >= 0; i--)
-//         {
-//             Value val = currentChunk()->constants.values[i];
-//             if (identifierEqual(name, &(val)))
-//                 error("There is already a constant with this name defined");
-//         }
-//     }
-//     for (int i = current->localCount - 1; i >= 0; i--)
-//     {
-//         Local *local = &current->locals[i];
-//         if (local->depth != -1 && local->depth < current->scopeDepth)
-//         {
-//             break;
-//         }
-//         if (identifierEqual(name, &local->name))
-//         {
-//             error("There is already a variable with this name defined");
-//         }
-//     }
-
-//     addLocal(*name);
-// }
 
 static uint16_t parseVariable(const char *errMsg)
 {
