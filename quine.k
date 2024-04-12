@@ -1,1 +1,1 @@
-var s="var s=${1}${0}${1} print s.format(s,chr(34))" print s.format(s,chr(34))
+var s="var s=${1}${0}${1} print s.f(s,chr(34))" print s.f(s,chr(34))

@@ -99,7 +99,8 @@ ClassCompiler *currentClass = NULL;
 int innermostLoopStart = -1;
 int innermostLoopScopeDepth = 0;
 int innermostLoopEnd = -1;
-int breakAddress = -1;
+int numberOfBreaks = 0;
+int breakAddresses[UINT8_COUNT] = {0};
 bool inTernary = false;
 int ternaryThen = -1;
 int ternaryElse = -1;
@@ -315,7 +316,7 @@ static ObjFunction *endCompiler()
     emitReturn();
     ObjFunction *func = current->function;
     // #if DEBUG_PRINT_CODE
-    if (__glibc_unlikely(current->printBytecode))
+    if (unlikely(current->printBytecode))
         if (!parser.hadError)
             disassembleChunk(currentChunk(), func->name != NULL ? func->name->chars : "<script>");
     // #endif
@@ -897,7 +898,7 @@ static void forStatement()
 
     int surroundingLoopStart = innermostLoopStart;
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
-    int lastBreakAddr = breakAddress;
+    int numberOfBreaksPrior = numberOfBreaks;
     innermostLoopStart = currentChunk()->size;
     innermostLoopScopeDepth = current->scopeDepth;
 
@@ -953,12 +954,17 @@ static void forStatement()
         patchJump(exitJump);
         emitByte(OP_POP); // pop the condition off the stack
     }
-    if (breakAddress != -1)
-        patchJump(breakAddress);
 
-    breakAddress = lastBreakAddr;
+    if (numberOfBreaksPrior < numberOfBreaks){
+        for (int i = numberOfBreaksPrior; i < numberOfBreaks; i++)
+        {
+            patchJump(breakAddresses[i]);
+        }
+    } 
+
     innermostLoopStart = surroundingLoopStart;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;
+    numberOfBreaks = numberOfBreaksPrior;
 
     endScope();
 }
@@ -995,7 +1001,7 @@ static void whileStatement()
     // beginScope();
 
     int surroundingLoopStart = innermostLoopStart;
-    int surroundingBreakAddr = breakAddress;
+    int numberOfBreaksPrior = numberOfBreaks;
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
     int surroundingLoopEnd = innermostLoopEnd;
     innermostLoopStart = currentChunk()->size;
@@ -1011,9 +1017,14 @@ static void whileStatement()
     emitLoop(innermostLoopStart);
     patchJump(innermostLoopEnd);
     emitByte(OP_POP);
-    if (breakAddress != -1)
-        patchJump(breakAddress);
-    breakAddress = surroundingBreakAddr;
+    if (numberOfBreaksPrior < numberOfBreaks)
+    {
+        for (int i = numberOfBreaksPrior; i < numberOfBreaks; i++)
+        {
+            patchJump(breakAddresses[i]);
+        }
+    }
+    numberOfBreaks = numberOfBreaksPrior;
     innermostLoopStart = surroundingLoopStart;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;
     innermostLoopEnd = surroundingLoopEnd;
@@ -1106,20 +1117,21 @@ static void breakStatement()
         emitByte(OP_POP);
     }
     // }
-    breakAddress = emitJump(OP_JUMP);
+
+    breakAddresses[numberOfBreaks++] = emitJump(OP_JUMP);;
 }
 
 static void enterTryCatch()
 {
-    //// This is a bit of a hack. We're going to compile the try block as a function, then store it in the closure of the try-catch block.
+    // This is a bit of a hack. We're going to compile the try block as a function, then store it in the closure of the try-catch block.
 
     // And because of this, we need to save the state of the current compiler, and then restore it after we're done compiling the try block.
     int surroundingLoopStart = innermostLoopStart;
-    int surroundingBreakAddr = breakAddress;
+    int surroundingBreakAddrCount = numberOfBreaks;
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
     int surroundingLoopEnd = innermostLoopEnd;
     innermostLoopStart = -1;
-    breakAddress = -1;
+    numberOfBreaks = 0;
     innermostLoopScopeDepth = 0;
     innermostLoopEnd = -1;
 
@@ -1151,7 +1163,7 @@ static void enterTryCatch()
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'catch'");
 
     innermostLoopStart = -1;
-    breakAddress = -1;
+    numberOfBreaks = 0;
     innermostLoopScopeDepth = 0;
     innermostLoopEnd = -1;
     initCompiler(&compiler, TYPE_CATCH, parser.file, current->isRepl, current->printBytecode);
@@ -1176,7 +1188,7 @@ static void enterTryCatch()
     patchJump(getPastElse);
     endScope();
     innermostLoopStart = surroundingLoopStart;
-    breakAddress = surroundingBreakAddr;
+    numberOfBreaks = surroundingBreakAddrCount;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;
     innermostLoopEnd = surroundingLoopEnd;
 }

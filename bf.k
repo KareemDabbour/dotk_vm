@@ -1,6 +1,6 @@
 import "file.k"
 var bf = `>++++++++[<+++++++++>-]<.>++++[<+++++++>-]<+.+++++++..+++.>>++++++[<+++++++>-]<++.------------.>++++++[<+++++++++>-]<+.<.+++.------.--------.>>>++++[<++++++++>-]<+.`
-var interpret = true
+var interpret = false 
 if (ARG_C){
   for (var i = 0; i < ARG_C; i += 1){
     if (ARG_V[i] == "-f"){
@@ -20,6 +20,7 @@ if (ARG_C){
     }else if(ARG_V[i] == "-i"){
       interpret = true
       bf = ""
+      break;
     }
   }
 }

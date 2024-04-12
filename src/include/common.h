@@ -29,4 +29,9 @@
 #define clrscr() printf("\e[1;1H\e[2J")
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define unlikely(x) __builtin_expect((x), 0)
+#define likely(x)   __builtin_expect((x), 1)
+#endif
+
 #endif

@@ -23,11 +23,11 @@ static void repl(int argC, char **argV, bool piped)
         printf("DotK Interactive Shell\n");
     for (;;)
     {
-        if (__glibc_likely(!piped))
+        if (likely(!piped))
             printf("> ");
 
         handleInput(line, line_stack, piped);
-        if (__glibc_likely(!piped))
+        if (likely(!piped))
             printf("\n");
         interpret(line, "stdin", true, argC, argV);
     }

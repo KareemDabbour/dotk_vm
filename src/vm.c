@@ -90,6 +90,10 @@ static bool isBuiltinClass(Value value)
     return IS_OBJ(value) && (AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); // IS_LIST(val) || IS_MAP(val) || IS_STR(val);
 }
 
+static bool isBuiltinClazz(ObjClass* clazz){
+    return clazz == vm.listClass || clazz == vm.mapClass || clazz == vm.stringClass;
+}
+
 ObjClass *getVmClass(Value val)
 {
     if (IS_LIST(val))
@@ -169,6 +173,28 @@ static uint32_t hashValueShallow(Value value)
         case OBJ_BOUND_BUILTIN:
             // hash the pointer
             return (uint32_t)(uintptr_t)AS_BOUND_BUILTIN(value);
+        case OBJ_UPVALUE:
+            return (uint32_t)(uintptr_t)value.as.obj;
+        case OBJ_MAP:
+        {
+            uint32_t hash = 0;
+            ObjMap *map = AS_MAP(value);
+            for (int i = 0; i < map->map.capacity; i++)
+            {
+                MapEntry *entry = &map->map.entries[i];
+                if (entry->isUsed)
+                {
+                    hash += hashValueShallow(entry->key);
+                    hash += hashValueShallow(entry->value);
+                }
+            }
+            return hash;
+        }
+        case OBJ_SLICE:
+        {
+            ObjSlice *slice = AS_SLICE(value);
+            return (slice->start + slice->end + slice->step) * 41;
+        }
         }
     }
 }
@@ -618,7 +644,7 @@ char *valueToString(Value val, char *buff, int *len)
             buff[index++] = '[';
             for (int i = 0; i < list->count; i++)
             {
-                char *item = valueToString(list->items[i], buff + index, len);
+                valueToString(list->items[i], buff + index, len);
                 index += *len;
                 buff[index++] = ',';
             }
@@ -697,10 +723,14 @@ char *valueToString(Value val, char *buff, int *len)
             sprintf(buff, "%s", "<upvalue>");
             *len = (int)strlen(buff);
             return buff;
+        case OBJ_SLICE:
+            sprintf(buff, "%s", "<slice>");
+            *len = (int)strlen(buff);
+            return buff;
         }
     }
-    sprintf(buff, "%s", "<unknown>");
-    *len = (int)strlen(buff);
+    snprintf(buff, 10, "%s", "<unknown>");
+    *len = (int)strnlen(buff,10);
     return buff;
 }
 
@@ -3818,6 +3848,26 @@ static Value sbToArrayNative(int argc, Value *argv, bool *hasError, bool *pushed
 
 //////////////////////// Error CLASS NATIVE METHODS ////////////////////////
 
+static Value errorInitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0 && argc != 1 && argc != 2)
+    {
+        runtimeError("'init(<optional> message, <optional> stackTrace)', expects 0, 1 or 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected an Error to be caller but got '%s' for Error())", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
+    tableSet(&instance->fields, copyString("message", 7), argc >= 1 ? argv[0] : NIL_VAL);
+    tableSet(&instance->fields, copyString("stackTrace", 10), argc == 2 ? argv[1] : NIL_VAL);
+    return peek(argc);
+}
+
 static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 0)
@@ -3833,10 +3883,10 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
         return NIL_VAL;
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
-    Value value;
-    if (!tableGet(&instance->fields, copyString("message", 7), &value))
+    Value messageVal;
+    if (!tableGet(&instance->fields, copyString("message", 7), &messageVal))
     {
-        runtimeError("Error instance has no 'message' field");
+        runtimeError("'Error' instance has no 'message' field");
         *hasError = true;
         return NIL_VAL;
     }
@@ -3845,15 +3895,31 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
     Value stackTrace;
     if (!tableGet(&instance->fields, copyString("stackTrace", 10), &stackTrace))
     {
-        runtimeError("Error instance has no 'stack' field");
+        runtimeError("'Error' instance has no 'stackTrace' field");
         *hasError = true;
         return NIL_VAL;
     }
-    ObjString *stack = AS_STR(stackTrace);
-    ObjString *message = AS_STR(value);
+
     char str[STR_BUFF] = {0};
-    sprintf(str, "%s%s", stack->chars, message->chars);
-    return OBJ_VAL(copyString(str, message->len + stack->len + 1));
+    int len = 0;
+    if(IS_STR(messageVal) && IS_STR(stackTrace))
+    {
+        ObjString *stack = AS_STR(stackTrace);
+        ObjString *message = AS_STR(messageVal);
+        sprintf(str, "%s%s", stack->chars, message->chars);
+        len = stack->len + message->len + 1;
+    }else{
+        char message[STR_BUFF] = {0};
+        int messageLen = 0;
+        char stack[STR_BUFF] = {0};
+        int stackLen = 0;
+        valueToString(messageVal, message, &messageLen);
+        valueToString(stackTrace, stack, &stackLen);
+        sprintf(str, "Error: %s \nwith trace: %s", message, stack);
+        len = messageLen + stackLen + 23;
+    }
+    return OBJ_VAL(copyString(str, len));
+    
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -3919,7 +3985,7 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.errorClass = NULL;
     ObjClass *errorClass = primativeClass("Error");
     vm.errorClass = errorClass;
-    errorClass->initializer = OBJ_VAL(newNative(invalidInitNative));
+    errorClass->initializer = OBJ_VAL(newNative(errorInitNative));
     errorClass->toStr = OBJ_VAL(newNative(errorToStringNative));
     tableSet(&errorClass->methods, copyString("toStr", 5), errorClass->toStr);
     tableSet(&errorClass->methods, copyString("init", 4), errorClass->initializer);
@@ -4196,7 +4262,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
     for (;;)
     {
         // #if DEBUG_TRACE_EXEC
-        if (__glibc_unlikely(printExecStackGlobaL))
+        if (unlikely(printExecStackGlobaL))
         {
             printf("        ");
             for (Value *slot = vm.stack; slot < vm.stackTop; slot++)
@@ -4570,18 +4636,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("Superclass must be a class");
                 return INTERPRET_RUNTIME_ERROR;
             }
+            ObjClass* superclazz = AS_CLASS(superclass);
+            if (isBuiltinClazz(superclazz))
+            {
+                runtimeError("Cannot inherit from a builtin class '%s'", superclazz->name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
             ObjClass *subclass = AS_CLASS(peek(0));
-            subclass->initializer = AS_CLASS(superclass)->initializer;
-            subclass->toStr = AS_CLASS(superclass)->toStr;
-            subclass->equals = AS_CLASS(superclass)->equals;
-            subclass->lessThan = AS_CLASS(superclass)->lessThan;
-            subclass->greaterThan = AS_CLASS(superclass)->greaterThan;
-            subclass->indexFn = AS_CLASS(superclass)->indexFn;
-            subclass->setFn = AS_CLASS(superclass)->setFn;
-            subclass->sizeFn = AS_CLASS(superclass)->sizeFn;
-            subclass->superclass = AS_CLASS(superclass);
-            tableAddAll(&AS_CLASS(superclass)->methods, &subclass->methods);
-            tableAddAll(&AS_CLASS(superclass)->staticVars, &subclass->staticVars);
+            subclass->initializer = superclazz->initializer;
+            subclass->toStr = superclazz->toStr;
+            subclass->equals = superclazz->equals;
+            subclass->lessThan = superclazz->lessThan;
+            subclass->greaterThan = superclazz->greaterThan;
+            subclass->indexFn = superclazz->indexFn;
+            subclass->setFn = superclazz->setFn;
+            subclass->sizeFn = superclazz->sizeFn;
+            subclass->superclass = superclazz;
+            tableAddAll(&superclazz->methods, &subclass->methods);
+            tableAddAll(&superclazz->staticVars, &subclass->staticVars);
 
             pop();
             break;
@@ -4757,7 +4829,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             int strLen = 0;
             char str[STR_BUFF] = {0};
-            printf("%.*s", strLen, valueToString(pop(), str, &strLen));
+            valueToString(pop(), str, &strLen);
+            printf("%.*s", strLen, str);
             // printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
 
             printf("\n");

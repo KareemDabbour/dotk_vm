@@ -178,7 +178,8 @@ int disassembleInst(Chunk *chunk, int offset)
             // constant = chunk->code[offset + 1];
             // constant = constant << 8;
             // constant |= chunk->code[offset + 2];
-            constant = (chunk->code[offset++] << 8) | (chunk->code[offset++]);
+            constant = (chunk->code[offset++] << 8);
+            constant |= (chunk->code[offset++]);
             //
         }
         else

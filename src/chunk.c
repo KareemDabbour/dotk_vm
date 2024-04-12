@@ -64,7 +64,7 @@ int addConst(Chunk *chunk, Value value)
 {
     push(value);
     writeValueArray(&chunk->constants, value);
-    pop(value);
+    pop();
     return chunk->constants.size - 1;
 }
 
