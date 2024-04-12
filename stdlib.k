@@ -286,6 +286,7 @@ class LinkedList <Iterable> {
     }
     return false;
   }
+
   toStr(){
     var ret = StringBuilder("[");
     var node = this.head;
@@ -299,6 +300,7 @@ class LinkedList <Iterable> {
     ret.append("]");
     return ret.toStr();
   }
+
   of(arr){
     var ret = LinkedList();
     for (var i = 0; i < len(arr); i+=1){
@@ -541,12 +543,6 @@ class Math{
   abs(num){
     return num < 0 ? -num : num;
   }
-  sin(theta){
-    # Need to estimate sin(theta)
-
-    # sin(theta) = theta - theta^3/3! + theta^5/5! - theta^7/7! + ...
-    return theta - (theta**3)/6 + (theta**5)/120 - (theta**7)/5040
-  }
 }
 
 fn max(a, b){
@@ -570,7 +566,7 @@ class MapEntry{
     this.value = value;
   }
   toStr(){
-    return "{}: {}".format(this.key, this.value);
+    return "${}: ${}".f(this.key, this.value);
   }
   _lt_(other){
     return this.value < other.value
@@ -593,7 +589,7 @@ class Map {
   init(){
     this.capacity = Map.INITIAL_CAPACITY;
     this.entrySet = ArrayList();
-    this.entries = [this.capacity]{null};
+    this.entries = [this.capacity];
     this._size = 0;
     this.resizes = 0;
     this.get = this._get_;
@@ -674,7 +670,7 @@ class Map {
     return ret;
   }
   containsKey(key){
-    return bool(foreach(this.entrySet, fn (entry){
+    return bool(this.entrySet.foreach(fn (entry){
       if (entry.key == key){
         return true;
       }
@@ -767,24 +763,18 @@ class Map {
     string = string[1:-2];
     var arr = string.split(",");
     for (var i = 0; i < len(arr); i+=1){
-      var entry = split(arr[i], ":");
+      var entry = arr[i].split( ":");
       if (len(entry) != 2){
         print_error("Error: parseFromStr(string) requires a string that contains key value pairs separated by :");
         return null;
       }
-      var key = trim(entry[0]);
-      var value = trim(entry[1]);
+      var key = entry[0].trim();
+      var value = entry[1].trim();
       var keySlice = 1:-2@1
       if (key[0] != "\"" || key[-1] != "\""){
         keySlice = 0:-1@1
-        # print_error("Error: parseFromStr(string) requires a string that contains keys surrounded by \"");
-        # return null;
       }
-      # if (value[0] != "\"" || value[-1] != "\""){
-
-      #}
       key = key[keySlice];
-      #value = value[1:len(value)-1];
       ret.put(key, value);
     }
     return ret;

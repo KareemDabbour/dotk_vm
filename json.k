@@ -1,16 +1,34 @@
 import "stdlib.k"
 
+class JSONParseState{
+  init(string, index){
+    this.string = string
+    this.index = index
+  }
+  PARSE_ERROR = JSONParseState("ERROR", -1) 
+
+  _eq_(other){
+    return this.string == other.string && this.index == other.index
+  }
+
+  toStr(){
+    return this.string
+  }
+
+}
+
 class JSONParser{
   init(string){
-    this.string = string;
+    this.string = string.trim();
     this.index = 0;
   }
   parse(){
     this.index = 0;
     var ret = this.parseValue();
+
     if (this.index < len(this.string)){
-      print_error("Error: JSON string is not valid");
-      return null;
+      print_error("Error: JSON string is not valid. Extra chars: ${}".f(this.string[this.index:]));
+      return JSONParseState.PARSE_ERROR;
     }
     return ret;
   }
@@ -19,20 +37,19 @@ class JSONParser{
     while (Strings.isWhitespace(c)){
       this.index += 1;
       if (this.index >= len(this.string)){
-        print_error("Error: JSON string is not valid");
-        return null;
+        print_error("Error: JSON string is not valid. Ran out of characters while parsing value.");
+        return JSONParseState.PARSE_ERROR;
       }
       c = this.string[this.index];
     }
     switch(c){
-
       case ("\""){
         return this.parseString();
       }
       case ("{"){
         return this.parseObject();
       }
-      case ("["){
+      case ("["){   
         return this.parseArray();
       }
       case ("t"){
@@ -49,8 +66,8 @@ class JSONParser{
         if (c == "-" || (c >= "0" && c <= "9")){
           return this.parseNumber();
         }else{
-          print_error("Error: JSON string is not valid");
-          return null;
+          print_error("Error: JSON string is not valid: Failed at character: ${}".f(c));
+          return JSONParseState.PARSE_ERROR;
         }
       }
     }
@@ -66,24 +83,25 @@ class JSONParser{
       }else if (c == "\\"){
         this.index += 1;
         if (this.index >= len(this.string)){
-          print_error("Error: JSON string is not valid");
-          return null;
+          print_error("Error: JSON string is not valid. Ran out of characters while parsing string.");
+          return JSONParseState.PARSE_ERROR;
         }
       }
       this.index += 1;
     }
-    print_error("Error: JSON string is not valid");
-    return null;
+    print_error("Error: JSON string is not valid. Ran out of characters while parsing string.");
+    return JSONParseState.PARSE_ERROR;
   }
   parseObject(){
-    var ret = Map();
+    var ret = HashMap();
     this.index += 1;
+    var c;
     while (this.index < len(this.string)){
-      if(Strings.isWhitespace(this.string[this.index])){
+      if(Strings.isWhitespace(this.string[this.index])){ 
         this.index += 1;
         continue;
       }
-      var c = this.string[this.index];
+      c = this.string[this.index];
       if (c == "}"){
         this.index += 1;
         return ret;
@@ -91,30 +109,43 @@ class JSONParser{
         this.index += 1;
       }else{
         var key = this.parseString();
-        if (key == null){
-          return null;
+        if(ret.containsKey(key)){
+          print_error("Error: JSON string is not valid. Duplicate key: '${}'".f(key));
+          return JSONParseState.PARSE_ERROR;
+        }
+        if (key == JSONParseState.PARSE_ERROR){
+          return JSONParseState.PARSE_ERROR;
         }
         c = this.string[this.index];
+        while (Strings.isWhitespace(c)){
+          this.index += 1;
+          c = this.string[this.index];
+        }
         if (c != ":"){
-          print_error("Error: JSON string is not valid");
-          return null;
+          print_error("Error: JSON string is not valid. Expected ':' but got '${}'".f(c));
+          return JSONParseState.PARSE_ERROR;
         }
         this.index += 1;
         var value = this.parseValue();
-        if (value == null){
-          return null;
+        if (value == JSONParseState.PARSE_ERROR){
+          return JSONParseState.PARSE_ERROR;
         }
-        ret.put(key, value);
+        ret[key] = value;
+
       }
     }
-    print_error("Error: JSON string is not valid");
-    return null;
+    print_error("Error: JSON string is not valid. Ran out of characters while parsing object.");
+    return JSONParseState.PARSE_ERROR;
   }
   parseArray(){
-    var ret = ArrayList();
+    var ret = [];
     this.index += 1;
     while (this.index < len(this.string)){
       var c = this.string[this.index];
+      if(Strings.isWhitespace(c)){
+        this.index += 1;
+        continue;
+      }
       if (c == "]"){
         this.index += 1;
         return ret;
@@ -122,13 +153,13 @@ class JSONParser{
         this.index += 1;
       }else{
         var value = this.parseValue();
-        if (value == null){
-          return null;
+        if (value == JSONParseState.PARSE_ERROR){
+          return JSONParseState.PARSE_ERROR;
         }
-        ret.add(value);
+        ret.append(value);
       }
     }
-    print_error("Error: JSON string is not valid");
+    print_error("Error: JSON string is not valid. Ran out of characters while parsing array.");
     return null;
   }
   parseTrue(){
@@ -136,7 +167,7 @@ class JSONParser{
       this.index += 4;
       return true;
     }
-    print_error("Error: JSON string is not valid");
+    print_error("Error: JSON string is not valid. Expected 'true' but got '${}'".f(this.string[this.index:this.index+4]));
     return null;
   }
   parseFalse(){
@@ -144,7 +175,7 @@ class JSONParser{
       this.index += 5;
       return false;
     }
-    print_error("Error: JSON string is not valid");
+    print_error("Error: JSON string is not valid. Expected 'false' but got '${}'".f(this.string[this.index:this.index+5]));
     return null;
   }
   parseNull(){
@@ -152,8 +183,8 @@ class JSONParser{
       this.index += 4;
       return null;
     }
-    print_error("Error: JSON string is not valid");
-    return null;
+    print_error("Error: JSON string is not valid. Expected 'null' but got '${}'".f(this.string[this.index:this.index+4]));
+    return JSONParseState.PARSE_ERROR;
   }
   parseNumber(){
     var start = this.index;
@@ -222,36 +253,24 @@ class JSON{
       }
       ret.pop();
       ret.append("]");
-    }else if (type(obj) == "object"){
-      if(instanceof(obj, Map)){
+    }else if (type(obj) == "map"){
+
         ret.append("{");
-        var entrySet = obj.entrySet
-        for (var i = 0; i< len(entrySet); i+=1){
-          var entry = entrySet[i];
+        var keys = obj.keys();
+        for (var i = 0; i < len(keys); i+=1){
+          var key = keys[i];
           ret.append("\"");
-          this.stringifyRec(entry.key, ret);
+          this.stringifyRec(key, ret);
           ret.append("\":");
-          this.stringifyRec(entry.value, ret);
+          this.stringifyRec(obj.get(key), ret);
           ret.append(",");
         }
-        if (len(entrySet) > 0){
+        if (len(keys) > 0){
           ret.pop();
         }
         ret.append("}");
-
-      }else if(instanceof(obj, Iterable)){
-        ret.append("[");
-        for (var i = 0; i < len(obj); i+=1){
-          this.stringifyRec(obj[i], ret);
-          ret.append(",");
-        }
-        if(len(obj) > 0){
-          ret.pop();
-        }
-        ret.append("]");
-      }
     }else{
-      print_error("JSON.stringify(obj) requires an object that is a string, number, boolean, null, list, or map");
+      print_error("JSON.stringify(obj) requires an object that is a string, number, boolean, null, list, or map. Got obj of type: '${}'. Obj: ${}".f(type(obj), obj))
     }
   }
 }

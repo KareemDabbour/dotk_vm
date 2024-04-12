@@ -118,6 +118,10 @@ int disassembleInst(Chunk *chunk, int offset)
     {
     case OP_ADD:
         return simpleInst("OP_ADD", offset);
+    case OP_BIN_AND:
+        return simpleInst("OP_BIN_AND", offset);
+    case OP_BIN_OR:
+        return simpleInst("OP_BIN_OR", offset);
     case OP_SUB:
         return simpleInst("OP_SUB", offset);
     case OP_MULT:
@@ -161,9 +165,9 @@ int disassembleInst(Chunk *chunk, int offset)
     case OP_INHERIT:
         return simpleInst("OP_INHERIT", offset);
     case OP_STORE_SUBSCR:
-        return simpleInst("OP_STORE_LIST", offset);
+        return simpleInst("OP_STORE_SUBSCR", offset);
     case OP_INDEX_SUBSCR:
-        return simpleInst("OP_INDEX_LIST", offset);
+        return simpleInst("OP_INDEX_SUBSCR", offset);
     case OP_CLOSURE:
     {
         uint16_t constant;
@@ -207,6 +211,10 @@ int disassembleInst(Chunk *chunk, int offset)
         return constInst("OP_GET_SUPER", chunk, offset);
     case OP_DEF_GLOBAL:
         return constInst("OP_DEF_GLOBAL", chunk, offset);
+    case OP_TRY:
+        return simpleInst("OP_TRY", offset);
+    case OP_CATCH:
+        return simpleInst("OP_CATCH", offset);
     case OP_GET_GLOBAL:
         return constInst("OP_GET_GLOBAL", chunk, offset);
     case OP_SET_GLOBAL:

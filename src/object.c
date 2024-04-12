@@ -32,6 +32,25 @@ ObjBoundMethod *newBoundMethod(Value receiver, ObjClosure *method)
     return bound;
 }
 
+ObjBoundBuiltin *newBoundBuiltin(Value receiver, ObjNative *method)
+{
+    ObjBoundBuiltin *bound = ALLOCATE_OBJ(ObjBoundBuiltin, OBJ_BOUND_BUILTIN);
+
+    bound->receiver = receiver;
+    bound->native = method;
+    return bound;
+}
+
+ObjMap *newMap()
+{
+    ObjMap *map = ALLOCATE_OBJ(ObjMap, OBJ_MAP);
+    initMap(&map->map);
+    map->map.entries = NULL;
+    map->count = 0;
+    map->capacity = 0;
+    return map;
+}
+
 ObjList *newList()
 {
     ObjList *list = ALLOCATE_OBJ(ObjList, OBJ_LIST);
@@ -256,6 +275,25 @@ static void printTable(Table table, int depth)
     }
 }
 
+static void printMap(ObjMap *map, int depth)
+{
+    int fields = 0;
+    printf("{");
+    for (int i = 0; i < map->map.capacity; i++)
+    {
+        if (map->map.entries[i].isUsed)
+        {
+            printValue(map->map.entries[i].key, depth - 1);
+            printf(": ");
+            printValue(map->map.entries[i].value, depth - 1);
+
+            if (++fields < map->count)
+                printf(", ");
+        }
+    }
+    printf("}");
+}
+
 static void printCustomObj(ObjInstance *instance, int depth)
 {
     if (instance == NULL)
@@ -308,11 +346,19 @@ void printObj(Value value, int depth)
     case OBJ_BOUND_METHOD:
         printFunction(AS_BOUND_METHOD(value)->method->function);
         break;
+    case OBJ_BOUND_BUILTIN:
+        printf("<native method bound to ");
+        printObj(AS_BOUND_BUILTIN(value)->receiver, depth - 1);
+        printf(">");
+        break;
     case OBJ_LIST:
         printList(AS_LIST(value), depth);
         break;
     case OBJ_SLICE:
         printSlice(AS_SLICE(value));
+        break;
+    case OBJ_MAP:
+        printMap(AS_MAP(value), depth);
         break;
     case OBJ_UPVALUE:
         printf("upvalue");

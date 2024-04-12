@@ -72,6 +72,8 @@ typedef enum
     TOKEN_IMPORT,
     TOKEN_CONTINUE,
     TOKEN_BREAK,
+    TOKEN_TRY,
+    TOKEN_CATCH,
 
     TOKEN_ERROR,
     TOKEN_EOF
@@ -142,14 +144,14 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_CONTINUE] = "CONTINUE",
     [TOKEN_BREAK] = "BREAK",
     [TOKEN_ARROW] = "ARROW",
+    [TOKEN_TRY] = "TRY",
+    [TOKEN_CATCH] = "CATCH",
     [TOKEN_EOF] = "EOF"};
 
 typedef struct
 {
     TokenType type;
     const char *start;
-    // int startOffset;
-    // const char *lineStart;
     int len;
     int line;
     int col;

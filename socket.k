@@ -26,7 +26,7 @@ class Socket{
     }
     bindToPort(port){
         this.port = port;
-        return bind(this.socket, port);
+        return bind(this.socket, this.port);
     }
     setHost(host){
         this.host = host;

@@ -14,16 +14,12 @@
 VM vm;
 Value prefixStr = NIL_VAL;
 FILE *file;
+bool printBytecodeGlobal = false;
+bool printExecStackGlobaL = false;
 
 static bool invoke(ObjString *name, int argc);
-static FILE *getFile()
-{
-    if (file == NULL)
-    {
-        file = fopen("test.k", "rb");
-    }
-    return file;
-}
+static InterpretResult run(bool isRepl, int runUntilFrame);
+static char *valueToString(Value val, char *buff, int *len);
 
 static void resetStack()
 {
@@ -34,7 +30,15 @@ static void resetStack()
 
 static void runtimeError(const char *format, ...)
 {
+    // save error from format
     va_list args;
+    va_start(args, format);
+    char *buff = ALLOCATE(char, STR_BUFF);
+    vsprintf(buff, format, args);
+    vm.lastError = takeString(buff, (int)strlen(buff));
+    va_end(args);
+    int len = 0;
+    char *trace = ALLOCATE(char, STR_BUFF);
     Position pos;
     for (int i = 0; i < vm.frameCount; i++)
     {
@@ -46,19 +50,25 @@ static void runtimeError(const char *format, ...)
         if (strcmp(function->name->chars, pos.file) == 0)
         {
             printFunc = false;
-            fprintf(stderr, "Error in:\n");
+            len += sprintf(trace + len, "Error in:\n");
         }
 
-        fprintf(stderr, "  %s:%d:%d", pos.file, pos.line, pos.col);
+        len += sprintf(trace + len, "  %s:%d:%d", pos.file, pos.line, pos.col);
         if (function->name == NULL)
-            fprintf(stderr, " in script");
+            len += sprintf(trace + len, " in script");
         else if (printFunc)
-            fprintf(stderr, " in %s()", function->name->chars);
-        fputs("\n", stderr);
+            len += sprintf(trace + len, " in %s()", function->name->chars);
+        len += sprintf(trace + len, "\n");
     }
-    va_start(args, format);
-    vfprintf(stderr, format, args);
-    fputs("\n", stderr);
+    // len += sprintf(trace + len, "%s\n", vm.lastError->chars);
+    vm.lastErrorTrace = takeString(trace, len);
+
+    resetStack();
+    if (vm.isInTryCatch)
+        return;
+
+    fprintf(stderr, "%s", vm.lastErrorTrace->chars);
+    fprintf(stderr, "%s\n", vm.lastError->chars);
     int lineLen = 0;
     while (pos.lineStart[lineLen] != '\n' && pos.lineStart[lineLen] != '\0')
     {
@@ -72,9 +82,265 @@ static void runtimeError(const char *format, ...)
     fputs("^\n", stderr);
     for (int i = 0; i <= lineLen; i++)
         fputc('~', stderr);
-    va_end(args);
     fputs("\n", stderr);
-    resetStack();
+}
+
+static bool isBuiltinClass(Value value)
+{
+    return IS_OBJ(value) && (AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); // IS_LIST(val) || IS_MAP(val) || IS_STR(val);
+}
+
+ObjClass *getVmClass(Value val)
+{
+    if (IS_LIST(val))
+        return vm.listClass;
+    if (IS_MAP(val))
+        return vm.mapClass;
+    if (IS_STR(val))
+        return vm.stringClass;
+    return NULL;
+}
+
+bool checkIfValuesEqual(Value a, Value b)
+{
+    if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
+    {
+        Value *stop = vm.stackTop;
+        int frameCount = vm.frameCount;
+        ObjUpvalue *upvalues = vm.openUpvalues;
+        // vm.stackTop -= 2;
+        push(a);
+        push(b);
+        if (!invoke(vm.eqStr, 1))
+            return false;
+        if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            // vm.stackTop = stop;
+            // vm.frameCount = frameCount;
+            // vm.openUpvalues = upvalues;
+            return false;
+        }
+        Value ret = pop();
+        if (!IS_BOOL(ret))
+            return false;
+        return AS_BOOL(ret);
+    }
+    return valuesEqual(a, b);
+}
+
+static uint32_t hashValueShallow(Value value)
+{
+    switch (value.type)
+    {
+    case VAL_NUMBER:
+        return value.as.number;
+    case VAL_BOOL:
+        return value.as.boolean;
+    case VAL_NIL:
+        return 0;
+    case VAL_OBJ:
+        switch (AS_OBJ(value)->type)
+        {
+        case OBJ_STRING:
+            return AS_STR(value)->hash;
+        case OBJ_LIST:
+        {
+            uint32_t hash = 0;
+            ObjList *list = AS_LIST(value);
+            for (int i = 0; i < list->count; i++)
+            {
+                hash += hashValueShallow(list->items[i]);
+            }
+            return hash;
+        }
+        case OBJ_CLASS:
+            return AS_CLASS(value)->name->hash;
+        case OBJ_INSTANCE:
+            return AS_INSTANCE(value)->klass->name->hash;
+        case OBJ_FUNCTION:
+            return AS_FUN(value)->name == NULL ? 0 : AS_FUN(value)->name->hash;
+        case OBJ_NATIVE:
+            // hash the pointer
+            return (uint32_t)(uintptr_t)AS_NATIVE(value);
+        case OBJ_CLOSURE:
+            return AS_CLOSURE(value)->function->name == NULL ? 0 : AS_CLOSURE(value)->function->name->hash;
+        case OBJ_BOUND_METHOD:
+            return AS_BOUND_METHOD(value)->method->function->name == NULL ? 0 : AS_BOUND_METHOD(value)->method->function->name->hash;
+        case OBJ_BOUND_BUILTIN:
+            // hash the pointer
+            return (uint32_t)(uintptr_t)AS_BOUND_BUILTIN(value);
+        }
+    }
+}
+
+static uint32_t hashValueDeep(Value value)
+{
+    if (value.type == VAL_OBJ && IS_INSTANCE(value) && !IS_NIL(AS_INSTANCE(value)->klass->hashFn))
+    {
+        Value *stop = vm.stackTop;
+        int frameCount = vm.frameCount;
+        ObjUpvalue *upvalues = vm.openUpvalues;
+        // vm.stackTop -= 2;
+        push(value);
+        if (!invoke(vm.hashStr, 0))
+            return 0;
+        if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            return 0;
+        }
+        Value ret = pop();
+        if (!IS_NUM(ret))
+            return 0;
+        return (uint32_t)AS_NUM(ret);
+    }
+    else
+        return hashValueShallow(value);
+}
+
+MapEntry *findMapEntry(MapEntry *entries, int capacity, Value key)
+{
+    uint32_t index = hashValueDeep(key) & (capacity - 1);
+    for (;;)
+    {
+        MapEntry *entry = &entries[index];
+        if (!entry->isUsed)
+            return entry;
+        else if (checkIfValuesEqual(entry->key, key))
+            return entry;
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+bool mapGet(Map *map, Value key, Value *valueOut)
+{
+    if (map->count == 0)
+        return false;
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    if (!entry->isUsed)
+        return false;
+    *valueOut = entry->value;
+    return true;
+}
+
+static void adjustMapCapacity(Map *map, int capacity)
+{
+    MapEntry *entries = ALLOCATE(MapEntry, capacity);
+    for (int i = 0; i < capacity; i++)
+    {
+        entries[i].key = NIL_VAL;
+        entries[i].value = NIL_VAL;
+        entries[i].isUsed = false;
+    }
+    map->count = 0;
+    for (int i = 0; i < map->capacity; i++)
+    {
+        MapEntry *entry = &map->entries[i];
+        if (!entry->isUsed)
+            continue;
+
+        MapEntry *dest = findMapEntry(entries, capacity, entry->key);
+        dest->key = entry->key;
+        dest->value = entry->value;
+        dest->isUsed = true;
+        map->count++;
+    }
+    FREE_ARRAY(MapEntry, map->entries, map->capacity);
+    map->entries = entries;
+    map->capacity = capacity;
+}
+
+bool mapSet(Map *map, Value key, Value value)
+{
+    if ((map->count + 1) > (map->capacity * MAP_MAX_LOAD))
+    {
+        int newCap = GROW_CAPACITY(map->capacity);
+        adjustMapCapacity(map, newCap);
+    }
+
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    bool isNewKey = !entry->isUsed;
+    if (isNewKey)
+        map->count++;
+    entry->key = key;
+    entry->value = value;
+    entry->isUsed = true;
+    return isNewKey;
+}
+
+bool mapDelete(Map *map, Value key)
+{
+    if (map->count == 0)
+        return false;
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    if (!entry->isUsed)
+        return false;
+    map->count--;
+    entry->key = NIL_VAL;
+    entry->value = BOOL_VAL(true);
+    entry->isUsed = false;
+    return true;
+}
+
+bool mapContainsKey(Map *map, Value key)
+{
+    if (map->count == 0)
+        return false;
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    return entry->isUsed;
+}
+
+void mapRemoveWhite(Map *map)
+{
+    for (int i = 0; i < map->capacity; i++)
+    {
+        MapEntry *entry = &map->entries[i];
+        if (entry->isUsed && !entry->key.as.obj->isMarked)
+        {
+            mapDelete(map, entry->key);
+        }
+    }
+}
+
+void printMap(Map *map)
+{
+    for (int i = 0; i < map->capacity; i++)
+    {
+        MapEntry *entry = &map->entries[i];
+        if (entry->isUsed)
+        {
+            printf("Key: ");
+            printValue(entry->key, 0);
+            printf(" Value: ");
+            printValue(entry->value, 0);
+            printf("\n");
+        }
+    }
+}
+
+// get map as String
+static char *mapToString(Map *map, char *buff, int *len)
+{
+    int index = 0;
+    buff[index++] = '{';
+    for (int i = 0; i < map->capacity; i++)
+    {
+        MapEntry *entry = &map->entries[i];
+        if (!entry->isUsed)
+            continue;
+        char *key = valueToString(entry->key, buff + index, len);
+        index += *len;
+        buff[index++] = ':';
+        char *value = valueToString(entry->value, buff + index, len);
+        index += *len;
+        buff[index++] = ',';
+    }
+    if (map->count > 0)
+        buff[--index] = '}';
+    else
+        buff[index] = '}';
+    buff[++index] = '\0';
+    *len = index;
+    return buff;
 }
 
 static Value clockNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -116,15 +382,28 @@ static Value instanceOf(int argc, Value *argv, bool *hasError, bool *pushedValue
         *hasError = true;
         return NIL_VAL;
     }
+    ObjClass *builtinClass = NULL;
     if (!IS_INSTANCE(argv[0]))
     {
-        return BOOL_VAL(false);
+        if (isBuiltinClass(argv[0]))
+        {
+            builtinClass = getVmClass(argv[0]);
+        }
+        else
+        {
+            return BOOL_VAL(false);
+        }
     }
     if (!IS_CLASS(argv[1]))
     {
         runtimeError("'instanceof' expects a class as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
         *hasError = true;
         return NIL_VAL;
+    }
+
+    if (builtinClass != NULL)
+    {
+        return BOOL_VAL(builtinClass == AS_CLASS(argv[1]));
     }
 
     ObjInstance *instance = AS_INSTANCE(argv[0]);
@@ -142,7 +421,6 @@ static Value instanceOf(int argc, Value *argv, bool *hasError, bool *pushedValue
 
 static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     Value val = argc == 0 ? NIL_VAL : argv[0];
     char *type;
     switch (val.type)
@@ -164,6 +442,9 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
             break;
         case OBJ_LIST:
             type = "list";
+            break;
+        case OBJ_MAP:
+            type = "map";
             break;
         case OBJ_CLASS:
         case OBJ_INSTANCE:
@@ -230,7 +511,6 @@ static Value cosNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 1)
     {
         runtimeError("'len()' expects one argument %d were passed in", argc);
@@ -241,6 +521,8 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
         return NUM_VAL((double)AS_STR(argv[0])->len);
     if (IS_LIST(argv[0]))
         return NUM_VAL((double)AS_LIST(argv[0])->count);
+    if (IS_MAP(argv[0]))
+        return NUM_VAL((double)AS_MAP(argv[0])->map.count);
     if (IS_INSTANCE(argv[0]) && !IS_NIL(AS_INSTANCE(argv[0])->klass->sizeFn))
     {
         vm.stackTop -= 2;
@@ -260,7 +542,6 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 static Value exitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     disableRawMode();
     if (argc != 1)
         exit(0);
@@ -270,7 +551,6 @@ static Value exitNative(int argc, Value *argv, bool *hasError, bool *pushedValue
 
 static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 1)
     {
         runtimeError("'sleep()' expects one argument %d were passed in", argc);
@@ -298,7 +578,6 @@ static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValu
 
 static Value clearNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 0)
     {
         runtimeError("'clear()' expects no arguments %d were passed in", argc);
@@ -309,16 +588,14 @@ static Value clearNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     return NIL_VAL;
 }
 
-static char *valueToString(Value val, char *buff, int *len)
+char *valueToString(Value val, char *buff, int *len)
 {
     switch (val.type)
     {
     case VAL_NUMBER:
-    {
         sprintf(buff, "%.15g", AS_NUM(val));
         *len = (int)strlen(buff);
         return buff;
-    }
     case VAL_BOOL:
         sprintf(buff, "%s", AS_BOOL(val) ? "true" : "false");
         *len = (int)strlen(buff);
@@ -353,16 +630,49 @@ static char *valueToString(Value val, char *buff, int *len)
             *len = index;
             return buff;
         }
+        case OBJ_MAP:
+        {
+            ObjMap *map = AS_MAP(val);
+            return mapToString(&map->map, buff, len);
+        }
         case OBJ_CLASS:
             sprintf(buff, "%s", AS_CLASS(val)->name->chars);
             *len = (int)strlen(buff);
             return buff;
         case OBJ_INSTANCE:
-        {
+            // Use toStr if available?
+            if (!IS_NIL(AS_INSTANCE(val)->klass->toStr))
+            {
+                // Make sure that the val is on the stack
+                Value stackTop = peek(0);
+                if (stackTop.type != VAL_OBJ || stackTop.as.obj != val.as.obj)
+                    push(val);
+
+                int frameCount = vm.frameCount;
+
+                if (!invoke(vm.toStr, 0))
+                {
+                    *len = 0;
+                    return buff;
+                }
+                if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+                {
+                    *len = 0;
+                    return buff;
+                }
+                Value str = peek(0); // pop();
+                if (!IS_STR(str))
+                {
+                    *len = 0;
+                    return buff;
+                }
+                sprintf(buff, "%s", AS_STR(str)->chars);
+                *len = AS_STR(str)->len;
+                return buff;
+            }
             sprintf(buff, "%s<%p>", AS_INSTANCE(val)->klass->name->chars, (void *)AS_INSTANCE(val));
             *len = (int)strlen(buff);
             return buff;
-        }
         case OBJ_FUNCTION:
             sprintf(buff, "%s", AS_FUN(val)->name == NULL ? "<script>" : AS_FUN(val)->name->chars);
             *len = (int)strlen(buff);
@@ -379,6 +689,10 @@ static char *valueToString(Value val, char *buff, int *len)
             sprintf(buff, "%s", AS_BOUND_METHOD(val)->method->function->name == NULL ? "<script>" : AS_BOUND_METHOD(val)->method->function->name->chars);
             *len = (int)strlen(buff);
             return buff;
+        case OBJ_BOUND_BUILTIN:
+            sprintf(buff, "%s", "<bound native>");
+            *len = (int)strlen(buff);
+            return buff;
         case OBJ_UPVALUE:
             sprintf(buff, "%s", "<upvalue>");
             *len = (int)strlen(buff);
@@ -392,7 +706,6 @@ static char *valueToString(Value val, char *buff, int *len)
 
 static Value strCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 1)
     {
         runtimeError("'str()' expects one argument %d were passed in", argc);
@@ -402,7 +715,7 @@ static Value strCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
         return argv[0];
     int strLen = 0;
-    char str[10000] = {0};
+    char str[STR_BUFF] = {0};
     valueToString(argv[0], str, &strLen);
 
     return OBJ_VAL(copyString(str, (int)strlen(str)));
@@ -410,41 +723,40 @@ static Value strCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
 static Value hashNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 1)
     {
         runtimeError("'hash()' expects one argument %d were passed in", argc);
         *hasError = true;
         return NIL_VAL;
     }
-    if (IS_INSTANCE(argv[0]) && !IS_NIL(AS_INSTANCE(argv[0])->klass->hashFn))
-    {
-        vm.stackTop -= 2;
-        push(argv[0]);
-        if (!invoke(vm.hashStr, 0))
-        {
-            *hasError = true;
-            return NIL_VAL;
-        }
-        *pushedValue = true;
-        return NIL_VAL;
-    }
-    ObjString *str;
-    if (!IS_STR(argv[0]))
-    {
-        char s[10000] = {0};
-        int len = 0;
-        valueToString(argv[0], s, &len);
-        str = copyString(s, len);
-    }
-    else
-        str = AS_STR(argv[0]);
-    return NUM_VAL((double)str->hash);
+
+    // if (IS_INSTANCE(argv[0]) && !IS_NIL(AS_INSTANCE(argv[0])->klass->hashFn))
+    // {
+    //     vm.stackTop -= 2;
+    //     push(argv[0]);
+    //     if (!invoke(vm.hashStr, 0))
+    //     {
+    //         *hasError = true;
+    //         return NIL_VAL;
+    //     }
+    //     *pushedValue = true;
+    //     return NIL_VAL;
+    // }
+    // ObjString *str;
+    // if (!IS_STR(argv[0]))
+    // {
+    //     char s[STR_BUFF] = {0};
+    //     int len = 0;
+    //     valueToString(argv[0], s, &len);
+    //     str = copyString(s, len);
+    // }
+    // else
+    //     str = AS_STR(argv[0]);
+    return NUM_VAL(hashValueDeep(argv[0]));
 }
 
 static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 2)
     {
         runtimeError("'join()' expects two arguments %d were passed in", argc);
@@ -470,7 +782,7 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
-        char item[10000] = {0};
+        char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
         char *temp = ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
         sprintf(temp, "%s%s%s", str, item, sep->chars);
@@ -514,6 +826,7 @@ static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     *hasError = true;
     return NIL_VAL;
 }
+
 static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 1)
@@ -606,7 +919,6 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
 
 static Value randomIntNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 2)
     {
         runtimeError("'randInt()' expects two arguments %d were passed in", argc);
@@ -636,7 +948,6 @@ static Value randomIntNative(int argc, Value *argv, bool *hasError, bool *pushed
 
 static Value randNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 0)
     {
         runtimeError("'rand()' expects no arguments %d were passed in", argc);
@@ -648,13 +959,14 @@ static Value randNative(int argc, Value *argv, bool *hasError, bool *pushedValue
 
 static Value printErrNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     (*hasError) = true;
     if (argc != 1)
     {
         runtimeError("'print_error()' expects one argument %d were passed in", argc);
         return NIL_VAL;
     }
+    if (vm.frameCount > 1)
+        vm.frameCount--;
     runtimeError(AS_CSTR(argv[0]));
     return argv[0];
 }
@@ -1386,6 +1698,22 @@ static bool callValue(Value callee, int argC)
             vm.stackTop[-argC - 1] = bound->receiver;
             return call(bound->method, argC);
         }
+        case OBJ_BOUND_BUILTIN:
+        {
+            ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(callee);
+            vm.stackTop[-argC - 1] = bound->receiver;
+            bool hasError = false;
+            bool pushedValue = false;
+            Value result = bound->native->function(argC, vm.stackTop - argC, &hasError, &pushedValue);
+            if (hasError)
+                return false;
+            if (!pushedValue)
+            {
+                vm.stackTop -= argC + 1;
+                push(result);
+            }
+            return true;
+        }
         case OBJ_CLASS:
         {
             ObjClass *klass = AS_CLASS(callee);
@@ -1449,10 +1777,8 @@ bool invoke(ObjString *name, int argc)
     bool isClass = IS_CLASS(receiver);
     if (!isInstance && !isClass)
     {
-        if (IS_STR(receiver))
-            return invokeFromClass(vm.stringClass, name, argc);
-        else if (IS_LIST(receiver))
-            return invokeFromClass(vm.listClass, name, argc);
+        if (isBuiltinClass(receiver))
+            return invokeFromClass(getVmClass(receiver), name, argc);
         else
             runtimeError("Only Classes and their instances have methods. -- not '%s'", VALUE_TYPES[receiver.type]);
         return false;
@@ -1480,6 +1806,13 @@ static bool bindMethod(ObjClass *klass, ObjString *name)
     {
         runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
         return false;
+    }
+    if (IS_NATIVE(method))
+    {
+        ObjBoundBuiltin *bound = newBoundBuiltin(peek(0), ((ObjNative *)AS_OBJ(method)));
+        pop();
+        push(OBJ_VAL(bound));
+        return true;
     }
     ObjBoundMethod *bound = newBoundMethod(peek(0), AS_CLOSURE(method));
 
@@ -1603,7 +1936,7 @@ static bool defineMethod(ObjString *name)
 
 static bool isFalsey(Value value)
 {
-    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0);
+    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0) || (IS_MAP(value) && AS_MAP(value)->count == 0);
 }
 
 static ObjString *addTwoStrings(char *a, char *b, int lenA, int lenB)
@@ -1663,7 +1996,7 @@ static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValu
 {
     if (argc == 1)
     {
-        char str[10000] = {0};
+        char str[STR_BUFF] = {0};
         int len = 0;
         valueToString(argv[0], str, &len);
         printf("%s", str);
@@ -1675,8 +2008,8 @@ static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         return NIL_VAL;
     }
 
-    char *input = ALLOCATE(char, 100);
-    char *ret = fgets(input, 100, stdin);
+    char *input = ALLOCATE(char, STR_BUFF);
+    char *ret = fgets(input, STR_BUFF, stdin);
     input[strlen(input) - 1] = '\0';
     return OBJ_VAL(takeString(input, (int)strlen(input)));
 }
@@ -2044,7 +2377,49 @@ static Value containsNative(int argc, Value *argv, bool *hasError, bool *pushedV
     return BOOL_VAL(true);
 }
 
-/////////////////////// STRING CLASS NATIVE METHODS ///////////////////////
+static Value evalNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'eval()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("Expected a string but got '%s' for eval(str)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    char *str = AS_CSTR(argv[0]);
+    ObjFunction *function = compile(str, "eval", vm.isRepl, printBytecodeGlobal);
+    if (function == NULL)
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjClosure *closure = newClosure(function);
+    push(OBJ_VAL(closure));
+
+    if (!call(closure, 0))
+        return NIL_VAL;
+    if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return pop();
+}
+
+static Value invalidInitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    runtimeError("Cannot instantiate native class");
+    *hasError = true;
+    return NIL_VAL;
+}
+
+/////////////////////// String CLASS NATIVE METHODS ///////////////////////
 
 static Value split2Native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -2091,7 +2466,6 @@ static Value split2Native(int argc, Value *argv, bool *hasError, bool *pushedVal
 
 static Value replace2Native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 2)
     {
         runtimeError("'replace()' expects 3 arguments %d were passed in", argc);
@@ -2400,7 +2774,6 @@ static Value isDigitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
 static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-
     if (argc != 1)
     {
         runtimeError("'join(list)' expects 1 arguments %d were passed in", argc);
@@ -2426,7 +2799,7 @@ static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
-        char item[10000] = {0};
+        char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
         char *temp = ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
         sprintf(temp, "%s%s%s", str, item, sep->chars);
@@ -2454,15 +2827,16 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         return NIL_VAL;
     }
     char *str = AS_CSTR(peek(argc));
-    char *result = ALLOCATE(char, 10000);
+    char *result = ALLOCATE(char, STR_BUFF);
     int len = 0;
     int i = 0;
     int numFormats = 0;
-    char item[10000] = {0};
+    char item[STR_BUFF] = {0};
     while (str[i])
     {
-        if (str[i] == '{')
+        if (str[i] == '$' && str[i + 1] == '{')
         {
+            i++;
             if (str[i + 1] != '}')
             {
                 char index[100] = {0};
@@ -2481,7 +2855,8 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
                 }
                 if (num < 0 || num >= argc)
                 {
-                    runtimeError("Index out of range for string format. Expected a number between 0 and %d but got %ld", argc - 1, num);
+                    runtimeError("Index out of range for string.format(). Expected a number between 0 & %d but got %ld", argc - 1, num);
+                    free(result);
                     *hasError = true;
                     return NIL_VAL;
                 }
@@ -2516,7 +2891,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
 
 ///////////////////////////////////////////////////////////////////////////
 
-//////////////////////// LIST CLASS NATIVE METHODS ////////////////////////
+//////////////////////// List CLASS NATIVE METHODS ////////////////////////
 
 static Value appendListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -2598,6 +2973,27 @@ static Value prependListNative(int argc, Value *argv, bool *hasError, bool *push
     return OBJ_VAL(list);
 }
 
+static Value containsListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'contains()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for contains()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    for (int i = 0; i < list->count; i++)
+        if (checkIfValuesEqual(list->items[i], argv[0]))
+            return BOOL_VAL(true);
+    return BOOL_VAL(false);
+}
+
 static Value popListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 0 && argc != 1)
@@ -2643,9 +3039,490 @@ static Value popListNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     return list->items[--list->count];
 }
 
+static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'foreach()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("Expected a closure but got '%s' for foreach(closure)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for foreach()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    // ObjClosure *closure = AS_CLOSURE(peek(0));
+    ObjClosure *closure = AS_CLOSURE(pop());
+    // push(OBJ_VAL(closure));
+    if (closure->function->arity != 1 && closure->function->arity != 2)
+    {
+        runtimeError("Expected a closure with 1 or 2 arguments but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    bool enumerate = closure->function->arity == 2;
+    for (int i = 0; i < list->count; i++)
+    {
+        push(OBJ_VAL(closure));
+        Value *stop = vm.stackTop; // This doesn't work since when I push/pop, it updates the stackTop
+        int stackCount = vm.stackTop - vm.stack;
+        int frameCount = vm.frameCount;
+        ObjUpvalue *upvalues = vm.openUpvalues;
+
+        if (enumerate)
+            push(NUM_VAL(i));
+
+        push(list->items[i]);
+        if (!call(closure, enumerate ? 2 : 1))
+            return NIL_VAL;
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            // vm.stackTop = vm.stack + stackCount;
+            // vm.frameCount = frameCount;
+            // vm.openUpvalues = upvalues;
+            *hasError = true;
+            return NIL_VAL;
+        }
+        // list->items[i] = *(vm.stackTop - 1);
+        pop();
+    }
+    push(OBJ_VAL(list));
+    return OBJ_VAL(list);
+}
+
+static Value mapNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'map()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("Expected a closure but got '%s' for map(closure)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for map()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    // ObjClosure *closure = AS_CLOSURE(peek(0));
+    ObjClosure *closure = AS_CLOSURE(pop());
+    // push(OBJ_VAL(closure));
+    if (closure->function->arity != 1 && closure->function->arity != 2)
+    {
+        runtimeError("Expected a closure with 1 or 2 arguments but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    bool enumerate = closure->function->arity == 2;
+    for (int i = 0; i < list->count; i++)
+    {
+        push(OBJ_VAL(closure));
+        Value *stop = vm.stackTop; // This doesn't work since when I push/pop, it updates the stackTop
+        int stackCount = vm.stackTop - vm.stack;
+        int frameCount = vm.frameCount;
+        ObjUpvalue *upvalues = vm.openUpvalues;
+
+        if (enumerate)
+            push(NUM_VAL(i));
+
+        push(list->items[i]);
+        if (!call(closure, enumerate ? 2 : 1))
+            return NIL_VAL;
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            // vm.stackTop = vm.stack + stackCount;
+            // vm.frameCount = frameCount;
+            // vm.openUpvalues = upvalues;
+            *hasError = true;
+            return NIL_VAL;
+        }
+        list->items[i] = pop();
+    }
+    push(OBJ_VAL(list));
+    return OBJ_VAL(list);
+}
+
 ///////////////////////////////////////////////////////////////////////////
 
-// SB
+/////////////////////// Map CLASS NATIVE METHODS //////////////////////////
+
+static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0)
+    {
+        runtimeError("'init()' expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.init()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
+    ObjMap *map = newMap();
+    map->capacity = 64;
+    map->map.capacity = 64;
+    map->map.count = 0;
+    map->count = 0;
+    map->map.entries = ALLOCATE(MapEntry, map->capacity);
+    for (int i = 0; i < map->capacity; i++)
+    {
+        map->map.entries[i].key = NIL_VAL;
+        map->map.entries[i].value = NIL_VAL;
+        map->map.entries[i].isUsed = false;
+    }
+    // tableSet(&instance->fields, copyString("entries", 8), OBJ_VAL(map));
+    return OBJ_VAL(map);
+}
+
+static Value mapClearNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0)
+    {
+        runtimeError("'clear()' expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.clear()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    map->count = 0;
+    map->map.count = 0;
+    for (int i = 0; i < map->capacity; i++)
+    {
+        map->map.entries[i].key = NIL_VAL;
+        map->map.entries[i].value = NIL_VAL;
+        map->map.entries[i].isUsed = false;
+    }
+    return NIL_VAL;
+}
+
+static Value mapKeysNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.keys()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjList *list = newList();
+    push(OBJ_VAL(list));
+    for (int i = 0; i < map->capacity; i++)
+    {
+        if (map->map.entries[i].isUsed)
+            appendToList(list, map->map.entries[i].key);
+    }
+    pop();
+    return OBJ_VAL(list);
+}
+
+static Value mapValuesNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.keys()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjList *list = newList();
+    push(OBJ_VAL(list));
+    for (int i = 0; i < map->capacity; i++)
+    {
+        if (map->map.entries[i].isUsed)
+            appendToList(list, map->map.entries[i].value);
+    }
+    pop();
+    return OBJ_VAL(list);
+}
+
+static Value mapEntriesNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.entries()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjList *list = newList();
+    push(OBJ_VAL(list));
+    for (int i = 0; i < map->capacity; i++)
+    {
+        if (map->map.entries[i].isUsed)
+        {
+            ObjList *entry = newList();
+            push(OBJ_VAL(entry));
+            appendToList(entry, map->map.entries[i].key);
+            appendToList(entry, map->map.entries[i].value);
+            appendToList(list, OBJ_VAL(entry));
+            pop();
+        }
+    }
+    pop();
+    return OBJ_VAL(list);
+}
+
+static Value mapGetNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1 && argc != 2)
+    {
+        runtimeError("'get(key, <optional> default)', expects 1 or 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.get()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    bool hasDefault = argc == 2;
+
+    ObjMap *map = AS_MAP(peek(argc));
+    Value val;
+    if (!mapGet(&map->map, argv[0], &val))
+        return hasDefault ? argv[1] : NIL_VAL;
+    return val;
+}
+
+static Value mapSetNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("'set(key, value)', expects 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.set()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    mapSet(&map->map, argv[0], argv[1]);
+
+    return argv[1];
+}
+
+static Value mapSizeNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0)
+    {
+        runtimeError("'size()', expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.size()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    return NUM_VAL(map->count);
+}
+
+static Value mapRemoveNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'remove(key)', expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.remove()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    if (!mapDelete(&map->map, argv[0]))
+        return BOOL_VAL(false);
+    map->count--;
+    return BOOL_VAL(true);
+}
+
+static Value mapContainsKeyNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'containsKey(key)', expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.containsKey()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    return BOOL_VAL(mapContainsKey(&map->map, argv[0]));
+}
+
+static Value mapComputeNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("'compute(key, closure)', expects 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.compute()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[1]))
+    {
+        runtimeError("Expected a closure but got '%s' for map.compute(key, closure)", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjClosure *closure = AS_CLOSURE(argv[1]);
+    if (closure->function->arity != 2)
+    {
+        runtimeError("Expected a closure with 2 arguments but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    Value val;
+    if (!mapGet(&map->map, argv[0], &val))
+        val = NIL_VAL;
+
+    push(OBJ_VAL(closure));
+    push(argv[0]);
+    push(val);
+    if (!call(closure, 2))
+        return NIL_VAL;
+    if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        return NIL_VAL;
+    val = pop();
+    mapSet(&map->map, argv[0], val);
+
+    return OBJ_VAL(map);
+}
+
+static Value mapComputeIfAbsentNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("'computeIfAbsent(key, closure)', expects 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.computeIfAbsent()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[1]))
+    {
+        runtimeError("Expected a closure but got '%s' for map.computeIfAbsent(key, closure)", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjClosure *closure = AS_CLOSURE(argv[1]);
+    if (closure->function->arity != 1)
+    {
+        runtimeError("Expected a closure with 1 argument but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    Value val;
+    if (!mapGet(&map->map, argv[0], &val))
+    {
+        push(OBJ_VAL(closure));
+        push(argv[0]);
+        if (!call(closure, 1))
+            return NIL_VAL;
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+            return NIL_VAL;
+        val = pop();
+        mapSet(&map->map, argv[0], val);
+    }
+
+    return OBJ_VAL(map);
+}
+
+static Value mapComputeIfPresentNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("'computeIfPresent(key, closure)', expects 2 argument(s) %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.computeIfPresent()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[1]))
+    {
+        runtimeError("Expected a closure but got '%s' for map.computeIfPresent(key, closure)", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    ObjClosure *closure = AS_CLOSURE(argv[1]);
+    if (closure->function->arity != 2)
+    {
+        runtimeError("Expected a closure with 2 arguments but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    Value val;
+    if (mapGet(&map->map, argv[0], &val))
+    {
+        push(OBJ_VAL(closure));
+        push(argv[0]);
+        push(val);
+        if (!call(closure, 2))
+            return NIL_VAL;
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            *hasError = true;
+            return NIL_VAL;
+        }
+        val = pop();
+        mapSet(&map->map, argv[0], val);
+    }
+
+    return OBJ_VAL(map);
+}
+/////////////////// StringBuilder CLASS NATIVE METHODS ////////////////////
 
 static Value sbInitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -2684,11 +3561,13 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
         *hasError = true;
         return NIL_VAL;
     }
-    if (!IS_STR(argv[0]))
+    Value str = argv[0];
+    if (!IS_STR(str))
     {
-        runtimeError("Expected a string but got '%s' for SB.append(str)", VALUE_TYPES[argv[0].type]);
-        *hasError = true;
-        return NIL_VAL;
+        int len = 0;
+        char *buff = ALLOCATE(char, STR_BUFF);
+        valueToString(str, buff, &len);
+        str = OBJ_VAL(takeString(buff, len));
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     Value value;
@@ -2701,12 +3580,12 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.append(str)", VALUE_TYPES[value.type]);
+        runtimeError("Expected StringBuilder to have a list but got '%s' for SB.append(str)", VALUE_TYPES[value.type]);
         *hasError = true;
         return NIL_VAL;
     }
     ObjList *list = AS_LIST(value);
-    appendToList(list, argv[0]);
+    appendToList(list, str);
     return peek(argc);
 }
 
@@ -2773,12 +3652,12 @@ static Value sbToStringNative(int argc, Value *argv, bool *hasError, bool *pushe
         return NIL_VAL;
     }
     ObjList *list = AS_LIST(value);
-    char *str = ALLOCATE(char, 100);
+    char *str = ALLOCATE(char, STR_BUFF);
     sprintf(str, "%s", "");
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
-        char item[10000] = {0};
+        char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
         char *temp = ALLOCATE(char, strlen(str) + len + 1);
         sprintf(temp, "%s%s", str, item);
@@ -2893,10 +3772,96 @@ static Value sbToArrayNative(int argc, Value *argv, bool *hasError, bool *pushed
     ObjList *list = AS_LIST(value);
     return OBJ_VAL(list);
 }
-//
 
-void initVM()
+////////////////////////////////////////////////////////////////////////////
+
+// TODO
+//////////////////////// Regex CLASS NATIVE METHODS ////////////////////////
+
+// static Value regexInitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     if (argc != 1)
+//     {
+//         runtimeError("'init(pattern)' expects 1 argument %d were passed in", argc);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_INSTANCE(peek(argc)))
+//     {
+//         runtimeError("Expected a Regex to be caller but got '%s' for Regex.init()", VALUE_TYPES[peek(argc).type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_STR(argv[0]))
+//     {
+//         runtimeError("Expected a string but got '%s' for Regex.init(pattern)", VALUE_TYPES[argv[0].type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     ObjInstance *instance = AS_INSTANCE(peek(argc));
+//     ObjString *pattern = AS_STR(argv[0]);
+//     int errorOffset;
+//     const char *error;
+//     pcre *re = pcre_compile(pattern->chars, 0, &error, &errorOffset, NULL);
+//     if (re == NULL)
+//     {
+//         runtimeError("Error compiling regex pattern: %s", error);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     tableSet(&instance->fields, copyString("pattern", 7), argv[0]);
+//     tableSet(&instance->fields, copyString("re", 2), OBJ_VAL(re));
+//     return peek(argc);
+// }
+
+////////////////////////////////////////////////////////////////////////////
+
+//////////////////////// Error CLASS NATIVE METHODS ////////////////////////
+
+static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
+    if (argc != 0)
+    {
+        runtimeError("'toStr()' expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected an Error to be caller but got '%s' for Error.toStr()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
+    Value value;
+    if (!tableGet(&instance->fields, copyString("message", 7), &value))
+    {
+        runtimeError("Error instance has no 'message' field");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    // Get stack trace
+    Value stackTrace;
+    if (!tableGet(&instance->fields, copyString("stackTrace", 10), &stackTrace))
+    {
+        runtimeError("Error instance has no 'stack' field");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjString *stack = AS_STR(stackTrace);
+    ObjString *message = AS_STR(value);
+    char str[STR_BUFF] = {0};
+    sprintf(str, "%s%s", stack->chars, message->chars);
+    return OBJ_VAL(copyString(str, message->len + stack->len + 1));
+}
+
+////////////////////////////////////////////////////////////////////////////
+
+void initVM(bool printBytecode, bool printExecStack)
+{
+    printBytecodeGlobal = printBytecode;
+    printExecStackGlobaL = printExecStack;
     srand(time(NULL));
     resetStack();
     vm.objects = NULL;
@@ -2946,10 +3911,23 @@ void initVM()
     vm.clazzStr = NULL;
     vm.clazzStr = copyString("clazz", 5);
 
+    vm.lastError = NULL;
+    vm.isInTryCatch = false;
+    vm.isRepl = false;
+
     // newClass
+    vm.errorClass = NULL;
+    ObjClass *errorClass = primativeClass("Error");
+    vm.errorClass = errorClass;
+    errorClass->initializer = OBJ_VAL(newNative(invalidInitNative));
+    errorClass->toStr = OBJ_VAL(newNative(errorToStringNative));
+    tableSet(&errorClass->methods, copyString("toStr", 5), errorClass->toStr);
+    tableSet(&errorClass->methods, copyString("init", 4), errorClass->initializer);
+
     vm.stringClass = NULL;
     ObjClass *stringClass = primativeClass("String");
     vm.stringClass = stringClass;
+    stringClass->initializer = OBJ_VAL(newNative(invalidInitNative));
     tableSet(&stringClass->methods, copyString("split", 5), OBJ_VAL(newNative(split2Native)));
     tableSet(&stringClass->methods, copyString("replace", 7), OBJ_VAL(newNative(replace2Native)));
     tableSet(&stringClass->methods, copyString("splitOnWs", 9), OBJ_VAL(newNative(splitByWhitespace2Native)));
@@ -2965,28 +3943,56 @@ void initVM()
     tableSet(&stringClass->methods, copyString("title", 5), OBJ_VAL(newNative(titleNative)));
     tableSet(&stringClass->methods, copyString("join", 4), OBJ_VAL(newNative(join2Native)));
     tableSet(&stringClass->methods, copyString("format", 6), OBJ_VAL(newNative(formatNative)));
+    tableSet(&stringClass->methods, copyString("f", 1), OBJ_VAL(newNative(formatNative)));
+    tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
 
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
     vm.listClass = listClass;
+    listClass->initializer = OBJ_VAL(newNative(invalidInitNative));
     tableSet(&listClass->methods, copyString("append", 6), OBJ_VAL(newNative(appendListNative)));
     tableSet(&listClass->methods, copyString("extend", 6), OBJ_VAL(newNative(extendListNative)));
     tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
+    tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
     tableSet(&listClass->methods, copyString("pop", 3), OBJ_VAL(newNative(popListNative)));
+    tableSet(&listClass->methods, copyString("foreach", 7), OBJ_VAL(newNative(foreachNative)));
+    tableSet(&listClass->methods, copyString("map", 3), OBJ_VAL(newNative(mapNative)));
+    tableSet(&listClass->methods, copyString("init", 4), listClass->initializer);
+
+    vm.mapClass = NULL;
+    ObjClass *mapClass = primativeClass("HashMap");
+    vm.mapClass = mapClass;
+    mapClass->initializer = OBJ_VAL(newNative(mapInitNative));
+    mapClass->indexFn = OBJ_VAL(newNative(mapGetNative));
+    mapClass->setFn = OBJ_VAL(newNative(mapSetNative));
+    mapClass->sizeFn = OBJ_VAL(newNative(mapSizeNative));
+
+    tableSet(&mapClass->methods, copyString("get", 3), OBJ_VAL(newNative(mapGetNative)));
+    tableSet(&mapClass->methods, copyString("_get_", 5), OBJ_VAL(newNative(mapGetNative)));
+    tableSet(&mapClass->methods, copyString("set", 3), OBJ_VAL(newNative(mapSetNative)));
+    tableSet(&mapClass->methods, copyString("_set_", 5), OBJ_VAL(newNative(mapSetNative)));
+    tableSet(&mapClass->methods, copyString("_size_", 7), OBJ_VAL(newNative(mapSizeNative)));
+    tableSet(&mapClass->methods, copyString("remove", 6), OBJ_VAL(newNative(mapRemoveNative)));
+    tableSet(&mapClass->methods, copyString("clear", 5), OBJ_VAL(newNative(mapClearNative)));
+    tableSet(&mapClass->methods, copyString("keys", 4), OBJ_VAL(newNative(mapKeysNative)));
+    tableSet(&mapClass->methods, copyString("values", 6), OBJ_VAL(newNative(mapValuesNative)));
+    tableSet(&mapClass->methods, copyString("entries", 7), OBJ_VAL(newNative(mapEntriesNative)));
+    tableSet(&mapClass->methods, copyString("containsKey", 11), OBJ_VAL(newNative(mapContainsKeyNative)));
+    tableSet(&mapClass->methods, copyString("compute", 7), OBJ_VAL(newNative(mapComputeNative)));
+    tableSet(&mapClass->methods, copyString("computeIfAbsent", 15), OBJ_VAL(newNative(mapComputeIfAbsentNative)));
+    tableSet(&mapClass->methods, copyString("computeIfPresent", 16), OBJ_VAL(newNative(mapComputeIfPresentNative)));
 
     ObjClass *sb = primativeClass("StringBuilder");
     sb->initializer = OBJ_VAL(newNative(sbInitNative));
     sb->sizeFn = OBJ_VAL(newNative(sbSizeNative));
     sb->toStr = OBJ_VAL(newNative(sbToStringNative));
-    // tableSet(&sb->methods, copyString("init", 4), sb->initializer);
-    tableSet(&sb->methods, copyString("_size_", 4), sb->sizeFn);
+
+    tableSet(&sb->methods, copyString("_size_", 7), sb->sizeFn);
     tableSet(&sb->methods, copyString("toStr", 5), sb->toStr);
     tableSet(&sb->methods, copyString("append", 6), OBJ_VAL(newNative(sbAppendNative)));
     tableSet(&sb->methods, copyString("clear", 5), OBJ_VAL(newNative(sbClearNative)));
     tableSet(&sb->methods, copyString("pop", 3), OBJ_VAL(newNative(sbPopNative)));
     tableSet(&sb->methods, copyString("toArray", 7), OBJ_VAL(newNative(sbToArrayNative)));
-
-    ObjClass *mapEntryClass = primativeClass("MapEntry");
 
     defineNative("clock", clockNative);
     defineNative("input", inputNative);
@@ -2994,6 +4000,7 @@ void initVM()
     defineNative("kbhit", kbhitNative);
     defineNative("chr", chrNative);
     defineNative("exit", exitNative);
+    defineNative("eval", evalNative);
     defineNative("print_error", printErrNative);
     defineNative("sleep", sleepNative);
     defineNative("clear", clearNative);
@@ -3163,7 +4170,7 @@ void indexBySlice(Value sliceVal, ObjList *list)
     }
 }
 
-static InterpretResult run(bool isRepl)
+InterpretResult run(bool isRepl, int runUntilFrame)
 {
     CallFrame *frame = &vm.frames[vm.frameCount - 1];
 
@@ -3188,17 +4195,20 @@ static InterpretResult run(bool isRepl)
 
     for (;;)
     {
-#if DEBUG_TRACE_EXEC
-        printf("        ");
-        for (Value *slot = vm.stack; slot < vm.stackTop; slot++)
+        // #if DEBUG_TRACE_EXEC
+        if (__glibc_unlikely(printExecStackGlobaL))
         {
-            printf("[ ");
-            printValue(*slot, 0);
-            printf(" ]");
+            printf("        ");
+            for (Value *slot = vm.stack; slot < vm.stackTop; slot++)
+            {
+                printf("[ ");
+                printValue(*slot, 0);
+                printf(" ]");
+            }
+            printf("\n");
+            disassembleInst(&frame->closure->function->chunk, (int)(frame->ip - frame->closure->function->chunk.code));
         }
-        printf("\n");
-        disassembleInst(&frame->closure->function->chunk, (int)(frame->ip - frame->closure->function->chunk.code));
-#endif
+        // #endif
         uint8_t inst;
         switch (inst = READ_BYTE())
         {
@@ -3462,7 +4472,16 @@ static InterpretResult run(bool isRepl)
                         return INTERPRET_RUNTIME_ERROR;
                     }
                 }
-                runtimeError("'%s' is not subsciptable", VALUE_TYPES[listVal.type]);
+                else if (isBuiltinClass(listVal) && !IS_NIL(getVmClass(listVal)->indexFn))
+                {
+                    push(listVal);
+                    push(indexVal);
+                    if (!invoke(vm.indexStr, 1))
+                        return INTERPRET_RUNTIME_ERROR;
+                    frame = &vm.frames[vm.frameCount - 1];
+                    break;
+                }
+                runtimeError("'%s' is not subscriptable", VALUE_TYPES[listVal.type]);
                 return INTERPRET_RUNTIME_ERROR;
             }
             ObjList *list = AS_LIST(listVal);
@@ -3509,7 +4528,18 @@ static InterpretResult run(bool isRepl)
                         return INTERPRET_RUNTIME_ERROR;
                     }
                 }
-                runtimeError("'%s' is not subsciptable", VALUE_TYPES[listVal.type]);
+                else if (isBuiltinClass(listVal) && !IS_NIL(getVmClass(listVal)->setFn))
+                {
+                    push(listVal);
+                    push(indexVal);
+                    push(itemVal);
+                    if (!invoke(vm.setStr, 2))
+                        return INTERPRET_RUNTIME_ERROR;
+                    frame = &vm.frames[vm.frameCount - 1];
+                    break;
+                }
+
+                runtimeError("'%s' is not subscriptable", VALUE_TYPES[listVal.type]);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -3616,20 +4646,32 @@ static InterpretResult run(bool isRepl)
         }
         case OP_GET_PROPERTY:
         {
+            ObjClass *klass;
+            ObjString *name = READ_STRING();
             if (!IS_INSTANCE(peek(0)) && !IS_CLASS(peek(0)))
             {
-                runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", VALUE_TYPES[peek(0).type]);
-                return INTERPRET_RUNTIME_ERROR;
+                if (!isBuiltinClass(peek(0)))
+                {
+                    return INTERPRET_RUNTIME_ERROR;
+                    runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", VALUE_TYPES[peek(0).type]);
+                }
+                klass = getVmClass(peek(0));
+                Value native;
+                if (tableGet(&klass->methods, name, &native))
+                {
+                    ObjBoundBuiltin *bound = newBoundBuiltin(peek(0), ((ObjNative *)AS_OBJ(native)));
+                    pop();
+                    push(OBJ_VAL(bound));
+                    break;
+                }
             }
-            ObjString *name = READ_STRING();
-            ObjClass *klass;
+
             Table *table;
             if (IS_INSTANCE(peek(0)))
             {
                 ObjInstance *instance = AS_INSTANCE(peek(0));
                 klass = instance->klass;
                 table = &instance->fields;
-                // tableAddAll(&klass->staticVars, &instance->fields); TODO:
             }
             else
             {
@@ -3703,6 +4745,8 @@ static InterpretResult run(bool isRepl)
         case OP_PRINT:
         {
             Value val = peek(0);
+            if ((vm.stackTop - vm.stack) <= 1)
+                push(val);
             if (IS_OBJ(val) && AS_OBJ(val)->type == OBJ_INSTANCE && !IS_NIL(AS_INSTANCE(val)->klass->toStr))
             {
                 *(frame->ip)--;
@@ -3711,8 +4755,10 @@ static InterpretResult run(bool isRepl)
                 frame = &vm.frames[vm.frameCount - 1];
                 break;
             }
-
-            printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
+            int strLen = 0;
+            char str[STR_BUFF] = {0};
+            printf("%.*s", strLen, valueToString(pop(), str, &strLen));
+            // printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
 
             printf("\n");
             break;
@@ -3736,16 +4782,15 @@ static InterpretResult run(bool isRepl)
                     Value notStr = pop();
                     ObjString *str = AS_STR(pop());
 
-                    char valStr[10000] = {0};
+                    char valStr[STR_BUFF] = {0};
                     int len = 0;
                     valueToString(notStr, valStr, &len);
-                    push(OBJ_VAL(addTwoStrings(str->chars, valStr, str->len, len))); // strlen(valStr))));
+                    push(OBJ_VAL(addTwoStrings(str->chars, valStr, str->len, len)));
                     break;
                 }
             }
             else if (IS_STR(peek(0)))
             {
-                // rotateStack();
                 if (prefixStr.type != VAL_NIL)
                 {
                     push(prefixStr);
@@ -3758,16 +4803,14 @@ static InterpretResult run(bool isRepl)
                     if (!invoke(vm.toStr, 0))
                         return INTERPRET_RUNTIME_ERROR;
                     frame = &vm.frames[vm.frameCount - 1];
-                    // push(s);
                     break;
                 }
                 else
                 {
-                    // rotateStack();
                     ObjString *str = AS_STR(pop());
                     Value notStr = pop();
 
-                    char valStr[10000] = {0};
+                    char valStr[STR_BUFF] = {0};
                     int len = 0;
                     valueToString(notStr, valStr, &len);
                     push(OBJ_VAL(addTwoStrings(valStr, str->chars, len, str->len)));
@@ -3822,6 +4865,10 @@ static InterpretResult run(bool isRepl)
         {
             Value b = pop();
             Value a = pop();
+
+            bool test = checkIfValuesEqual(a, b);
+            push(BOOL_VAL(test));
+            break;
             if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
             {
                 push(a);
@@ -3923,13 +4970,15 @@ static InterpretResult run(bool isRepl)
             }
             vm.stackTop = frame->slots;
             push(result);
+            if (vm.frameCount < runUntilFrame)
+                return INTERPRET_OK;
+
             frame = &vm.frames[vm.frameCount - 1];
             break;
         }
         case OP_CONSTANT:
         {
             Value constant = READ_CONSTANT();
-
             push(constant);
             break;
         }
@@ -3954,11 +5003,10 @@ static InterpretResult run(bool isRepl)
                 CallFrame preImport = *frame;
                 vm.frameCount = 0;
 
-                InterpretResult res = interpret(source, filePath->chars, false);
+                InterpretResult res = interpret(source, filePath->chars, false, 0, NULL);
                 if (res == INTERPRET_RUNTIME_ERROR)
                 {
                     tableDelete(&vm.imports, filePath);
-                    runtimeError("Cannot import file:\"%s\" As it had the previous errors.\n", filePath->chars);
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 else if (res == INTERPRET_COMPILE_ERROR)
@@ -3970,6 +5018,56 @@ static InterpretResult run(bool isRepl)
                 tableSet(&vm.imports, filePath, NUM_VAL(1));
                 vm.frameCount = 1;
                 vm.frames[0] = preImport;
+            }
+            break;
+        }
+        case OP_TRY:
+        {
+            Value *stop = vm.stackTop;
+            int frameCount = vm.frameCount;
+            ObjUpvalue *upvalues = vm.openUpvalues;
+            bool b4 = vm.isInTryCatch;
+            if (!IS_CLOSURE(peek(0)))
+            {
+                runtimeError("Expected a closure as the first argument to the try block");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            vm.isInTryCatch = true;
+            ObjClosure *tryBlock = AS_CLOSURE(peek(0));
+            call(tryBlock, 0);
+            if (run(isRepl, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+            {
+                vm.stackTop = stop;
+                vm.frameCount = frameCount;
+                vm.openUpvalues = upvalues;
+                pop();
+                push(BOOL_VAL(false));
+            }
+            else
+            {
+                pop();
+                push(BOOL_VAL(true));
+            }
+            vm.isInTryCatch = b4;
+            break;
+        }
+        case OP_CATCH:
+        {
+            if (!IS_CLOSURE(peek(0)))
+            {
+                runtimeError("Expected a closure as the first argument to the catch block");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ObjClosure *catchBlock = AS_CLOSURE(peek(0));
+            ObjInstance *error = newInstance(vm.errorClass);
+            tableSet(&error->fields, copyString("message", 7), OBJ_VAL(vm.lastError));
+            tableSet(&error->fields, copyString("stackTrace", 10), OBJ_VAL(vm.lastErrorTrace));
+            push(OBJ_VAL(error));
+            call(catchBlock, 1);
+            if (run(isRepl, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+            {
+                pop();
+                return INTERPRET_RUNTIME_ERROR;
             }
             break;
         }
@@ -4004,11 +5102,32 @@ static InterpretResult run(bool isRepl)
 #undef READ_STRING
 }
 
-InterpretResult interpret(const char *source, char *file, bool printExpressions)
+InterpretResult interpret(const char *source, char *file, bool printExpressions, int argC, char **argV)
 {
+    bool b4 = vm.isRepl;
+    vm.isRepl = printExpressions;
+    if (argC > 0)
+    {
+        ObjList *args = newList();
+        for (int i = 0; i < argC; i++)
+            appendToList(args, OBJ_VAL(copyString(argV[i], (int)strlen(argV[i]))));
+
+        tableSet(&vm.globals, copyString("ARG_V", 5), OBJ_VAL(args));
+        tableSet(&vm.globals, copyString("ARG_C", 5), NUM_VAL(argC));
+    }
+    else
+    {
+        // check to see if the ARG_V and ARG_C are already defined
+        Value argV;
+        if (!tableGet(&vm.globals, copyString("ARG_V", 5), &argV))
+        {
+            tableSet(&vm.globals, copyString("ARG_V", 5), OBJ_VAL(newList()));
+            tableSet(&vm.globals, copyString("ARG_C", 5), NUM_VAL(0));
+        }
+    }
     ObjString *file_ = copyString(file, (int)strlen(file));
     tableSet(&vm.imports, file_, NUM_VAL(0));
-    ObjFunction *function = compile(source, file, printExpressions);
+    ObjFunction *function = compile(source, file, printExpressions, printBytecodeGlobal);
     if (function == NULL)
         return INTERPRET_COMPILE_ERROR;
     push(OBJ_VAL(function));
@@ -4017,8 +5136,9 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions)
     pop();
     push(OBJ_VAL(closure));
     call(closure, 0);
-
-    return run(printExpressions);
+    InterpretResult result = run(printExpressions, -1);
+    vm.isRepl = b4;
+    return result;
 }
 
 inline void push(Value value)

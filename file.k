@@ -1,5 +1,3 @@
-# import "stdlib.k";
-
 var F_RO = 0
 var F_WO = 1
 var F_RW = 2
@@ -81,7 +79,7 @@ class File{
         this.cursor = this.cursor + len(data)
         if (this.cursor > this.size){
             this.size = this.cursor
-        }
+        }   
         return data
     }
     resetCursor(){

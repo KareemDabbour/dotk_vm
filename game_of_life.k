@@ -1,7 +1,7 @@
 
 var rows = 50;
 var cols = 25;
-var line = " " + join([cols]{"-"}, "") + " ";
+var line = " ${} ".f("".join([cols]{"-"}))
 # var string;
 class GameOfLife{
     init(rows, cols){
@@ -22,21 +22,10 @@ class GameOfLife{
         }
     }
     draw_board(){
-        var string = "";
+        # var string = "";
         print(line);
         for (var row = 0; row < this.rows; row += 1){
-    
-            # string = "|";
-            # for (var col = 0; col < this.cols; col += 1){
-            #     if(this.board[row][col]){
-            #         string += "▓";
-            #     }else{
-            #         string += " ";
-            #     }
-            # }
-            # string += "|";
-            # print(string);
-            print("|" + join(this.board[row], "") + "|");
+            print("|${}|".f("".join(this.board[row])));
         }
         print(line);
     }

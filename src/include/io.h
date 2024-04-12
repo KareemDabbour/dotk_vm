@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// #include <stropts.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 
@@ -77,7 +76,7 @@ static void disableRawMode()
 }
 
 // Function to handle user input and editing
-static void handleInput(char *line, Stack *stack)
+static void handleInput(char *line, Stack *stack, bool piped)
 {
     int position = 0;
     int lineLen = 0;
@@ -86,6 +85,12 @@ static void handleInput(char *line, Stack *stack)
     for (;;)
     {
         int c = getchar();
+
+        if (c == EOF)
+        {
+            disableRawMode();
+            exit(0);
+        }
 
         if (c == '\033')
         { // Escape key (arrow keys)
@@ -107,9 +112,7 @@ static void handleInput(char *line, Stack *stack)
                 {
                     char *prevLine;
                     if (lineLen != 0)
-                    {
                         prevLine = get_prev_line(stack);
-                    }
                     else
                         prevLine = get_curr_line(stack);
                     if (prevLine != NULL)
@@ -127,15 +130,7 @@ static void handleInput(char *line, Stack *stack)
                 {
                     char *nextLine;
                     if (lineLen != 0)
-                    {
                         nextLine = get_next_line(stack);
-                        // if (!cachedLine)
-                        // {
-                        //     line[lineLen] = '\0';
-                        //     push_line(stack, line); // TODO make a backwards push
-                        //     cachedLine = true;
-                        // }
-                    }
                     else
                         nextLine = get_curr_line(stack);
                     if (nextLine != NULL)
@@ -171,6 +166,56 @@ static void handleInput(char *line, Stack *stack)
                     if (position != lineLen)
                         move_cursor_left(lineLen - position);
                 }
+                else if (c == '1' && (c = getchar() == ';')) // ctrl + arrow keys
+                {
+                    c = getchar();
+
+                    if (c == '5')
+                    {
+                        c = getchar();
+                        if (c == 'D') // left arrow
+                        {
+                            int spaces = 0;
+                            while ((position - spaces) > 0 && line[(position - spaces) - 1] == ' ')
+                                spaces++;
+                            while ((position - spaces) > 0 && line[(position - spaces) - 1] != ' ')
+                                spaces++;
+                            position -= spaces;
+                            if (spaces > 0)
+                                move_cursor_left(spaces);
+                        }
+                        else if (c == 'C') // right arrow
+                        {
+                            int spaces = 0;
+                            while ((position + spaces) < lineLen && line[position + spaces] == ' ')
+                                spaces++;
+                            while ((position + spaces) < lineLen && line[position + spaces] != ' ')
+                                spaces++;
+                            position += spaces;
+                            if (spaces > 0)
+                                move_cursor_right(spaces);
+                        }
+                    }
+                }
+            }
+            else if (c == 'd') // ctrl + del
+            {
+                if (position == lineLen)
+                    continue;
+                int spaces = 0;
+                while ((position + spaces) < lineLen && line[position + spaces] == ' ')
+                    spaces++;
+                while ((position + spaces) < lineLen && line[position + spaces] != ' ')
+                    spaces++;
+                if (spaces <= 0)
+                    continue;
+                memmove(line + position, line + position + spaces, lineLen - position + spaces);
+                // position += spaces;
+                lineLen -= spaces;
+                printf("\033[K"); // Clear line from cursor
+                printf("%s", line + position);
+                if (position != lineLen)
+                    move_cursor_left(lineLen - position);
             }
         }
         else if (c == 127 || c == 8)
@@ -190,23 +235,22 @@ static void handleInput(char *line, Stack *stack)
             if (position != lineLen)
                 move_cursor_left(lineLen - position);
         }
-        else if (c >= 32 && c <= 126)
-        { // Printable characters
+        else if (c >= 32 && c <= 126) // Printable characters
+        {
             // Shift characters to the right to simulate insertion
             if (lineLen > position)
                 memmove(line + position + 1, line + position, lineLen - position);
             line[position++] = c;
             line[++lineLen] = '\0';
             cachedLine = false;
-
-            // Print updated line and move cursor
-            // if (lineLen > position)
-            // {
-            printf("\033[K"); // Clear line from cursor
-            printf("%s", line + position - 1);
-            if (lineLen > position)
-                printf("\033[%dD", lineLen - position); // Move cursor left
-            // }
+            if (!piped)
+            {
+                // Print updated line and move cursor
+                printf("\033[K"); // Clear line from cursor
+                printf("%s", line + position - 1);
+                if (lineLen > position)
+                    printf("\033[%dD", lineLen - position); // Move cursor left
+            }
         }
         else if (c == '\n')
         {
@@ -220,6 +264,73 @@ static void handleInput(char *line, Stack *stack)
             line[lineLen + 1] = '\0';
             line[lineLen] = '\n';
             break;
+        }
+        else if (c == 23) // ctrl - backspace
+        {
+            if (position <= 0)
+                continue;
+
+            int spaces = 0;
+            while ((position - spaces) > 0 && line[(position - spaces) - 1] == ' ')
+                spaces++;
+            while ((position - spaces) > 0 && line[(position - spaces) - 1] != ' ')
+                spaces++;
+            if (spaces <= 0)
+                continue;
+
+            cachedLine = false;
+            if (position != lineLen)
+                memmove(line + position - spaces, line + position, lineLen - position + spaces);
+            else
+                line[position - spaces] = '\0';
+            // position--;
+            position -= spaces;
+            lineLen -= spaces;
+            printf("\033[%dD", spaces);
+            printf("\033[K"); // Clear line from cursor
+            printf("%s", line + position);
+            if (position != lineLen)
+                move_cursor_left(lineLen - position);
+        }
+        else if (c == 1) // ctrl - a
+        {
+            if (position != 0)
+                move_cursor_left(position);
+            position = 0;
+        }
+        else if (c == 4) // ctrl - d
+        {
+            if (lineLen == 0)
+            {
+                printf("\n");
+                disableRawMode();
+                exit(0);
+            }
+            else
+            {
+                if (position == lineLen)
+                    continue;
+                memmove(line + position, line + position + 1, lineLen - position + 1);
+                lineLen--;
+                printf("\033[K"); // Clear line from cursor
+                printf("%s", line + position);
+                if (position != lineLen)
+                    move_cursor_left(lineLen - position);
+            }
+        }
+        else if (c == 9) // tab
+        {
+            if (lineLen > position)
+                memmove(line + position + 1, line + position, lineLen - position);
+            line[position++] = ' ';
+            line[++lineLen] = '\0';
+            cachedLine = false;
+
+            // Print updated line and move cursor
+            printf("\033[K"); // Clear line from cursor
+            printf("%s", line + position - 1);
+            if (lineLen > position)
+                printf("\033[%dD", lineLen - position);
         }
     }
 }

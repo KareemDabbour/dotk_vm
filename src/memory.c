@@ -109,10 +109,15 @@ static void blackenObject(Obj *object)
         markObj((Obj *)bound->method);
         break;
     }
+    case OBJ_BOUND_BUILTIN:
+    {
+        ObjBoundBuiltin *bound = (ObjBoundBuiltin *)object;
+        markValue(bound->receiver);
+        break;
+    }
     case OBJ_SLICE:
     {
         ObjSlice *slice = (ObjSlice *)object;
-        // markObj(object);
         break;
     }
     case OBJ_CLASS:
@@ -193,11 +198,23 @@ static void freeObject(Obj *object)
         FREE(ObjBoundMethod, object);
         break;
     }
+    case OBJ_BOUND_BUILTIN:
+    {
+        FREE(ObjBoundBuiltin, object);
+        break;
+    }
     case OBJ_CLOSURE:
     {
         ObjClosure *closure = (ObjClosure *)object;
         FREE_ARRAY(ObjUpvalue *, closure->upvalues, closure->upvalueCount);
         FREE(ObjClosure, object);
+        break;
+    }
+    case OBJ_MAP:
+    {
+        ObjMap *map = (ObjMap *)object;
+        freeMap(&map->map);
+        FREE(ObjMap, object);
         break;
     }
     case OBJ_CLASS:
@@ -256,6 +273,9 @@ static void markRoots()
     markObj((Obj *)vm.hashStr);
     markObj((Obj *)vm.stringClass);
     markObj((Obj *)vm.listClass);
+    markObj((Obj *)vm.mapClass);
+    markObj((Obj *)vm.lastError);
+    markObj((Obj *)vm.errorClass);
 }
 
 void traceReferences()

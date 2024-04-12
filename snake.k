@@ -1,4 +1,4 @@
-import "stdlib.k";
+import "stdlib.k"
 import "file.k"
 
 # var rows = 30;

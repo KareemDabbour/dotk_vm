@@ -8,9 +8,9 @@
 #include "include/object.h"
 #include "include/scanner.h"
 
-#ifdef DEBUG_PRINT_CODE
+// #ifdef DEBUG_PRINT_CODE
 #include "include/debug.h"
-#endif
+// #endif
 
 typedef struct _Parser
 {
@@ -66,8 +66,9 @@ typedef enum _FunctionType
     TYPE_METHOD,
     TYPE_STATIC_METHOD,
     TYPE_INITIALIZER,
-    TYPE_TO_STR,
     TYPE_SCRIPT,
+    TYPE_TRY,
+    TYPE_CATCH,
     TYPE_ANONYMOUS
 } FunctionType;
 
@@ -77,6 +78,8 @@ typedef struct _Compiler
     ObjFunction *function;
     FunctionType type;
     bool isRepl;
+    bool printBytecode;
+    bool isInTryCatch;
     Local locals[LOCALS_MAX];
     int localCount;
     UpValue upValues[UINT8_COUNT];
@@ -271,7 +274,7 @@ static void patchJump(int offset)
     currentChunk()->code[offset + 1] = jump & 0xff;
 }
 
-static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool isRepl)
+static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool isRepl, bool printBytecode)
 {
     parser.file = file;
     compiler->enclosing = current;
@@ -280,27 +283,27 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
     compiler->isRepl = isRepl;
+    compiler->printBytecode = printBytecode;
+    compiler->isInTryCatch = type == TYPE_TRY || type == TYPE_CATCH;
     compiler->function = newFunction();
     current = compiler;
     if (type == TYPE_ANONYMOUS)
-    {
         current->function->name = copyString("<anon_fn>", 10);
-    }
+    else if (type == TYPE_TRY)
+        current->function->name = copyString("<try_block>", 12);
+    else if (type == TYPE_CATCH)
+        current->function->name = copyString("<catch_block>", 14);
     else if (type != TYPE_SCRIPT)
-    {
         current->function->name = copyString(parser.prev.start, parser.prev.len);
-    }
     else
-    {
         current->function->name = copyString(file, strlen(file));
-    }
 
     Local *local = &current->locals[current->localCount++];
     local->depth = 0;
     local->name.start = "";
     local->name.len = 0;
     local->isCaptured = false;
-    if (type != TYPE_FUNCTION)
+    if (type != TYPE_FUNCTION && type != TYPE_TRY && type != TYPE_CATCH && type != TYPE_ANONYMOUS)
     {
         local->name.start = "this";
         local->name.len = 4;
@@ -311,10 +314,11 @@ static ObjFunction *endCompiler()
 {
     emitReturn();
     ObjFunction *func = current->function;
-#if DEBUG_PRINT_CODE
-    if (!parser.hadError)
-        disassembleChunk(currentChunk(), func->name != NULL ? func->name->chars : "<script>");
-#endif
+    // #if DEBUG_PRINT_CODE
+    if (__glibc_unlikely(current->printBytecode))
+        if (!parser.hadError)
+            disassembleChunk(currentChunk(), func->name != NULL ? func->name->chars : "<script>");
+    // #endif
     current = current->enclosing;
     return func;
 }
@@ -346,9 +350,10 @@ static void list(bool canAssign)
 static void defaultSizeList(bool canAssign)
 {
     if (!check(TOKEN_RIGHT_BRACKET))
-    {
         parsePrecedence(PREC_OR);
-    }
+    else
+        emitConst(NUM_VAL(0)); // This allows for empty lists to be created with either {} or [].
+
     consume(TOKEN_RIGHT_BRACKET, "Expect ']' after default list builder");
     if (check(TOKEN_LEFT_BRACE))
     {
@@ -599,7 +604,7 @@ static void block()
 static void function(FunctionType type)
 {
     Compiler compiler;
-    initCompiler(&compiler, type, parser.file, current->isRepl);
+    initCompiler(&compiler, type, parser.file, current->isRepl, current->printBytecode);
     beginScope();
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
@@ -654,7 +659,6 @@ static void method()
         else
             emitByte(OP_NIL);
 
-        // consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
         match(TOKEN_SEMICOLON);
         emitBytes(OP_STATIC_VAR, constant);
     }
@@ -964,18 +968,18 @@ static void ifStatement()
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'if'");
     expression();
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
-    int thenJump = emitJump(OP_JUMP_IF_FALSE);
+    int jumpToElseBlock = emitJump(OP_JUMP_IF_FALSE);
     emitByte(OP_POP);
     statement();
 
-    int elseJump = emitJump(OP_JUMP);
+    int getPastElse = emitJump(OP_JUMP);
 
-    patchJump(thenJump);
+    patchJump(jumpToElseBlock);
     emitByte(OP_POP);
 
     if (match(TOKEN_ELSE))
         statement();
-    patchJump(elseJump);
+    patchJump(getPastElse);
 }
 
 static void printStatement()
@@ -1064,7 +1068,7 @@ static void continueStatement()
 {
     if (innermostLoopStart == -1)
     {
-        error("Can't use 'continue' outside of a loop.");
+        error("Can't use 'continue' outside of a loop.\n\tThis includes trying to break in a try-catch block surrounded by a loop.\n\tHINT: You can use 'return;' to escape try-catch blocks. Or you can wrap the loop in the try-catch block.");
         return;
     }
 
@@ -1087,19 +1091,94 @@ static void breakStatement()
 {
     if (innermostLoopStart == -1)
     {
-        error("Can't use 'break' outside of a loop.");
+        error("Can't use 'break' outside of a loop.\n\tThis includes trying to break in a try-catch block surrounded by a loop.\n\tHINT: You can use 'return;' to escape try-catch blocks. Or you can wrap the loop in the try-catch block.");
         return;
     }
 
     // consume(TOKEN_SEMICOLON, "Expect ';' after 'break'.");
     match(TOKEN_SEMICOLON);
+    // if (!current->isInTryCatch)
+    // {
     for (int i = current->localCount - 1;
          i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
          i--)
     {
         emitByte(OP_POP);
     }
+    // }
     breakAddress = emitJump(OP_JUMP);
+}
+
+static void enterTryCatch()
+{
+    //// This is a bit of a hack. We're going to compile the try block as a function, then store it in the closure of the try-catch block.
+
+    // And because of this, we need to save the state of the current compiler, and then restore it after we're done compiling the try block.
+    int surroundingLoopStart = innermostLoopStart;
+    int surroundingBreakAddr = breakAddress;
+    int surroundingLoopScopeDepth = innermostLoopScopeDepth;
+    int surroundingLoopEnd = innermostLoopEnd;
+    innermostLoopStart = -1;
+    breakAddress = -1;
+    innermostLoopScopeDepth = 0;
+    innermostLoopEnd = -1;
+
+    Compiler compiler;
+    initCompiler(&compiler, TYPE_TRY, parser.file, current->isRepl, current->printBytecode);
+    beginScope();
+    statement();
+    ObjFunction *function = endCompiler();
+
+    uint16_t constant = makeConstant(OBJ_VAL(function));
+    emitBytes(OP_CLOSURE, constant);
+    for (int i = 0; i < function->upValueCount; i++)
+    {
+        emitByte(compiler.upValues[i].isLocal ? 1 : 0);
+        emitByte(compiler.upValues[i].index);
+    }
+    ////
+    emitByte(OP_TRY);
+    int jumpToElseBlock = emitJump(OP_JUMP_IF_FALSE);
+    // emitByte(OP_POP);
+
+    int getPastElse = emitJump(OP_JUMP);
+
+    patchJump(jumpToElseBlock);
+    emitByte(OP_POP);
+
+    //// Now we compile the catch block
+    consume(TOKEN_CATCH, "Expect 'catch' after try block");
+    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'catch'");
+
+    innermostLoopStart = -1;
+    breakAddress = -1;
+    innermostLoopScopeDepth = 0;
+    innermostLoopEnd = -1;
+    initCompiler(&compiler, TYPE_CATCH, parser.file, current->isRepl, current->printBytecode);
+    beginScope();
+    uint16_t catchVar = parseVariable("Expect variable name");
+    defineVar(catchVar);
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after catch variable");
+    statement();
+    function = endCompiler();
+    function->arity++;
+    constant = makeConstant(OBJ_VAL(function));
+    emitBytes(OP_CLOSURE, constant);
+    for (int i = 0; i < function->upValueCount; i++)
+    {
+        emitByte(compiler.upValues[i].isLocal ? 1 : 0);
+        emitByte(compiler.upValues[i].index);
+    }
+
+    emitByte(OP_CATCH);
+    // statement();
+
+    patchJump(getPastElse);
+    endScope();
+    innermostLoopStart = surroundingLoopStart;
+    breakAddress = surroundingBreakAddr;
+    innermostLoopScopeDepth = surroundingLoopScopeDepth;
+    innermostLoopEnd = surroundingLoopEnd;
 }
 
 static void statement()
@@ -1120,6 +1199,8 @@ static void statement()
         continueStatement();
     else if (match(TOKEN_BREAK))
         breakStatement();
+    else if (match(TOKEN_TRY))
+        enterTryCatch();
     else if (match(TOKEN_LEFT_BRACE))
     {
         beginScope();
@@ -1611,30 +1692,23 @@ static ParseRule *getRule(TokenType type)
 
 static void importStatement()
 {
-
-    if (match(TOKEN_TEMPLATE_STRING))
-    {
-        templateString(true);
-        // consume(TOKEN_SEMICOLON, "Expect ';' after import");
-        match(TOKEN_SEMICOLON);
-        emitByte(OP_IMPORT);
-    }
+    expression();
+    emitByte(OP_IMPORT);
+    match(TOKEN_SEMICOLON);
 }
 
-ObjFunction *compile(const char *source, char *file, bool isRepl)
+ObjFunction *compile(const char *source, char *file, bool isRepl, bool printBytecode)
 {
     initScanner(source);
     Compiler compiler;
-    initCompiler(&compiler, TYPE_SCRIPT, file, isRepl);
+    initCompiler(&compiler, TYPE_SCRIPT, file, isRepl, printBytecode);
     compiler.isRepl = isRepl;
     parser.panicMode = false;
     parser.hadError = false;
     advance();
 
     while (!match(TOKEN_EOF))
-    {
         declaration();
-    }
 
     consume(TOKEN_EOF, "Expect end of expr");
     ObjFunction *function = endCompiler();

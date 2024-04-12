@@ -57,7 +57,12 @@ fn handle(sock){
     sock.close();
 }
 while(true){
+    try{
     handle(sock.accept());
+
+    }catch(e){
+        print("ERROR:: ${}".f(e.toStr()[9:]));
+    }
 }
 
 

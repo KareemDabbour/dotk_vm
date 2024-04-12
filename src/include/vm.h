@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 
 #define BUFFER_SIZE 104857
+#define STR_BUFF BUFFER_SIZE
 #define FRAMES_MAX 64 * 2 * 2 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
 
@@ -45,6 +46,8 @@ typedef struct _VM
     ObjString *clazzStr;
     ObjClass *stringClass;
     ObjClass *listClass;
+    ObjClass *mapClass;
+    ObjClass *errorClass;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
 
@@ -56,6 +59,10 @@ typedef struct _VM
     Obj **grayStack;
     int importCount;
     char **importSources;
+    bool isInTryCatch;
+    bool isRepl;
+    ObjString *lastError;
+    ObjString *lastErrorTrace;
 } VM;
 
 typedef enum
@@ -65,12 +72,16 @@ typedef enum
     INTERPRET_RUNTIME_ERROR,
 } InterpretResult;
 
-void initVM();
+void initVM(bool printBytecode, bool printExecStack);
 void freeVM();
 
-InterpretResult interpret(const char *source, char *file, bool printExpressions);
+InterpretResult interpret(const char *source, char *file, bool printExpressions, int argC, char **argV);
 extern VM vm;
 void push(Value value);
 Value pop();
 void rotateStack();
+
+// This is so I can use the equal override in classes for the builtin Map class
+void markMap(Map *map);
+void mapRemoveWhite(Map *map);
 #endif

@@ -83,7 +83,7 @@ static Token errorToken(const char *message)
         .start = message,
         .len = (int)(strlen(message)),
         .line = scanner.line,
-        .col = scanner.col - token.len};
+        .col = scanner.col};
     return token;
 }
 
@@ -154,7 +154,18 @@ static TokenType identifierType()
                 return checkKeyword(2, 3, "ass", TOKEN_CLASS);
 
             case 'a':
-                return checkKeyword(2, 2, "se", TOKEN_CASE);
+            {
+                if (scanner.current - scanner.start > 2)
+                {
+                    switch (scanner.start[2])
+                    {
+                    case 't':
+                        return checkKeyword(3, 2, "ch", TOKEN_CATCH);
+                    case 's':
+                        return checkKeyword(3, 1, "e", TOKEN_CASE);
+                    }
+                }
+            }
             case 'o':
             {
 
@@ -217,7 +228,18 @@ static TokenType identifierType()
             case 'h':
                 return checkKeyword(2, 2, "is", TOKEN_THIS);
             case 'r':
-                return checkKeyword(2, 2, "ue", TOKEN_TRUE);
+            {
+                if (scanner.current - scanner.start > 2)
+                {
+                    switch (scanner.start[2])
+                    {
+                    case 'y':
+                        return checkKeyword(3, 0, "", TOKEN_TRY);
+                    case 'u':
+                        return checkKeyword(3, 1, "e", TOKEN_TRUE);
+                    }
+                }
+            }
             }
         }
         break;
@@ -308,7 +330,10 @@ static Token templateString()
 
     if (isAtEnd())
         return errorToken("Unterminated template string.");
-    advance();
+    if (peek() == '"')
+        advance();
+    else
+        return errorToken("Unterminated template string.");
     return makeToken(TOKEN_TEMPLATE_STRING);
 }
 

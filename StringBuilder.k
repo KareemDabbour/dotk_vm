@@ -1,3 +1,4 @@
+print("[WARN]: Non-built-in StringBuilder is deprecated. Use the built-in StringBuilder instead. It's a drop in replacement and theres no need to import \"StringBuilder.k\"");
 class StringBuilder{
   INITIAL_CAPACITY = 16;
   init(s){

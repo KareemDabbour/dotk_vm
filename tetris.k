@@ -84,10 +84,7 @@ fn printBoard(board, score, currPiece, nextPiece, piecePos, errMsg){
 }
 
 fn createBoard(){
-    var board = [EFF_BOARD_SIZE]{0};
-    for (var i = 0; i < EFF_BOARD_SIZE; i += 1){
-        board[i] = [EFF_BOARD_SIZE]{0};
-    }
+    var board = [EFF_BOARD_SIZE]{0}.map(fn (x) => [EFF_BOARD_SIZE]{0});
     for(var i = 0; i < EFF_BOARD_SIZE; i += 1){
         board[i][0] = 1;
         board[EFF_BOARD_SIZE - 1][i] = 1;
@@ -255,7 +252,7 @@ fn play(){
     printBoard(board, score, currPiece, nextPiece, piecePos, null);
     while(true && !isGameOver(board, currPiece, piecePos)){     
         var moveDown = true;
-            var error_message = null;
+        var error_message = null;
         if(kbhit()){
             var move = chr(getc());
 
@@ -263,7 +260,7 @@ fn play(){
                 case MOVE_LEFT{
                     if (canMoveLeft(board, currPiece, piecePos)){
                         piecePos = getLeftMove(piecePos);
-                        moveDown = true;
+                        moveDown = false;
                     }else{
                         error_message = "Cannot move left";
                     }
@@ -271,7 +268,7 @@ fn play(){
                 case MOVE_RIGHT{
                     if (canMoveRight(board, currPiece, piecePos)){
                         piecePos = getRightMove(piecePos);
-                        moveDown = true;
+                        moveDown = false;
 
                     }else{
                         error_message = "Cannot move right";
@@ -280,7 +277,7 @@ fn play(){
                 case ROTATE_ANTICLOCKWISE{
                     if (canRotateAntiClockwise(board, currPiece, piecePos)){
                         currPiece = rotateAntiClockwise(currPiece);
-                        moveDown = true;
+                        moveDown = false;
                     }else{
                         error_message = "Cannot rotate anti-clockwise";
                     }
@@ -288,7 +285,7 @@ fn play(){
                 case ROTATE_CLOCKWISE{
                     if (canRotateClockwise(board, currPiece, piecePos)){
                         currPiece = rotateClockwise(currPiece);
-                        moveDown = true;
+                        moveDown = false;
                     }else{
                         error_message = "Cannot rotate clockwise";
                     }

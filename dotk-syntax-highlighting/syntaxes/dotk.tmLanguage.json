@@ -38,7 +38,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control",
-					"match": "\\b(if|else|return|while|break|continue|for|import|var|fn|class|_get_|_set_|_size_|_hash_|toStr|_lt_|_gt_|_eq_|init)\\b"
+					"match": "\\b(if|else|return|while|break|continue|for|import|var|fn|class|_get_|_set_|_size_|_hash_|toStr|_lt_|_gt_|_eq_|init|try|catch)\\b"
 				}
 			]
 		},

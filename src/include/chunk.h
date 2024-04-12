@@ -56,7 +56,9 @@ typedef enum
     OP_WIDE,
     OP_STATIC_VAR,
     OP_IMPORT,
-    OP_BUILD_SLICE
+    OP_BUILD_SLICE,
+    OP_TRY,
+    OP_CATCH
 } OpCode;
 
 typedef struct

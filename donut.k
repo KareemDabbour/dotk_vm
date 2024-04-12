@@ -9,24 +9,15 @@ var B = 0
 var screenWidth = 20
 var screenHeight = 20
 var K1 = screenHeight*K2*3/(8*(R1+R2))
-# var x
 
 for(;;){  
-  # clear()
   var cosA = cos(A)
   var sinA = sin(A)
   var cosB = cos(B)
   var sinB = sin(B)
-  var output = [screenHeight]
-  var zbuffer = [screenHeight]
-  for (var i = 0; i < screenHeight; i+=1){
-    output[i] = [screenWidth]
-    zbuffer[i] = [screenWidth]
-    for (var j = 0; j < screenWidth; j+=1){
-      output[i][j] = " "
-      zbuffer[i][j] = 0
-    }
-  }
+  var output = [screenHeight].map(fn(x)=>[screenWidth]{" "})
+  var zbuffer = [screenHeight].map(fn(x)=>[screenWidth]{0})
+
   for (var theta = 0; theta < 6.28; theta += theta_spacing){
     var costheta = cos(theta)
     var sintheta = sin(theta)
@@ -50,14 +41,11 @@ for(;;){
           output[xp][yp] = ".,-~:;=!*#$@"[int(luminance_index)]
         }
       }
-
     }
   }
   clear()
   for (var i = 0; i < screenHeight; i+=1){
-    for (var j = 0; j < screenWidth; j+=1){
-      write(1, output[i][j])
-    }
+    write(1, "".join(output[i]))
     write(1, "\n")
   }
   A += 0.04
