@@ -7,8 +7,6 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 VM vm;
@@ -60,7 +58,6 @@ static void runtimeError(const char *format, ...)
             len += sprintf(trace + len, " in %s()", function->name->chars);
         len += sprintf(trace + len, "\n");
     }
-    // len += sprintf(trace + len, "%s\n", vm.lastError->chars);
     vm.lastErrorTrace = takeString(trace, len);
 
     resetStack();
@@ -90,7 +87,8 @@ static bool isBuiltinClass(Value value)
     return IS_OBJ(value) && (AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); // IS_LIST(val) || IS_MAP(val) || IS_STR(val);
 }
 
-static bool isBuiltinClazz(ObjClass* clazz){
+static bool isBuiltinClazz(ObjClass *clazz)
+{
     return clazz == vm.listClass || clazz == vm.mapClass || clazz == vm.stringClass;
 }
 
@@ -109,19 +107,13 @@ bool checkIfValuesEqual(Value a, Value b)
 {
     if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
     {
-        Value *stop = vm.stackTop;
         int frameCount = vm.frameCount;
-        ObjUpvalue *upvalues = vm.openUpvalues;
-        // vm.stackTop -= 2;
         push(a);
         push(b);
         if (!invoke(vm.eqStr, 1))
             return false;
         if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
         {
-            // vm.stackTop = stop;
-            // vm.frameCount = frameCount;
-            // vm.openUpvalues = upvalues;
             return false;
         }
         Value ret = pop();
@@ -206,7 +198,6 @@ static uint32_t hashValueDeep(Value value)
         Value *stop = vm.stackTop;
         int frameCount = vm.frameCount;
         ObjUpvalue *upvalues = vm.openUpvalues;
-        // vm.stackTop -= 2;
         push(value);
         if (!invoke(vm.hashStr, 0))
             return 0;
@@ -473,6 +464,8 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
             type = "map";
             break;
         case OBJ_CLASS:
+            type = "class";
+            break;
         case OBJ_INSTANCE:
             type = "object";
             break;
@@ -487,6 +480,7 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
         case OBJ_FUNCTION:
         case OBJ_CLOSURE:
         case OBJ_BOUND_METHOD:
+        case OBJ_BOUND_BUILTIN:
             type = "function";
             break;
         case OBJ_UPVALUE:
@@ -730,7 +724,7 @@ char *valueToString(Value val, char *buff, int *len)
         }
     }
     snprintf(buff, 10, "%s", "<unknown>");
-    *len = (int)strnlen(buff,10);
+    *len = (int)strnlen(buff, 10);
     return buff;
 }
 
@@ -817,7 +811,6 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
         char *temp = ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
         sprintf(temp, "%s%s%s", str, item, sep->chars);
         FREE_ARRAY(char, str, strlen(str) + 1);
-        // FREE_ARRAY(char, item, strlen(item) + 1);
         str = temp;
     }
     if (list->count > 0)
@@ -935,7 +928,6 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
             char *chr = ALLOCATE(char, 2);
             chr[0] = AS_STR(argv[0])->chars[i];
             chr[1] = '\0';
-            // char *s = AS_STR(argv[0])->chars + i;
             appendToList(list, OBJ_VAL(takeString(chr, 1)));
         }
         return OBJ_VAL(list);
@@ -997,7 +989,17 @@ static Value printErrNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (vm.frameCount > 1)
         vm.frameCount--;
-    runtimeError(AS_CSTR(argv[0]));
+    if (!IS_STR(argv[0]))
+    {
+        char buff[STR_BUFF] = {0};
+        int len = 0;
+        valueToString(argv[0], buff, &len);
+        runtimeError(buff);
+    }
+    else
+    {
+        runtimeError(AS_CSTR(argv[0]));
+    }
     return argv[0];
 }
 
@@ -1043,32 +1045,6 @@ static Value ordNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 static Value socketNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-    // if (argc != 2)
-    // {
-    //     runtimeError("Expected 2 arguments but %d passed in for socket(host, port)", argc);
-    //     *hasError = true;
-    //     return NIL_VAL;
-    // }
-    // if (!IS_NUM(argv[0]))
-    // {
-    //     runtimeError("Expected a string but got '%s' for socket(host, port)", VALUE_TYPES[argv[0].type]);
-    //     *hasError = true;
-    //     return NIL_VAL;
-    // }
-    // if (!IS_NUM(argv[1]))
-    // {
-    //     runtimeError("Expected a number but got '%s' for socket(host, port)", VALUE_TYPES[argv[1].type]);
-    //     *hasError = true;
-    //     return NIL_VAL;
-    // }
-    // if (!IS_NUM(argv[2]))
-    // {
-    //     runtimeError("Expected a number but got '%s' for socket(host, port)", VALUE_TYPES[argv[1].type]);
-    //     *hasError = true;
-    //     return NIL_VAL;
-    // }
-    // char *host = AS_CSTR(argv[0]);
-    // int port = (int)AS_NUM(argv[1]);
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0)
     {
@@ -3339,6 +3315,27 @@ static Value mapGetNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     return val;
 }
 
+static Value mapToStrNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0)
+    {
+        runtimeError("'toStr()', expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for map.toStr()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjMap *map = AS_MAP(peek(argc));
+    char *str = ALLOCATE(char, STR_BUFF);
+    int len = 0;
+    mapToString(&map->map, str, &len);
+    return OBJ_VAL(takeString(str, len));
+}
+
 static Value mapSetNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 2)
@@ -3902,30 +3899,40 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
 
     char str[STR_BUFF] = {0};
     int len = 0;
-    if(IS_STR(messageVal) && IS_STR(stackTrace))
+    if (IS_STR(messageVal) && IS_STR(stackTrace))
     {
         ObjString *stack = AS_STR(stackTrace);
         ObjString *message = AS_STR(messageVal);
         sprintf(str, "%s%s", stack->chars, message->chars);
         len = stack->len + message->len + 1;
-    }else{
+    }
+    else
+    {
         char message[STR_BUFF] = {0};
         int messageLen = 0;
         char stack[STR_BUFF] = {0};
         int stackLen = 0;
         valueToString(messageVal, message, &messageLen);
         valueToString(stackTrace, stack, &stackLen);
-        sprintf(str, "Error: %s \nwith trace: %s", message, stack);
+        sprintf(str, "Error: %.*s \nwith trace: %.*s", messageLen, message, stackLen, stack);
         len = messageLen + stackLen + 23;
     }
     return OBJ_VAL(copyString(str, len));
-    
 }
 
 ////////////////////////////////////////////////////////////////////////////
 
 void initVM(bool printBytecode, bool printExecStack)
 {
+    if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
+    {
+        fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
+    }
+    // if (signal(SIGSEGV, sigSegvHandler) == SIG_ERR)
+    // {
+    //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
+    // }
+
     printBytecodeGlobal = printBytecode;
     printExecStackGlobaL = printExecStack;
     srand(time(NULL));
@@ -4032,12 +4039,15 @@ void initVM(bool printBytecode, bool printExecStack)
     mapClass->indexFn = OBJ_VAL(newNative(mapGetNative));
     mapClass->setFn = OBJ_VAL(newNative(mapSetNative));
     mapClass->sizeFn = OBJ_VAL(newNative(mapSizeNative));
+    mapClass->toStr = OBJ_VAL(newNative(mapToStrNative));
 
-    tableSet(&mapClass->methods, copyString("get", 3), OBJ_VAL(newNative(mapGetNative)));
-    tableSet(&mapClass->methods, copyString("_get_", 5), OBJ_VAL(newNative(mapGetNative)));
-    tableSet(&mapClass->methods, copyString("set", 3), OBJ_VAL(newNative(mapSetNative)));
-    tableSet(&mapClass->methods, copyString("_set_", 5), OBJ_VAL(newNative(mapSetNative)));
-    tableSet(&mapClass->methods, copyString("_size_", 7), OBJ_VAL(newNative(mapSizeNative)));
+    tableSet(&mapClass->methods, copyString("get", 3), mapClass->indexFn);
+    tableSet(&mapClass->methods, copyString("_get_", 5), mapClass->indexFn);
+    tableSet(&mapClass->methods, copyString("set", 3), mapClass->setFn);
+    tableSet(&mapClass->methods, copyString("put", 3), mapClass->setFn);
+    tableSet(&mapClass->methods, copyString("_set_", 5), mapClass->setFn);
+    tableSet(&mapClass->methods, copyString("toStr", 5), mapClass->toStr);
+    tableSet(&mapClass->methods, copyString("_size_", 7), mapClass->sizeFn);
     tableSet(&mapClass->methods, copyString("remove", 6), OBJ_VAL(newNative(mapRemoveNative)));
     tableSet(&mapClass->methods, copyString("clear", 5), OBJ_VAL(newNative(mapClearNative)));
     tableSet(&mapClass->methods, copyString("keys", 4), OBJ_VAL(newNative(mapKeysNative)));
@@ -4636,7 +4646,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("Superclass must be a class");
                 return INTERPRET_RUNTIME_ERROR;
             }
-            ObjClass* superclazz = AS_CLASS(superclass);
+            ObjClass *superclazz = AS_CLASS(superclass);
             if (isBuiltinClazz(superclazz))
             {
                 runtimeError("Cannot inherit from a builtin class '%s'", superclazz->name->chars);

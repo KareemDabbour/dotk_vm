@@ -1,6 +1,5 @@
 #include "include/scanner.h"
 #include "include/common.h"
-#include <stdio.h>
 #include <string.h>
 
 typedef struct _Scanner

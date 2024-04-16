@@ -1,9 +1,12 @@
 #ifndef dotk_common_h
 #define dotk_common_h
 
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #define DEBUG_PRINT_CODE 0
@@ -31,7 +34,20 @@
 
 #if defined(__GNUC__) || defined(__clang__)
 #define unlikely(x) __builtin_expect((x), 0)
-#define likely(x)   __builtin_expect((x), 1)
+#define likely(x) __builtin_expect((x), 1)
 #endif
+
+static void sigpipeHandler(int signum)
+{
+}
+
+static void sigSegvHandler(int signum)
+{
+    if (signum == SIGSEGV)
+    {
+        fprintf(stderr, "OH NO! You ran into a SegFault!\nPlease report this issue to the developer.\n");
+        exit(1);
+    }
+}
 
 #endif

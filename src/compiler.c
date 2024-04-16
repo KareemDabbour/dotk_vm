@@ -1,5 +1,3 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "include/common.h"
@@ -955,12 +953,13 @@ static void forStatement()
         emitByte(OP_POP); // pop the condition off the stack
     }
 
-    if (numberOfBreaksPrior < numberOfBreaks){
+    if (numberOfBreaksPrior < numberOfBreaks)
+    {
         for (int i = numberOfBreaksPrior; i < numberOfBreaks; i++)
         {
             patchJump(breakAddresses[i]);
         }
-    } 
+    }
 
     innermostLoopStart = surroundingLoopStart;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;
@@ -1118,7 +1117,7 @@ static void breakStatement()
     }
     // }
 
-    breakAddresses[numberOfBreaks++] = emitJump(OP_JUMP);;
+    breakAddresses[numberOfBreaks++] = emitJump(OP_JUMP);
 }
 
 static void enterTryCatch()

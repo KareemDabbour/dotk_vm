@@ -176,7 +176,7 @@ class Request{
     init(){
         this.type = RequestType.UNKNOWN;
         this.path = null;
-        this.body = Map();
+        this.body = HashMap();
     }
     getType(){
         return this.type;
@@ -202,7 +202,7 @@ class Request{
         return this.body;
     }
     setBody(body){
-        if (!body && type(body) != "Map"){
+        if (!body && !instanceof(body, HashMap)){
             print_error("body must be a Map");
             return null;
         }
@@ -234,7 +234,7 @@ class Request{
             .append(this.path.toStr());
             # .append(", ");
         }
-        if(!this.body.isEmpty()){
+        if(len(this.body)){
             sb.append(", Body: ")
             .append(this.body.toStr());
         }
@@ -290,7 +290,7 @@ class Request{
             else{
                 val = "";
             }
-            this.body.put(param[0],val);
+            this.body[param[0]]= val;
         }
         return this;
     }
@@ -361,7 +361,7 @@ class Response{
     toStr(){
         var sb = StringBuilder("Response: { statusCode: ");
         sb.append(this.statusCode);
-        if(!this.body.isEmpty()){
+        if(len(this.body)){
             sb.append(", Body: ")
             .append(this.body.toStr());
         }
@@ -373,7 +373,7 @@ class Response{
 class Path{
     init(){
         this.path = null;
-        this.queryParams = Map();
+        this.queryParams = HashMap();
     }
 
     getPath(){
@@ -402,7 +402,7 @@ class Path{
                 else{
                     val = "";
                 }
-                ret.queryParams.put(param[0],val);
+                ret.queryParams.set(param[0],val);
             }
         }
         return ret;
@@ -411,9 +411,9 @@ class Path{
         var sb = StringBuilder("Path: { path: \"");
         sb.append(this.path)
         .append("\"");
-        if(!this.queryParams.isEmpty()){
+        if(len(this.queryParams)){
             sb.append(", queryParams: ")
-            .append(this.queryParams.toStr());
+            .append(this.queryParams);
         }
         sb.append(" }");
         return sb.toStr();

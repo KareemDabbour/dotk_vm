@@ -1,7 +1,6 @@
 #include "include/debug.h"
 #include "include/object.h"
 #include "include/value.h"
-#include <stdio.h>
 
 bool nextWideOp = false;
 

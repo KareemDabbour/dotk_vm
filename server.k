@@ -1,4 +1,3 @@
-import "stdlib.k";
 import "socket.k";
 import "file.k";
 
@@ -45,23 +44,32 @@ fn processRequest(req){
     
 }
 
-fn handle(sock){
-    var request = sock.receive();
-    
-    var response = processRequest(request);
-    if (!response){
-        sock.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
-    }else if(!sock.sendFile(response)){
-        sock.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
-    }
-    sock.close();
-}
-while(true){
+fn handle(sockIn){
+
     try{
-    handle(sock.accept());
+        var request = sockIn.receive();
+        var response = processRequest(request);
+        if (!response){
+            sockIn.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+        }else if(!sockIn.sendFile(response)){
+            sockIn.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+        }
 
     }catch(e){
-        print("ERROR:: ${}".f(e.toStr()[9:]));
+        print ("ERROR in HANDLE::${}".f(e));
+        sockIn.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+        
+    }
+
+}
+
+while(true){
+    try {
+        var new_sock = sock.accept();
+        handle(new_sock);
+        new_sock.close();
+    } catch(e) {
+        print("ERROR::${}".f(e));
     }
 }
 
