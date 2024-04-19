@@ -26,3 +26,6 @@ replay_pid*
 **/output/**
 **/.vscode/**
 **/temp/**
+
+# Out file
+*.out

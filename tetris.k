@@ -1,12 +1,16 @@
 import "stdlib.k";
-var BOARD_SIZE = 15;
+var BOARD_SIZE = 10;
+var HEIGHT = 15;
 var EFF_BOARD_SIZE = BOARD_SIZE + 2;
+
+var FILLED_ROW = [EFF_BOARD_SIZE]{1};
+
 
 var ICONS = {" . ", " # ",};
 
 var PIECES = {
 
-    {{1}, {1}, {1}, {1}},
+    {{1,1,1,1}},
 
     {{1, 0},
      {1, 0},
@@ -52,7 +56,7 @@ fn printBoard(board, score, currPiece, nextPiece, piecePos, errMsg){
         }
     }
     var sb = StringBuilder("SCORE: ").append(score).append("\n");
-    for (var row = 0; row < EFF_BOARD_SIZE; row += 1){
+    for (var row = 0; row < HEIGHT; row += 1){
         for (var col = 0; col < EFF_BOARD_SIZE; col += 1){
             sb.append(ICONS[boardCopy[row][col]]);
         }
@@ -84,18 +88,19 @@ fn printBoard(board, score, currPiece, nextPiece, piecePos, errMsg){
 }
 
 fn createBoard(){
-    var board = [EFF_BOARD_SIZE]{0}.map(fn (x) => [EFF_BOARD_SIZE]{0});
-    for(var i = 0; i < EFF_BOARD_SIZE; i += 1){
-        board[i][0] = 1;
-        board[EFF_BOARD_SIZE - 1][i] = 1;
-        board[i][EFF_BOARD_SIZE - 1] = 1;
+    var ret = [HEIGHT]{0}.map(fn (x) => [EFF_BOARD_SIZE]{0});
+    for(var i = 0; i < HEIGHT; i += 1){
+        ret[i][0] = 1;
+        # ret[EFF_BOARD_SIZE - 1][i] = 1;
+        ret[i][-1] = 1;
     }
-    return board;
+    ret[-1] = FILLED_ROW;
+    return ret;
 }
 
 fn copyBoard(board){
     var ret = createBoard();
-    for (var i = 0; i < EFF_BOARD_SIZE; i += 1){
+    for (var i = 0; i < HEIGHT; i += 1){
         for (var j = 0; j < EFF_BOARD_SIZE; j += 1){
             ret[i][j] = board[i][j];
         }
@@ -109,8 +114,8 @@ fn getRandomPiece(){
 }
 
 fn getRandomPosition(currPiece){
-    var currPieceSize = len(currPiece);
-    return {0, randInt(1, EFF_BOARD_SIZE - currPieceSize - 1)};
+    var currPieceSize = len(currPiece[0]);
+    return {0, randInt(1, BOARD_SIZE - currPieceSize + 1)};
 }
 
 fn isGameOver(board, currPiece, piecePos){
@@ -168,11 +173,11 @@ fn mergeBoardAndPiece(board, currPiece, piecePos){
         }
     }
 
-    var filledRow = [EFF_BOARD_SIZE]{1};
+    
 
     var filledRows = 0;
-    for (var i = 0; i < EFF_BOARD_SIZE - 1; i += 1){
-        if (board[i] == filledRow){
+    for (var i = 0; i < HEIGHT - 1; i += 1){
+        if (board[i] == FILLED_ROW){
             filledRows += 1;
         }
     }
@@ -188,7 +193,6 @@ fn overlapCheck(board, currPiece, piecePos){
     for(var x = 0; x<currPieceX; x+=1){
         for(var y = 0; y<currPieceY; y+=1){
             if (currPiece[x][y] == 1 && board[piecePos[0] + x][piecePos[1] + y] == 1){
-
                 return false;
             }
         }
@@ -224,19 +228,18 @@ fn canRotateAntiClockwise(board, currPiece, piecePos){
 
 fn clearFilledRows(board, filledRows){
     if (filledRows > 0){
-        var filledRow = [EFF_BOARD_SIZE]{1};
         board = Arrays.removeIf(board[:-2], 
-            fn (x) => x == filledRow;
+            fn (x) => x == FILLED_ROW;
         );
         var emptyRows = [filledRows];
         for(var i = 0; i < filledRows; i += 1){
             var emptyRow = [EFF_BOARD_SIZE]{0};
             emptyRow[0] = 1;
-            emptyRow[EFF_BOARD_SIZE - 1] = 1;
+            emptyRow[-1] = 1;
             emptyRows[i] = emptyRow;
         }
 
-        board = emptyRows + board + {filledRow};
+        board = {FILLED_ROW} + board + emptyRows;
 
     }
 

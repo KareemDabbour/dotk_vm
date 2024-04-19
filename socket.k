@@ -1,4 +1,4 @@
-import "stdlib.k";
+# import "stdlib.k";
 import "json.k";
 
 class Socket{
@@ -277,20 +277,14 @@ class Request{
             print_error("body must be string");
             return this;
         }
-        if(Strings.isWhitespace(body)){
+        if(body.isWhitespace()){
             return this;
         }
-        var params = split(body, "&");
-        for(var i = 0; i < len(params); i+=1){
-            var param = split(params[i], "=");
-            var val;
-            if(len(param) > 1){
-                val = param[1];
-            }
-            else{
-                val = "";
-            }
-            this.body[param[0]]= val;
+        try{
+            this.body = JSON.parse(body);
+        }catch(e){
+            print(e.message);
+            this.body = HashMap();
         }
         return this;
     }
@@ -299,7 +293,7 @@ class Request{
 class Response{
     init(){
         this.statusCode = 0;
-        this.body = Map();
+        this.body = HashMap();
     }
 
     getStatusCode(){
@@ -317,7 +311,7 @@ class Response{
         return this.body;
     }
     setBody(body){
-        if (!body && !instanceof(body, Map)){
+        if (!body && !instanceof(body, HashMap)){
             print_error("body must be a Map");
             return null;
         }
@@ -341,10 +335,10 @@ class Response{
                 print_error("bodyStr must be string");
                 return;
             }
-            if(Strings.isWhitespace(bodyStr)){
+            if(bodyStr.isWhitespace()){
                 return;
             }
-            var m = JSONParser(bodyStr).parse()
+            var m = JSON.parse(bodyStr)
             ret.setBody(m);
         }
         if(len(lines)){
@@ -375,7 +369,6 @@ class Path{
         this.path = null;
         this.queryParams = HashMap();
     }
-
     getPath(){
         return this.path;
     }

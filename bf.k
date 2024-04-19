@@ -2,6 +2,12 @@ import "file.k"
 var bf = `>++++++++[<+++++++++>-]<.>++++[<+++++++>-]<+.+++++++..+++.>>++++++[<+++++++>-]<++.------------.>++++++[<+++++++++>-]<+.<.+++.------.--------.>>>++++[<++++++++>-]<+.`
 var interpret = false 
 if (ARG_C){
+  if (ARG_V.contains("-h")){
+    print("Usage: bf [-f file | -s string | -i interpreter]")
+    print("If nothing is provided, 'Hello World!' will be printed")
+    exit(0)
+  }
+  
   for (var i = 0; i < ARG_C; i += 1){
     if (ARG_V[i] == "-f"){
       if((i + 1) < ARG_C){

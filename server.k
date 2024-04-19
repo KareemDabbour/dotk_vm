@@ -6,7 +6,7 @@ sock.bindToPort(8080);
 sock.startListening();
 
 fn handlePost(r){
-    print(with(File(r.getPathStr()[1:], F_RW, null), fn(f) => f.write(r.body.toStr())))
+    print(with(File(r.getPathStr()[1:], F_RW|F_CR, null), fn(f) => f.write(r.body.toStr())))
 }
 
 fn handleGet(r){
@@ -56,7 +56,7 @@ fn handle(sockIn){
         }
 
     }catch(e){
-        print ("ERROR in HANDLE::${}".f(e));
+        print ("ERROR in HANDLE::\n${}".f(e));
         sockIn.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
         
     }

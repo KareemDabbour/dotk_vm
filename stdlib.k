@@ -13,7 +13,7 @@ class ListNode {
     return this.value > other.value
   }
   _eq_(other){
-    if(type(other) != "object" || !instanceof(other, ListNode)){
+    if(!instanceof(other, ListNode)){
       return false;
     }
     return this.value == other.value
@@ -28,7 +28,7 @@ class SortOrder{
   DESC = "desc";
 
   init(){
-    print_error("Cannot instantiate abstract class SortOrder");
+    print_error("Cannot instantiate Enum SortOrder");
   }
 }
 

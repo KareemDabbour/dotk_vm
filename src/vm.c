@@ -1106,7 +1106,7 @@ static Value setSockOptionsNative(int argc, Value *argv, bool *hasError, bool *p
     int level = (int)AS_NUM(argv[1]);
     int optname = (int)AS_NUM(argv[2]);
     int optval = 1;
-    if (setsockopt(sock, level, optname, &optval, sizeof(optval)) < 0)
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0)
     {
         runtimeError("Failed to set socket options");
         *hasError = true;
@@ -1201,7 +1201,7 @@ static Value bindSocketPortNative(int argc, Value *argv, bool *hasError, bool *p
         return BOOL_VAL(false);
     }
     int sock = (int)AS_NUM(argv[0]);
-    int port = (int)AS_NUM(argv[1]);
+    u_int16_t port = (u_int16_t)AS_NUM(argv[1]);
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
@@ -3079,10 +3079,10 @@ static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     for (int i = 0; i < list->count; i++)
     {
         push(OBJ_VAL(closure));
-        Value *stop = vm.stackTop; // This doesn't work since when I push/pop, it updates the stackTop
-        int stackCount = vm.stackTop - vm.stack;
         int frameCount = vm.frameCount;
-        ObjUpvalue *upvalues = vm.openUpvalues;
+        // Value *stop = vm.stackTop; // This doesn't work since when I push/pop, it updates the stackTop
+        // int stackCount = vm.stackTop - vm.stack;
+        // ObjUpvalue *upvalues = vm.openUpvalues;
 
         if (enumerate)
             push(NUM_VAL(i));
@@ -3090,7 +3090,7 @@ static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         push(list->items[i]);
         if (!call(closure, enumerate ? 2 : 1))
             return NIL_VAL;
-        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        if (run(false, frameCount) == INTERPRET_RUNTIME_ERROR)
         {
             // vm.stackTop = vm.stack + stackCount;
             // vm.frameCount = frameCount;
@@ -4517,10 +4517,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 else if (IS_SLICE(indexVal))
                 {
-
                     indexStringBySlice(indexVal, str);
-                    // runtimeError("String indexing with slicing is not supported yet :(");
-                    // return INTERPRET_RUNTIME_ERROR;
                 }
                 else
                 {
@@ -4634,6 +4631,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("List index out of range. List has size %d. However, %d was provided", list->count, index);
                 return INTERPRET_RUNTIME_ERROR;
             }
+            if(index < 0) index -= 1;
             storeToList(list, getValidListIndex(list, index), itemVal);
             push(itemVal);
             break;

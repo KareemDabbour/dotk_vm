@@ -9,9 +9,9 @@ var highscoresFile = "snake_HS.csv";
 class Field{
     init(size){
         this.size = size;
-        this.icons = {" . "," * ", " # "," & "};
+        this.icons = {" . "," * ", " # ",null," & "};
         this.board = this.create_board(size);
-        this.snakeCoords = ArrayList();
+        this.snakeCoords = []#ArrayList();
         this.entityPos = {-1, -1};
         this.addEntity();
     }
@@ -28,7 +28,7 @@ class Field{
             var y = randInt(0, this.size-1);
             if (!this.snakeCoords.contains({x, y})){
 
-                this.board[y][x] = 3;
+                this.board[y][x] = 4;
                 this.entityPos[0] = y;
                 this.entityPos[1] = x;
                 break;
@@ -49,7 +49,7 @@ class Field{
     clearBoard(){
         for (var y = 0; y < this.size; y += 1){
             for (var x = 0; x < this.size; x += 1){
-                if(this.board[y][x] == 1 || this.board[y][x] == 2)
+                if(this.board[y][x] & 3)
                     this.board[y][x] = 0;
             }
         }
@@ -302,8 +302,8 @@ foreach(ArrayList.of(lines), fn(it){
 var oldScore = m.getOrDefault(s.name, 0)
 if (oldScore < s.score) {
     m.put(s.name, s.score);
-    print "CONGRAULATIONS "+ s.name +"! YOU GOT NEW HIGH SCORE!";
-    print "OLD: " + oldScore + " NEW: " + s.score;
+    print "CONGRAULATIONS ${}! YOU GOT NEW HIGH SCORE!".f(s.name);
+    print "OLD: ${} NEW: ${}".f(oldScore, s.score);
 }
 
 m.sortByValue(SortOrder.DESC);
@@ -319,8 +319,6 @@ while(iterator.hasNext() && iterator.i <= 1){
 print line;
 
 hs.resetCursor();
-
-
 
 foreach(m.entrySet, fn(it){
     hs.write(it.key + "," + it.value + "\n")

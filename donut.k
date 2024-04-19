@@ -37,8 +37,8 @@ for(;;){
       if (L > 0){
         if (ooz > zbuffer[xp][yp]){
           zbuffer[xp][yp] = ooz
-          var luminance_index = L * 8
-          output[xp][yp] = ".,-~:;=!*#$@"[int(luminance_index)]
+          var luminance_index = (L * 8) // 1
+          output[xp][yp] = ".,-~:;=!*#$@"[luminance_index]
         }
       }
     }
