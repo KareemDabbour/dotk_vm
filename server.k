@@ -64,13 +64,14 @@ fn handle(sockIn){
 }
 
 while(true){
+    var new_sock = Socket();
     try {
-        var new_sock = sock.accept();
+        new_sock = sock.accept();
         handle(new_sock);
-        new_sock.close();
     } catch(e) {
         print("ERROR::${}".f(e));
     }
+    new_sock.close();
 }
 
 

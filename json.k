@@ -1,4 +1,4 @@
-import "stdlib.k"
+
 
 class JSONParseState{
   init(string, index){
@@ -34,7 +34,7 @@ class JSONParser{
   }
   parseValue(){
     var c = this.string[this.index];
-    while (Strings.isWhitespace(c)){
+    while (c.isWhitespace()){
       this.index += 1;
       if (this.index >= len(this.string)){
         print_error("Error: JSON string is not valid. Ran out of characters while parsing value.");
@@ -97,7 +97,7 @@ class JSONParser{
     this.index += 1;
     var c;
     while (this.index < len(this.string)){
-      if(Strings.isWhitespace(this.string[this.index])){ 
+      if(this.string[this.index].isWhitespace()){ 
         this.index += 1;
         continue;
       }
@@ -117,7 +117,7 @@ class JSONParser{
           return JSONParseState.PARSE_ERROR;
         }
         c = this.string[this.index];
-        while (Strings.isWhitespace(c)){
+        while (c.isWhitespace()){
           this.index += 1;
           c = this.string[this.index];
         }
@@ -142,7 +142,7 @@ class JSONParser{
     this.index += 1;
     while (this.index < len(this.string)){
       var c = this.string[this.index];
-      if(Strings.isWhitespace(c)){
+      if(c.isWhitespace()){
         this.index += 1;
         continue;
       }
@@ -243,25 +243,21 @@ class JSON{
   stringifyRec(obj, ret){
     if (type(obj) == "string"){
       ret.append("\"").append(obj).append("\"");
-    }else if (type(obj) != "list" && type(obj) != "object"){
-      ret.append(obj);
     }else if (type(obj) == "list"){
       ret.append("[");
       for (var i = 0; i < len(obj); i+=1){
         this.stringifyRec(obj[i], ret);
         ret.append(",");
       }
-      ret.pop();
+      if (len(obj) > 0) ret.pop()
       ret.append("]");
     }else if (type(obj) == "map"){
-
         ret.append("{");
         var keys = obj.keys();
         for (var i = 0; i < len(keys); i+=1){
           var key = keys[i];
-          ret.append("\"");
-          this.stringifyRec(key, ret);
-          ret.append("\":");
+          this.stringifyRec(str(key), ret);
+          ret.append(":");
           this.stringifyRec(obj.get(key), ret);
           ret.append(",");
         }

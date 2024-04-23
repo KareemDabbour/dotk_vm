@@ -302,7 +302,7 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     local->name.start = "";
     local->name.len = 0;
     local->isCaptured = false;
-    if (type != TYPE_FUNCTION && type != TYPE_TRY && type != TYPE_CATCH && type != TYPE_ANONYMOUS)
+    if (type != TYPE_FUNCTION && type != TYPE_TRY && type != TYPE_CATCH && type != TYPE_ANONYMOUS && type != TYPE_SCRIPT)
     {
         local->name.start = "this";
         local->name.len = 4;
@@ -1133,11 +1133,11 @@ static void enterTryCatch()
     numberOfBreaks = 0;
     innermostLoopScopeDepth = 0;
     innermostLoopEnd = -1;
-
     Compiler compiler;
     initCompiler(&compiler, TYPE_TRY, parser.file, current->isRepl, current->printBytecode);
     beginScope();
     statement();
+    endScope();
     ObjFunction *function = endCompiler();
 
     uint16_t constant = makeConstant(OBJ_VAL(function));
@@ -1171,6 +1171,7 @@ static void enterTryCatch()
     defineVar(catchVar);
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after catch variable");
     statement();
+    endScope();
     function = endCompiler();
     function->arity++;
     constant = makeConstant(OBJ_VAL(function));
@@ -1185,7 +1186,6 @@ static void enterTryCatch()
     // statement();
 
     patchJump(getPastElse);
-    endScope();
     innermostLoopStart = surroundingLoopStart;
     numberOfBreaks = surroundingBreakAddrCount;
     innermostLoopScopeDepth = surroundingLoopScopeDepth;

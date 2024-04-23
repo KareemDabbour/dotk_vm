@@ -3000,6 +3000,27 @@ static Value containsListNative(int argc, Value *argv, bool *hasError, bool *pus
     return BOOL_VAL(false);
 }
 
+static Value indexOfListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'contains()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for contains()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    for (int i = 0; i < list->count; i++)
+        if (checkIfValuesEqual(list->items[i], argv[0]))
+            return NUM_VAL(i);
+    return NUM_VAL(-1);
+}
+
 static Value popListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 0 && argc != 1)
@@ -4027,6 +4048,9 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&listClass->methods, copyString("extend", 6), OBJ_VAL(newNative(extendListNative)));
     tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
     tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
+    // tableSet(&listClass->methods, copyString("remove", 6), OBJ_VAL(newNative(removeListNative)));
+    // tableSet(&listClass->methods, copyString("clear", 5), OBJ_VAL(newNative(clearListNative)));
+    tableSet(&listClass->methods, copyString("indexOf", 7), OBJ_VAL(newNative(indexOfListNative)));
     tableSet(&listClass->methods, copyString("pop", 3), OBJ_VAL(newNative(popListNative)));
     tableSet(&listClass->methods, copyString("foreach", 7), OBJ_VAL(newNative(foreachNative)));
     tableSet(&listClass->methods, copyString("map", 3), OBJ_VAL(newNative(mapNative)));
@@ -4631,7 +4655,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("List index out of range. List has size %d. However, %d was provided", list->count, index);
                 return INTERPRET_RUNTIME_ERROR;
             }
-            if(index < 0) index -= 1;
+            if (index < 0)
+                index -= 1;
             storeToList(list, getValidListIndex(list, index), itemVal);
             push(itemVal);
             break;
@@ -4744,6 +4769,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     push(OBJ_VAL(bound));
                     break;
                 }
+                if (tableGet(&klass->staticVars, name, &native))
+                {
+                    pop();
+                    push(native);
+                    break;
+                }
+                runtimeError("Cannot find property %s in %s\n", name->chars, klass->name->chars);
+                return INTERPRET_RUNTIME_ERROR;
             }
 
             Table *table;

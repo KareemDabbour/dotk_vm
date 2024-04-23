@@ -92,6 +92,12 @@ static void blackenObject(Obj *object)
         }
         break;
     }
+    case OBJ_MAP:
+    {
+        ObjMap *map = (ObjMap *)object;
+        markMap(&map->map);
+        break;
+    }
     case OBJ_LIST:
     {
         ObjList *list = (ObjList *)object;
@@ -126,6 +132,16 @@ static void blackenObject(Obj *object)
         markObj((Obj *)klass->superclass);
         markTable(&klass->methods);
         markTable(&klass->staticVars);
+        markValue(klass->setFn);
+        markValue(klass->sizeFn);
+        markValue(klass->hashFn);
+        markValue(klass->indexFn);
+        markValue(klass->initializer);
+        markValue(klass->toStr);
+        markValue(klass->equals);
+        markValue(klass->greaterThan);
+        markValue(klass->lessThan);
+
         break;
     }
     case OBJ_INSTANCE:
