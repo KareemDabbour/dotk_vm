@@ -38,12 +38,12 @@ initial_connection.close()
 
 
 
+var sock = Socket()
 while(true){
     # connect to the server
     # send the username and message 
     # receive the message from the server
     # print the message
-    var sock = Socket()
     try{
         sock = Socket.newSocket()
         sock.port = port

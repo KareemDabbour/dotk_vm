@@ -1,3 +1,5 @@
+import "lang.k";
+
 var F_RO = 0
 var F_WO = 1
 var F_RW = 2
@@ -22,7 +24,7 @@ var SEEK_SET = 0
 var SEEK_CUR = 1
 var SEEK_END = 2
 
-class File{
+class File<Closable>{
     init(path, mode, permissions){
         if (type(path) != "string"){
             print_error("File path must be a string")
@@ -130,10 +132,4 @@ class File{
 # File Navigation:
 
 # seekFile(fd: fileDescriptor, offset: int, whence: int): void: Moves the file pointer to a specified location.
-}
-
-fn with(file, f){
-    var ret = f(file)
-    file.close()
-    return ret
 }

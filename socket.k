@@ -1,7 +1,7 @@
-# import "stdlib.k";
 import "json.k";
+import "lang.k";
 
-class Socket{
+class Socket <Closable>{
     SOL_SOCKET = 1;
     SO_ACCEPTCONN = 30;
     SO_BROADCAST = 6;
@@ -60,7 +60,7 @@ class Socket{
         return connect(this.socket, this.host, this.port);
     }
     close(){
-        close(this.socket);
+        return close(this.socket);
     }
     send(strData){
         return send(this.socket, strData);

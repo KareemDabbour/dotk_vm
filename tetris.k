@@ -91,7 +91,6 @@ fn createBoard(){
     var ret = [HEIGHT]{0}.map(fn (x) => [EFF_BOARD_SIZE]{0});
     for(var i = 0; i < HEIGHT; i += 1){
         ret[i][0] = 1;
-        # ret[EFF_BOARD_SIZE - 1][i] = 1;
         ret[i][-1] = 1;
     }
     ret[-1] = FILLED_ROW;

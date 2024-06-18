@@ -801,21 +801,21 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     ObjList *list = AS_LIST(argv[0]);
     ObjString *sep = AS_STR(argv[1]);
-    char *str = ALLOCATE(char, 100);
-    sprintf(str, "%s", "");
+    char str[STR_BUFF] = {0};//ALLOCATE(char, 100);
+    // sprintf(str, "%s", "");
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        char *temp = ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
-        sprintf(temp, "%s%s%s", str, item, sep->chars);
-        FREE_ARRAY(char, str, strlen(str) + 1);
-        str = temp;
+        // char temp[STR_BUFF] = //ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
+        sprintf(str, "%s%s%s", str, item, sep->chars);
+        // FREE_ARRAY(char, str, strlen(str) + 1);
+        // str = temp;
     }
     if (list->count > 0)
         str[strlen(str) - strlen(sep->chars)] = '\0';
-    return OBJ_VAL(takeString(str, (int)strlen(str)));
+    return OBJ_VAL(copyString(str, (int)strlen(str)));
 }
 
 static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2014,10 +2014,10 @@ static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         return NIL_VAL;
     }
 
-    char *input = ALLOCATE(char, STR_BUFF);
+    char input[STR_BUFF] = {0};
     char *ret = fgets(input, STR_BUFF, stdin);
     input[strlen(input) - 1] = '\0';
-    return OBJ_VAL(takeString(input, (int)strlen(input)));
+    return OBJ_VAL(copyString(input, (int)strlen(input)));
 }
 
 static Value splitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2800,22 +2800,17 @@ static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     ObjList *list = AS_LIST(argv[0]);
     ObjString *sep = AS_STR(peek(argc));
-    char *str = ALLOCATE(char, 100);
-    sprintf(str, "%s", "");
+    char str[STR_BUFF] = {0};
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        char *temp = ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
-        sprintf(temp, "%s%s%s", str, item, sep->chars);
-        FREE_ARRAY(char, str, strlen(str) + 1);
-        // FREE_ARRAY(char, item, strlen(item) + 1);
-        str = temp;
+        sprintf(str, "%s%s%s", str, item, sep->chars);
     }
     if (list->count > 0)
         str[strlen(str) - strlen(sep->chars)] = '\0';
-    return OBJ_VAL(takeString(str, (int)strlen(str)));
+    return OBJ_VAL(copyString(str, (int)strlen(str)));
 }
 
 static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2833,7 +2828,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         return NIL_VAL;
     }
     char *str = AS_CSTR(peek(argc));
-    char *result = ALLOCATE(char, STR_BUFF);
+    char result[STR_BUFF] = {0};//ALLOCATE(char, STR_BUFF);
     int len = 0;
     int i = 0;
     int numFormats = 0;
@@ -2892,7 +2887,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         i++;
     }
     result[len] = '\0';
-    return OBJ_VAL(takeString(result, (int)strlen(result)));
+    return OBJ_VAL(copyString(result, (int)strlen(result)));
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -3111,7 +3106,7 @@ static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         push(list->items[i]);
         if (!call(closure, enumerate ? 2 : 1))
             return NIL_VAL;
-        if (run(false, frameCount) == INTERPRET_RUNTIME_ERROR)
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
         {
             // vm.stackTop = vm.stack + stackCount;
             // vm.frameCount = frameCount;
@@ -3613,9 +3608,9 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
     if (!IS_STR(str))
     {
         int len = 0;
-        char *buff = ALLOCATE(char, STR_BUFF);
+        char buff[STR_BUFF] = {0};// ALLOCATE(char, STR_BUFF);
         valueToString(str, buff, &len);
-        str = OBJ_VAL(takeString(buff, len));
+        str = OBJ_VAL(copyString(buff, len));
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     Value value;
@@ -4666,7 +4661,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value superclass = peek(1);
             if (!IS_CLASS(superclass))
             {
-                runtimeError("Superclass must be a class");
+                runtimeError("Superclass must be a class but got type: '%s''",  VALUE_TYPES[superclass.type]);
                 return INTERPRET_RUNTIME_ERROR;
             }
             ObjClass *superclazz = AS_CLASS(superclass);

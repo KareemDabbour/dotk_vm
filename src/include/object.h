@@ -35,32 +35,34 @@
 #define AS_SLICE(value) ((ObjSlice *)AS_OBJ(value))
 typedef enum
 {
-    OBJ_STRING = 1,
-    OBJ_MAP = 2,
-    OBJ_LIST = 4,
-    OBJ_SLICE = 8,
-    OBJ_FUNCTION = 16,
-    OBJ_CLOSURE = 32,
-    OBJ_NATIVE = 64,
-    OBJ_UPVALUE = 128,
-    OBJ_CLASS = 256,
-    OBJ_INSTANCE = 512,
-    OBJ_BOUND_METHOD = 1024,
-    OBJ_BOUND_BUILTIN = 2048
+    OBJ_CLASS,
+    OBJ_STRING,
+    OBJ_MAP,
+    OBJ_FUNCTION,
+    OBJ_LIST,
+    OBJ_SLICE,
+    OBJ_CLOSURE,
+    OBJ_NATIVE,
+    OBJ_UPVALUE,
+    OBJ_INSTANCE,
+    OBJ_BOUND_METHOD,
+    OBJ_BOUND_BUILTIN
 } ObjType;
 
-static const char *OBJECT_TYPES[11] = {
+static const char *OBJECT_TYPES[12]={
+    "CLASS",
     "STRING",
+    "MAP",
+    "FUNCTION",
     "LIST",
     "SLICE",
-    "FUNCTION",
     "CLOSURE",
     "NATIVE",
     "UPVALUE",
-    "CLASS",
     "INSTANCE",
     "BOUND METHOD",
-    "BOUND BUILTIN"};
+    "BOUND BUILTIN"
+};
 
 struct Obj
 {

@@ -125,7 +125,7 @@ ObjClass *newClass(ObjString *name)
 
     initTable(&clazz->methods);
     initTable(&clazz->staticVars);
-    // tableSet(&clazz->staticVars, vm.clazzStr, (Value){.type = VAL_OBJ, .as.obj = &clazz->name->obj});
+    tableSet(&clazz->staticVars, vm.clazzStr, (Value){.type = VAL_OBJ, .as.obj = &clazz->name->obj});
     return clazz;
 }
 
