@@ -168,6 +168,7 @@ static void blackenObject(Obj *object)
     }
     case OBJ_STRING:
     case OBJ_NATIVE:
+    case OBJ_FOREIGN:
         break;
     default:
         break;
@@ -253,6 +254,17 @@ static void freeObject(Obj *object)
     case OBJ_NATIVE:
         FREE(ObjNative, object);
         break;
+    case OBJ_FOREIGN:
+    {
+        ObjForeign *foreign = (ObjForeign *)object;
+        if (foreign->ownsPtr)
+            free(foreign->ptr);
+
+        freeTable(&foreign->fields);
+        freeTable(&foreign->methods);
+        FREE(ObjForeign, foreign);
+        break;
+    }
     }
 }
 

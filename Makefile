@@ -5,7 +5,7 @@ sources_dir = src
 out_dir = out
 sources = $(wildcard $(sources_dir)/*.c)
 objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources)) 
-flags = -g -lm -O3
+flags = -g -lm #-O3
 extra = -fsanitize=address -static-libasan 
 all: dir $(exec)
 

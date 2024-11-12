@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 struct stat statbuf;
+pthread_mutex_t GVL;
 
 static void repl(int argC, char **argV, bool piped)
 {
@@ -79,6 +80,8 @@ int main(int argc, char *argv[])
         else if (ex != NULL && strcmp(ex, ".k") == 0)
             file = i;
     }
+    pthread_mutex_init(&GVL, NULL);
+
     initVM(printBytecode != -1, printExecStack != -1);
     int last = 0;
 
@@ -96,5 +99,7 @@ int main(int argc, char *argv[])
         runFile(argv[file], argc - last, argv + last);
 
     freeVM();
+    pthread_mutex_destroy(&GVL);
+
     return 0;
 }

@@ -59,6 +59,15 @@ ObjList *newList()
     return list;
 }
 
+ObjList *newListWithCapacity(int capacity)
+{
+    ObjList *list = ALLOCATE_OBJ(ObjList, OBJ_LIST);
+    list->items = ALLOCATE(Value, capacity);
+    list->capacity = capacity;
+    list->count = 0;
+    return list;
+}
+
 ObjSlice *newSlice(int start, int end, int step)
 {
     ObjSlice *slice = ALLOCATE_OBJ(ObjSlice, OBJ_SLICE);
@@ -79,7 +88,6 @@ void appendToList(ObjList *list, Value value)
     }
     list->items[list->count] = value;
     list->count++;
-    return;
 }
 
 void storeToList(ObjList *list, int index, Value value)
@@ -152,11 +160,23 @@ ObjFunction *newFunction()
     return func;
 }
 
+ObjForeign *newForeignObj(ForeignType type, void *ptr, bool ownsPtr)
+{
+    ObjForeign *f = ALLOCATE_OBJ(ObjForeign, OBJ_FOREIGN);
+    f->ptr = ptr;
+    f->type = type;
+    f->ownsPtr = ownsPtr;
+    initTable(&f->fields);
+    initTable(&f->methods);
+    return f;
+}
+
 ObjInstance *newInstance(ObjClass *klass)
 {
     ObjInstance *instance = ALLOCATE_OBJ(ObjInstance, OBJ_INSTANCE);
     instance->klass = klass;
     initTable(&instance->fields);
+    tableSet(&instance->fields, copyString("clazz", 5), OBJ_VAL(instance->klass));
     return instance;
 }
 
@@ -276,6 +296,17 @@ static void printTable(Table table, int depth)
 
 static void printMap(ObjMap *map, int depth)
 {
+    if (map == NULL)
+    {
+        printf("{}");
+        return;
+    }
+    if (depth <= 0)
+    {
+        printf("HashMap@%p", map);
+        return;
+    }
+
     int fields = 0;
     printf("{");
     for (int i = 0; i < map->map.capacity; i++)
@@ -362,6 +393,12 @@ void printObj(Value value, int depth)
     case OBJ_UPVALUE:
         printf("upvalue");
         break;
+    case OBJ_FOREIGN:
+    {
+        ObjForeign *o = AS_FOREIGN(value);
+        printf("%s f<%p>", FOREIGN_TYPES[o->type], o->ptr);
+        break;
+    }
     default:
         break;
     }

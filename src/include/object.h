@@ -19,6 +19,8 @@
 #define IS_LIST(value) isObjType(value, OBJ_LIST)
 #define IS_MAP(value) isObjType(value, OBJ_MAP)
 #define IS_SLICE(value) isObjType(value, OBJ_SLICE)
+#define IS_FOREIGN(value) isObjType(value, OBJ_FOREIGN)
+#define IS_FOREIGN_TYPE(value, f_type) (IS_FOREIGN(value) && (AS_FOREIGN(value))->type == f_type)
 #define IS_BUILTIN(value) isAnyObjType(value, OBJ_MAP | OBJ_LIST | OBJ_STRING)
 
 #define AS_CLASS(value) ((ObjClass *)AS_OBJ(value))
@@ -33,6 +35,9 @@
 #define AS_LIST(value) ((ObjList *)AS_OBJ(value))
 #define AS_MAP(value) ((ObjMap *)AS_OBJ(value))
 #define AS_SLICE(value) ((ObjSlice *)AS_OBJ(value))
+#define AS_FOREIGN(value) ((ObjForeign *)AS_OBJ(value))
+#define AS_FOREIGN_PTR(value) (((ObjForeign *)AS_OBJ(value))->ptr)
+
 typedef enum
 {
     OBJ_CLASS,
@@ -46,10 +51,11 @@ typedef enum
     OBJ_UPVALUE,
     OBJ_INSTANCE,
     OBJ_BOUND_METHOD,
-    OBJ_BOUND_BUILTIN
+    OBJ_BOUND_BUILTIN,
+    OBJ_FOREIGN
 } ObjType;
 
-static const char *OBJECT_TYPES[12]={
+static const char *OBJECT_TYPES[13] = {
     "CLASS",
     "STRING",
     "MAP",
@@ -61,8 +67,20 @@ static const char *OBJECT_TYPES[12]={
     "UPVALUE",
     "INSTANCE",
     "BOUND METHOD",
-    "BOUND BUILTIN"
-};
+    "BOUND BUILTIN",
+    "FOREIGN OBJ"};
+
+typedef enum
+{
+    TYPE_FILE,
+    TYPE_VM,
+    TYPE_UNKNOWN,
+} ForeignType;
+
+static const char *FOREIGN_TYPES[3] = {
+    "FILE",
+    "VM",
+    "UNKNOWN"};
 
 struct Obj
 {
@@ -111,6 +129,16 @@ typedef struct ObjNative
     Obj obj;
     NativeFn function;
 } ObjNative;
+
+typedef struct ObjForeign
+{
+    Obj obj;
+    ForeignType type;
+    void *ptr;
+    bool ownsPtr;
+    Table fields;
+    Table methods;
+} ObjForeign;
 
 typedef struct ObjClass
 {
@@ -179,8 +207,10 @@ ObjClass *newClass(ObjString *name);
 ObjClosure *newClosure(ObjFunction *function);
 ObjFunction *newFunction();
 ObjList *newList();
+ObjList *newListWithCapacity(int capacity);
 ObjMap *newMap();
 ObjSlice *newSlice(int start, int end, int step);
+ObjForeign *newForeignObj(ForeignType type, void *ptr, bool ownsPtr);
 void appendToList(ObjList *list, Value value);
 void storeToList(ObjList *list, int index, Value value);
 Value indexFromList(ObjList *list, int index);

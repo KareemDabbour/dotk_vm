@@ -1,3 +1,5 @@
+import "lang.k"
+
 var theta_spacing = 0.07
 var phi_spacing = 0.02
 
@@ -6,6 +8,33 @@ var R2 = 2
 var K2 = 5
 var A = 0
 var B = 0
+fn wrap(s, col){return col + s + Ansi.RESET}
+
+var s = ".,-~:;=!*#$@"
+
+var STRS;
+
+if (ARG_V) {
+  if(ARG_V.contains("--color") || ARG_V.contains("-c")){
+    STRS = {
+      wrap(".", Ansi.BLACK),
+      wrap(",", Ansi.BLACK),
+      wrap("-", Ansi.RED),
+      wrap("~", Ansi.RED),
+      wrap(":", Ansi.GREEN),
+      wrap(";", Ansi.GREEN),
+      wrap("=", Ansi.BLUE),
+      wrap("!", Ansi.BLUE),
+      wrap("*", Ansi.PURPLE),
+      wrap("#", Ansi.PURPLE),
+      wrap("$", Ansi.CYAN),
+      wrap("@", Ansi.WHITE)
+    }
+  }
+}else{
+ STRS = list(s)
+}
+
 var screenWidth = 20
 var screenHeight = 20
 var K1 = screenHeight*K2*3/(8*(R1+R2))
@@ -38,7 +67,7 @@ for(;;){
         if (ooz > zbuffer[xp][yp]){
           zbuffer[xp][yp] = ooz
           var luminance_index = (L * 8) // 1
-          output[xp][yp] = ".,-~:;=!*#$@"[luminance_index]
+          output[xp][yp] = STRS[luminance_index]
         }
       }
     }

@@ -1,6 +1,7 @@
 #ifndef dotk_common_h
 #define dotk_common_h
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,6 +20,8 @@
 #define DEBUG_STRESS_GC 0
 #define DEBUG_LOG_GC
 #undef DEBUG_LOG_GC
+#define DEBUG_LOG_THREAD
+#undef DEBUG_LOG_THREAD
 #define UINT4_MAX 15
 #define UINT4_COUNT (UINT4_MAX + 1)
 #define UINT8_COUNT (UINT8_MAX + 1)
@@ -37,7 +40,8 @@
 #define likely(x) __builtin_expect((x), 1)
 #endif
 
-static void sigpipeHandler(int signum)
+static void
+sigpipeHandler(int signum)
 {
 }
 
@@ -48,6 +52,32 @@ static void sigSegvHandler(int signum)
         fprintf(stderr, "OH NO! You ran into a SegFault!\nPlease report this issue to the developer.\n");
         exit(1);
     }
+}
+
+extern pthread_mutex_t GVL;
+
+static void acquireGVL()
+{
+#ifdef DEBUG_LOG_THREAD
+    pthread_t tid = pthread_self();
+    printf("thread %lu locking GVL...\n", (unsigned long)tid);
+#endif
+    pthread_mutex_lock(&GVL);
+#ifdef DEBUG_LOG_THREAD
+    printf("thread %lu locked GVL\n", (unsigned long)tid);
+#endif
+}
+
+static void releaseGVL()
+{
+#ifdef DEBUG_LOG_THREAD
+    pthread_t tid = pthread_self();
+    printf("thread %lu unlocking GVL...\n", (unsigned long)tid);
+#endif
+    pthread_mutex_unlock(&GVL);
+#ifdef DEBUG_LOG_THREAD
+    printf("thread %lu unlocked GVL\n", (unsigned long)tid);
+#endif
 }
 
 #endif

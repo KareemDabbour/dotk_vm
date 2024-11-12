@@ -12,10 +12,11 @@
 #include <netinet/in.h>
 #include <sys/stat.h>
 
-#define BUFFER_SIZE 104857
+#define BUFFER_SIZE 104855
 #define STR_BUFF BUFFER_SIZE
 #define FRAMES_MAX 64 * 2 * 2 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
+#define NATIVE_FN(fn) static Value fn(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 typedef struct _CallFrame
 {
@@ -26,6 +27,14 @@ typedef struct _CallFrame
 
 typedef struct _VM
 {
+    // Threading Updates
+    // current thread
+    // main thread
+    // list of threads
+    // thread count
+
+    // Threading
+    // Each thread has its own stack, call frame, and instruction, last error, and last error trace and isInTryCatch
     CallFrame frames[FRAMES_MAX];
     int frameCount;
     Value stack[STACK_MAX];
@@ -48,6 +57,7 @@ typedef struct _VM
     ObjClass *listClass;
     ObjClass *mapClass;
     ObjClass *errorClass;
+    ObjClass *eventClass;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
 

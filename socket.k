@@ -23,6 +23,7 @@ class Socket <Closable>{
         this.socket = null;
         this.port = null;
         this.host = null;
+        this.isClosed = true;
     }
     bindToPort(port){
         this.port = port;
@@ -52,6 +53,9 @@ class Socket <Closable>{
             print_error("accept failed");
         return new_sock;
     }
+    acc(){
+        return accept(this.socket, this.port);
+    }
     connect(){
         if(!this.host)
             print_error("No host");
@@ -60,6 +64,7 @@ class Socket <Closable>{
         return connect(this.socket, this.host, this.port);
     }
     close(){
+        this.isClosed = true;
         return close(this.socket);
     }
     send(strData){
@@ -95,6 +100,7 @@ class Socket <Closable>{
         }
         var ret = Socket();
         ret.socket = fd;
+        ret.isClosed = false;
         return ret;
     }
     newSocket(){
@@ -104,6 +110,7 @@ class Socket <Closable>{
             print_error("socket creation failed");
             return null;
         }
+        ret.isClosed = false;
         return ret;
     }
     withDefaults(){
@@ -115,7 +122,11 @@ class Socket <Closable>{
             return null;
         }
         ret.setDefaultSocketOptions();
+        ret.isClosed = false;
         return ret;
+    }
+    isClosed(){
+        return this.closed;
     }
 }
 

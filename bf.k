@@ -1,4 +1,4 @@
-import "file.k"
+import "lang.k"
 var bf = `>++++++++[<+++++++++>-]<.>++++[<+++++++>-]<+.+++++++..+++.>>++++++[<+++++++>-]<++.------------.>++++++[<+++++++++>-]<+.<.+++.------.--------.>>>++++[<++++++++>-]<+.`
 var interpret = false 
 if (ARG_C){
@@ -11,7 +11,7 @@ if (ARG_C){
   for (var i = 0; i < ARG_C; i += 1){
     if (ARG_V[i] == "-f"){
       if((i + 1) < ARG_C){
-        bf = with(File(ARG_V[i + 1], F_RW, null), fn(f) => f.readAll())
+        bf = with(File(ARG_V[i + 1]), fn(f) => f.read())
         break;
       }
       print("Error: -f requires a file name")
@@ -35,7 +35,7 @@ fn run(bf){
   var size = len(bf)
   var i = 0
   var c = ""
-  var mem = [100]{0}
+  var mem = [1000]{0}
   var head = 0
   var stack = {}
   while(i < size){
@@ -51,6 +51,7 @@ fn run(bf){
     }else if (c == "."){
       write(STDOUT, chr(mem[head]))
     }else if (c == ","){
+      # print "Enter a character: "
       mem[head] = getc()
     }else if (c == "["){
       if (mem[head] == 0){
@@ -79,13 +80,13 @@ var STDOUT = 1
 if(interpret) {
   while(true){
     try{
-      bf = input("bf> ").trim()
+      bf = input(Ansi.CYAN + "bf> " + Ansi.RESET).trim()
       if((bf.contains("quit")) || (bf.contains("exit"))) 
         exit(0)
       run(bf)
     }
     catch(e){
-      print "OOPS... ran into an error! Try again. ${}".f(e.message)
+      print Ansi.RED+"OOPS... ran into an error! Try again. ${}".f(e) + Ansi.RESET
     }
   }
 }

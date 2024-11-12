@@ -1,15 +1,27 @@
 import "stdlib.k"
-import "file.k"
+# import "file.k"
 
 # var rows = 30;
 var size = 30;
 var line = " " + ("".join([size]{"---"})) + " ";
 var highscoresFile = "snake_HS.csv";
-
+class Point{
+    init(x, y){
+        this.x = x;
+        this.y = y;
+    }
+    _eq_(other){
+        return this.x == other.x && this.y == other.y;
+    }
+    toList(){
+        return {this.y, this.x};
+    }
+}
 class Field{
     init(size){
         this.size = size;
-        this.icons = {" . "," * ", " # ",null," & "};
+        this.icons = {" . "#" ${}.${} ".f(Ansi.DIM, Ansi.RESET)
+                        ," ${}*${} ".f(Ansi.GREEN, Ansi.RESET), " ${}@${} ".f(Ansi.GREEN, Ansi.RESET),null," ${}&${} ".f(Ansi.RED, Ansi.RESET)}; 
         this.board = this.create_board(size);
         this.snakeCoords = []#ArrayList();
         this.entityPos = {-1, -1};
@@ -24,13 +36,12 @@ class Field{
     }
     addEntity(){
         while(true){
-            var x = randInt(0, this.size-1);
-            var y = randInt(0, this.size-1);
-            if (!this.snakeCoords.contains({x, y})){
+            var p = Point(randInt(0, this.size-1), randInt(0, this.size-1));
 
-                this.board[y][x] = 4;
-                this.entityPos[0] = y;
-                this.entityPos[1] = x;
+            if (!this.snakeCoords.contains(p.toList())){
+
+                this.board[p.y][p.x] = 4;
+                this.entityPos = p.toList();
                 break;
             }
         }
@@ -41,7 +52,7 @@ class Field{
     }
 
     didSnakeEat(){
-        var head = this.snakeCoords.getLast();
+        var head = this.snakeCoords[-1];
         var entity = this.getEntityPos();
         return head == entity;
     }
@@ -58,10 +69,10 @@ class Field{
     toStr(){
         this.clearBoard();
         for (var i = 0; i < len(this.snakeCoords); i += 1){
-            var coord = this.snakeCoords.get(i);
+            var coord = this.snakeCoords[i];
             this.board[coord[0]][coord[1]] = 1;
         }
-        var head = this.snakeCoords.getLast();
+        var head = this.snakeCoords[-1];
         if(head)
             this.board[head[0]][head[1]] = 2;
 
@@ -89,7 +100,7 @@ class Snake {
     init(name){
         this.name = name;
         this.direction = Directions.RIGHT;
-        this.coords = ArrayList.of({{0, 0}, {0, 1}, {0, 2}, {0, 3}});
+        this.coords = {{0, 0}, {0, 1}, {0, 2}, {0, 3}};
         this.field = null;
         this.score = 0;
     }
@@ -111,8 +122,8 @@ class Snake {
     }
 
     levelUp(){
-        var a = this.coords.get(0);
-        var b = this.coords.get(1);
+        var a = this.coords[0];
+        var b = this.coords[1];
         var tail = a[:];
         if(a[0] < b[0]){
             tail[0] = tail[0] - 1;
@@ -125,15 +136,15 @@ class Snake {
         }
 
         tail = this.wrap(tail);
-        this.coords.addAtIndex(0, tail);
+        this.coords.insert(0, tail);
         this.score = this.score + 1;
 
     }
 
     isAlive(){
-        var head = this.coords.getLast();
+        var head = this.coords[-1];
         for (var i = 0; i < len(this.coords) - 1; i += 1){
-            if (head == this.coords.get(i)){
+            if (head == this.coords[i]){
                 return false;
             }
         }
@@ -141,7 +152,7 @@ class Snake {
     }
 
     move(){
-        var newHead = this.coords.getLast()[:];
+        var newHead = this.coords[-1][:];
         switch(this.direction){
             case Directions.UP{
                 newHead[0] = newHead[0] - 1;
@@ -158,9 +169,9 @@ class Snake {
         }
 
         newHead = this.wrap(newHead);
-        this.coords.add(newHead);
+        this.coords.append(newHead);
         # print "SNAKE: " + this.coords  + " SIZE: " + len(this.coords);
-        this.coords.remove(0);
+        this.coords.pop(0);
         this.field.snakeCoords = this.coords;
 
         if(!this.isAlive()){
@@ -219,7 +230,7 @@ fn getKeyInput(){
 fn printScoreAndField(s, f){
     print "NAME: " + s.name;
     print "SCORE: " + s.score;
-    print(f);
+    print(f.toStr());
 }
 
 
@@ -234,19 +245,23 @@ var s = Snake(name);
 s.setField(f);
 
 fn run (){
+    var died;
+    var d;
+    var c;
     while(true){
-        var died = s.move();
+        
+        died = s.move();
         printScoreAndField(s, f);
         print("<p> to pause -- <q> to quit");
         if(kbhit()){
-            var d = getKeyInput();
+            d = getKeyInput();
             if(d == 112){
                 clear();
                 printScoreAndField(s, f);
                 print("<p> to un-pause -- <q> to quit");
                 while(true){
                     if(kbhit()){
-                        var c = getKeyInput();
+                        c = getKeyInput();
                         if(c == 112){
                             break;  
                         }else if(c == 113){
@@ -265,7 +280,7 @@ fn run (){
         clear();
         # a sleep call that scales with the size of the field to make the game speed more consistent
 
-        sleep(0.14 - (0.1 * (size / 100)));
+        sleep((0.2 * (size / 100)));
 
         # sleep(0.15);
     }
@@ -284,15 +299,17 @@ if (g == "QUIT"){
 
 print "\nYOU SCORED " + s.score + " POINTS!";
 
-var hs = File(highscoresFile, F_RW | F_CR, null);
 
-var scores = hs.readAll().trim()
+var lines = []
+with(File(highscoresFile, "r"), fn (f){
+    lines = f.readLines().map(fn(l) => l.trim())
+});
 
-var lines = scores.split("\n");
+
 
 var m = Map()
 
-foreach(ArrayList.of(lines), fn(it){
+foreach(lines, fn(it){
     var line = it.trim();
     var parts = line.split(",");
     if (len(parts) == 2) {
@@ -318,13 +335,15 @@ while(iterator.hasNext() && iterator.i <= 1){
 
 print line;
 
-hs.resetCursor();
+# hs.resetCursor();
 
-foreach(m.entrySet, fn(it){
-    hs.write(it.key + "," + it.value + "\n")
+with(File(highscoresFile, "w"), fn(hs){
+    foreach(m.entrySet, fn(it){
+        hs.write("${},${}\n".f(it.key,it.value))
+    })
 })
 print "SCORE SAVED!";
 
 
 
-hs.close();
+# hs.close();

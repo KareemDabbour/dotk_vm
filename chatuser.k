@@ -5,6 +5,7 @@ if (!ARG_C || ARG_V.indexOf("-u") == -1){
 
 import "socket.k"
 import "json.k"
+import "lang.k"
 
 var port = 8081
 var host = "localhost"
@@ -17,14 +18,16 @@ var username = ARG_V[ARG_V.indexOf("-u")+1]
 fn render_chat(data){ #List<HashMap>: [{"usr": "user", "msg": "message"}]
     for(var i = 0; i < len(data); i+=1){
         if(data[i].containsKey("CON")){
-            print "[${}] CONNECTED".f(data[i]["CON"])
+            print "${}[${}]${} CONNECTED".f(Ansi.ALL_COLORS[hash( data[i]["CON"]) % len(Ansi.ALL_COLORS)], data[i]["CON"], Ansi.RESET)
             continue
         }
-        print "[${}] ${}".f(data[i]["USR"], data[i]["MSG"])
+        print "${}[${}]${} ${}".f(Ansi.ALL_COLORS[hash( data[i]["USR"]) % len(Ansi.ALL_COLORS)], data[i]["USR"], Ansi.RESET, data[i]["MSG"])
     }
 }
 
 
+var users = HashMap()
+var num_users = 0
 var initial_connection = Socket.newSocket()
 initial_connection.port = port
 initial_connection.host = host

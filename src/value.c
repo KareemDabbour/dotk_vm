@@ -77,6 +77,9 @@ bool valuesEqual(Value a, Value b)
             }
             return true;
         }
+        if (IS_FOREIGN(a) && IS_FOREIGN(b))
+            return AS_FOREIGN_PTR(a) == AS_FOREIGN_PTR(b);
+
         return AS_OBJ(a) == AS_OBJ(b);
     }
     default:

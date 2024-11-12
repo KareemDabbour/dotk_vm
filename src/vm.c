@@ -1,14 +1,17 @@
+#define TB_IMPL
 #include "include/vm.h"
 #include "include/compiler.h"
 #include "include/debug.h"
 #include "include/io.h"
 #include "include/memory.h"
 #include "include/object.h"
+#include "include/termbox2.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <string.h>
 #include <time.h>
+
 VM vm;
 Value prefixStr = NIL_VAL;
 FILE *file;
@@ -19,11 +22,30 @@ static bool invoke(ObjString *name, int argc);
 static InterpretResult run(bool isRepl, int runUntilFrame);
 static char *valueToString(Value val, char *buff, int *len);
 
+static char *trim(char *str)
+{
+    char *end;
+    while (isspace((unsigned char)*str))
+        str++;
+    if (*str == 0)
+        return str;
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end))
+        end--;
+    end[1] = '\0';
+    return str;
+}
+
 static void resetStack()
 {
     vm.stackTop = vm.stack;
     vm.frameCount = 0;
     vm.openUpvalues = NULL;
+}
+
+static inline Value peek(int dist)
+{
+    return vm.stackTop[-1 - dist];
 }
 
 static void runtimeError(const char *format, ...)
@@ -84,7 +106,7 @@ static void runtimeError(const char *format, ...)
 
 static bool isBuiltinClass(Value value)
 {
-    return IS_OBJ(value) && (AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); // IS_LIST(val) || IS_MAP(val) || IS_STR(val);
+    return IS_OBJ(value) && (IS_LIST(value) || IS_MAP(value) || IS_STR(value)); //(AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); //
 }
 
 static bool isBuiltinClazz(ObjClass *clazz)
@@ -334,7 +356,6 @@ void printMap(Map *map)
     }
 }
 
-// get map as String
 static char *mapToString(Map *map, char *buff, int *len)
 {
     int index = 0;
@@ -365,13 +386,668 @@ static Value clockNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     return NUM_VAL((double)clock() / CLOCKS_PER_SEC);
 }
 
-static Value getcNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+static Value fOpenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("'fopen()' expects 2 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(argv[0]) || !IS_STR(argv[1]))
+    {
+        runtimeError("'fopen()' expects 2 strings as arguments but got '%s' and '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    char *mode = AS_CSTR(argv[1]);
+    if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 && strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0)
+    {
+        runtimeError("Invalid mode '%s' for 'fopen()'", mode);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    FILE *file = fopen(AS_CSTR(argv[0]), mode);
+    if (file == NULL)
+    {
+        runtimeError("Could not open file '%s'", AS_CSTR(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return OBJ_VAL(newForeignObj(TYPE_FILE, file, false));
+}
+
+static Value fCloseNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+
+    if (argc != 1)
+    {
+        runtimeError("'fclose()' expects 1 argument but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_FOREIGN_TYPE(argv[0], TYPE_FILE))
+    {
+        runtimeError("'fclose()' expects a file pointer as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    FILE *file = AS_FOREIGN_PTR(argv[0]);
+
+    return NUM_VAL(fclose(file));
+}
+
+static Value offsetNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    //     if (argc != 2)
+    //     {
+    //         runtimeError("'offset()' expects 2 arguments but %d were passed in", argc);
+    //         *hasError = true;
+    //         return NIL_VAL;
+    //     }
+    //     if (!IS_POINTER(argv[0]) || !IS_NUM(argv[1]))
+    //     {
+    //         runtimeError("'offset()' expects a foriegh pointer and a number as arguments but got '%s' and '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type]);
+    //         *hasError = true;
+    //         return NIL_VAL;
+    //     }
+    //     void *p = AS_POINTER(argv[0]);
+    //     long offset = (long)AS_NUM(argv[1]);
+    //     return POINTER_VAL(p + offset * sizeof(char));
+    return NIL_VAL;
+}
+
+NATIVE_FN(testRinitNative)
+{
+    int ret = tb_init();
+    printf("WOP\n");
+    return NUM_VAL(ret);
+    // POINTER_VAL(vm.stackTop);
+}
+
+NATIVE_FN(testRClearNative)
+{
+    int ret = tb_clear();
+    return NUM_VAL(ret);
+}
+
+NATIVE_FN(testRpresentNative)
+{
+    int ret = tb_present();
+    return NUM_VAL(ret);
+}
+
+NATIVE_FN(testRcloseNative)
+{
+    int ret = tb_shutdown();
+
+    return NUM_VAL(ret);
+}
+
+NATIVE_FN(testRPresentNative)
+{
+    int ret = tb_present();
+    return NUM_VAL(ret);
+}
+
+NATIVE_FN(testRpollNative)
+{
+    struct tb_event ev;
+    int ret = tb_poll_event(&ev);
+
+    ObjInstance *evObj = newInstance(vm.eventClass);
+    tableSet(&evObj->fields, copyString("type", 4), NUM_VAL(ev.type));
+    tableSet(&evObj->fields, copyString("mod", 3), NUM_VAL(ev.mod));
+    tableSet(&evObj->fields, copyString("key", 3), NUM_VAL(ev.key));
+    tableSet(&evObj->fields, copyString("ch", 2), NUM_VAL(ev.ch));
+    tableSet(&evObj->fields, copyString("w", 1), NUM_VAL(ev.w));
+    tableSet(&evObj->fields, copyString("h", 1), NUM_VAL(ev.h));
+    tableSet(&evObj->fields, copyString("x", 1), NUM_VAL(ev.x));
+    tableSet(&evObj->fields, copyString("y", 1), NUM_VAL(ev.y));
+    return OBJ_VAL(evObj);
+}
+
+NATIVE_FN(testRprintNative)
+{
+    // get args (x,y, foreground, background, text)
+    if (argc != 5)
+    {
+        runtimeError("'print()' expects 5 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_NUM(argv[0]) || !IS_NUM(argv[1]) || !IS_NUM(argv[2]) || !IS_NUM(argv[3]) || !IS_STR(argv[4]))
+    {
+        runtimeError("'print()' expects 5 numbers and a string as arguments but got '%s', '%s', '%s', '%s', '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type], VALUE_TYPES[argv[2].type], VALUE_TYPES[argv[3].type], VALUE_TYPES[argv[4].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int x = (int)AS_NUM(argv[0]);
+    int y = (int)AS_NUM(argv[1]);
+    int fg = (uint16_t)AS_NUM(argv[2]);
+    int bg = (uint16_t)AS_NUM(argv[3]);
+    char *text = AS_CSTR(argv[4]);
+
+    int ret = tb_print(x, y, fg, bg, text);
+    return NUM_VAL(ret);
+}
+NATIVE_FN(testRsetCellNative)
+{
+    // get args (x,y, foreground, background, text)
+    if (argc != 5)
+    {
+        runtimeError("'setCell()' expects 5 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_NUM(argv[0]) || !IS_NUM(argv[1]) || !IS_NUM(argv[2]) || !IS_NUM(argv[3]) || !IS_NUM(argv[4]))
+    {
+        runtimeError("'setCell()' expects 5 numbers as arguments but got '%s', '%s', '%s', '%s', '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type], VALUE_TYPES[argv[2].type], VALUE_TYPES[argv[3].type], VALUE_TYPES[argv[4].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int x = (int)AS_NUM(argv[0]);
+    int y = (int)AS_NUM(argv[1]);
+    int ch = (uint32_t)AS_NUM(argv[2]);
+    int fg = (uint16_t)AS_NUM(argv[3]);
+    int bg = (uint16_t)AS_NUM(argv[4]);
+
+    int ret = tb_set_cell(x, y, ch, fg, bg);
+    return NUM_VAL(ret);
+}
+
+// static Value testRcloseNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     CloseWindow();
+//     return NIL_VAL;
+// }
+
+// static Value testRbeginNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     BeginDrawing();
+//     return NIL_VAL;
+// }
+
+// static Value testRendNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     EndDrawing();
+//     return NIL_VAL;
+// }
+
+// static Value testRdrawNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     ClearBackground(RAYWHITE);
+//     DrawText("Congrats! You created your first window!", 190, 200, 20, LIGHTGRAY);
+//     return NIL_VAL;
+// }
+
+NATIVE_FN(fileExistsNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("Expected 1 argument but %d passed in for fileExists(path)", argc);
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("Expected a string but got '%s' for fileExists(path)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    char *path = AS_CSTR(argv[0]);
+    struct stat buffer;
+    return BOOL_VAL(stat(path, &buffer) == 0);
+}
+
+NATIVE_FN(fileSizeNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("Expected 1 argument but %d passed in for fileSize(path)", argc);
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("Expected a string but got '%s' for fileSize(path)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    char *path = AS_CSTR(argv[0]);
+    struct stat buffer;
+    if (stat(path, &buffer) != 0)
+    {
+        runtimeError("Failed to get file size");
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    return NUM_VAL((double)buffer.st_size);
+}
+
+NATIVE_FN(fileClassExistsNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("Expected 1 argument but %d passed in for fileClassExists(path)", argc);
+        *hasError = true;
+        return BOOL_VAL(false);
+    }
+    if (!IS_CLASS(peek(argc)))
+    {
+        runtimeError("Expected a File to be caller but got '%s' for File.exists()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    char *path = AS_CSTR(argv[0]);
+    struct stat buffer;
+    return BOOL_VAL(stat(path, &buffer) == 0);
+}
+
+NATIVE_FN(fileFSizeNative)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.size()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *f = AS_FOREIGN(peek(argc));
+    Value size;
+    if (tableGet(&f->fields, copyString("size", 4), &size))
+    {
+        return size;
+    }
+
+    FILE *fp = f->ptr;
+    if (fseek(fp, 0, SEEK_END) < 0)
+    {
+        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(true));
+        fclose(fp);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    long f_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    size = NUM_VAL(f_size);
+    tableSet(&f->fields, copyString("size", 4), size);
+    return size;
+}
+
+NATIVE_FN(fileCloseNative)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+    Value closed = BOOL_VAL(true);
+    if (!tableGet(&file->fields, copyString("isClosed", 8), &closed))
+    {
+        runtimeError("Could not check if file has been closed or not");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (AS_BOOL(closed))
+        return closed;
+
+    closed = BOOL_VAL(true);
+
+    tableSet(&file->fields, copyString("isClosed", 8), closed);
+    fclose(file->ptr);
+    file->ptr = NULL;
+    return closed;
+}
+
+NATIVE_FN(fileResetCursorNative)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.resetCursor()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+    Value name = OBJ_VAL(copyString("unknown", 7));
+    tableGet(&file->fields, copyString("name", 4), &name);
+
+    if (file->ptr == NULL)
+    {
+        runtimeError("Trying to get cursor position of a closed file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (fseek(file->ptr, 0, SEEK_SET) != 0)
+    {
+        runtimeError("Failed to reset cursor for file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    long position = ftell(file->ptr);
+    if (position == -1)
+    {
+        runtimeError("Failed to get cursor position");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return NUM_VAL((double)position);
+}
+
+NATIVE_FN(fileCursorPosition)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.cursorPosition()' expects a file pointer to be its caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+    FILE *fp = file->ptr;
+
+    if (fp == NULL)
+    {
+        runtimeError("Trying to get cursor position of a closed file");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    long position = ftell(fp);
+    if (position == -1)
+    {
+        runtimeError("Failed to get cursor position");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return NUM_VAL((double)position);
+}
+
+static Value fileWriteNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'File.write()' expects 1 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.write()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+    Value mode;
+
+    Value name = OBJ_VAL(copyString("unknown", 7));
+    tableGet(&file->fields, copyString("name", 4), &name);
+
+    if (!tableGet(&file->fields, copyString("mode", 4), &mode))
+    {
+        runtimeError("Could not get mode of file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'r')
+    {
+        runtimeError("Trying to write to a file opened in read only mode (You might want to open the file with a mode of 'r+', 'w', 'w+', 'a' or 'a+' instead)");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int strLen = 0;
+    char str[STR_BUFF] = {0};
+    valueToString(argv[0], str, &strLen);
+
+    FILE *fp = file->ptr;
+    if (fp == NULL)
+    {
+
+        runtimeError("Trying to write to a closed file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_CSTR(mode)[0] == 'a')
+    {
+        fseek(fp, 0, SEEK_END);
+    }
+    size_t written = fwrite(str, sizeof(char), strLen / sizeof(char), fp);
+    if (written != strLen)
+    {
+        runtimeError("Failed to write to file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    fflush(fp);
+    return NUM_VAL((long)written);
+}
+
+static Value fileReadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.read()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+
+    Value name = OBJ_VAL(copyString("unknown", 7));
+    tableGet(&file->fields, copyString("name", 4), &name);
+    Value mode;
+    if (!tableGet(&file->fields, copyString("mode", 4), &mode))
+    {
+        runtimeError("Could not get mode of file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    {
+        runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    FILE *fp = file->ptr;
+    if (fp == NULL)
+    {
+        runtimeError("Trying to read from a closed file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    fseek(fp, 0, SEEK_END);
+    long f_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *buff = ALLOCATE(char, f_size + 1);
+    size_t read = fread(buff, sizeof(char), f_size, fp);
+    buff[read] = '\0';
+    Value str = OBJ_VAL(copyString(buff, (int)read));
+    FREE_ARRAY(char, buff, f_size + 1);
+    return str;
+}
+
+static Value fileReadLineNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.readLine()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+
+    Value name = OBJ_VAL(copyString("unknown", 7));
+    tableGet(&file->fields, copyString("name", 4), &name);
+    Value mode;
+    if (!tableGet(&file->fields, copyString("mode", 4), &mode))
+    {
+        runtimeError("Could not get mode of file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    {
+        runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    FILE *fp = file->ptr;
+    if (fp == NULL)
+    {
+        runtimeError("Trying to read from a closed file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read = getline(&line, &len, fp);
+    if (read == -1)
+    {
+        free(line);
+        return NIL_VAL;
+    }
+    Value str = OBJ_VAL(copyString(line, (int)read - 1));
+    free(line);
+    return str;
+}
+
+static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
+    {
+        runtimeError("'File.readLines(<optional: false> includeEmptyLines)' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    bool includeEmptyLines = false;
+
+    if (argc == 1)
+    {
+        if (!IS_BOOL(argv[0]))
+        {
+            runtimeError("'File.readLines(optional<includeEmptyLines: false>)' expects a boolean an argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+            *hasError = true;
+            return NIL_VAL;
+        }
+        includeEmptyLines = AS_BOOL(argv[0]);
+    }
+    ObjForeign *file = AS_FOREIGN(peek(argc));
+
+    Value name = OBJ_VAL(copyString("unknown", 7));
+    tableGet(&file->fields, copyString("name", 4), &name);
+    Value mode;
+    if (!tableGet(&file->fields, copyString("mode", 4), &mode))
+    {
+        runtimeError("Could not get mode of file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    {
+        runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    FILE *fp = file->ptr;
+    if (fp == NULL)
+    {
+        runtimeError("Trying to read from a closed file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *lines = newList();
+
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read = getline(&line, &len, fp);
+    while (read != -1)
+    {
+        Value str = OBJ_VAL(copyString(line, (int)read));
+        if (includeEmptyLines || *trim(AS_CSTR(str)) != '\0')
+            appendToList(lines, str);
+
+        read = getline(&line, &len, fp);
+    }
+
+    free(line);
+    return OBJ_VAL(lines);
+}
+
+NATIVE_FN(fileInitNative)
+{
+    if (argc != 1 && argc != 2)
+    {
+        runtimeError("'File(<filepath>, optional<mode: 'r' >)' expects 1 or 2 argument(s) but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_STR(argv[0]) || (argc == 2 && !IS_STR(argv[1])))
+    {
+        runtimeError("'File(<file>, optional<mode>)' expects 2 strings as arguments but got '%s' and '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    char *mode = "r";
+    if (argc == 2)
+    {
+        mode = AS_CSTR(argv[1]);
+        if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 && strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0 && strcmp(mode, "rw") != 0 && strcmp(mode, "rw+") != 0)
+        {
+            runtimeError("Invalid mode '%s' for 'File(<file>, optional<mode>)'\nNOTE: Valid options are: 'r', 'w' and 'a'. You can add a '+' proceeding any mode to make create a file if it's non-exsistant.", mode);
+            *hasError = true;
+            return NIL_VAL;
+        }
+    }
+    FILE *file = fopen(AS_CSTR(argv[0]), mode);
+    if (file == NULL)
+    {
+        runtimeError("Could not open file '%s'", AS_CSTR(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjForeign *f = newForeignObj(TYPE_FILE, file, false);
+    tableSet(&f->fields, copyString("mode", 4), OBJ_VAL(copyString(mode, (int)strlen(mode))));
+    tableSet(&f->fields, copyString("name", 4), argv[0]);
+    tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
+
+    tableSet(&f->methods, copyString("close", 5), OBJ_VAL(newNative(fileCloseNative)));
+    tableSet(&f->methods, copyString("size", 4), OBJ_VAL(newNative(fileFSizeNative)));
+    tableSet(&f->methods, copyString("write", 5), OBJ_VAL(newNative(fileWriteNative)));
+    tableSet(&f->methods, copyString("read", 4), OBJ_VAL(newNative(fileReadNative)));
+    tableSet(&f->methods, copyString("readLine", 8), OBJ_VAL(newNative(fileReadLineNative)));
+    tableSet(&f->methods, copyString("readLines", 9), OBJ_VAL(newNative(fileReadLinesNative)));
+    tableSet(&f->methods, copyString("resetCursor", 11), OBJ_VAL(newNative(fileResetCursorNative)));
+    tableSet(&f->methods, copyString("cursorPos", 9), OBJ_VAL(newNative(fileCursorPosition)));
+
+    return OBJ_VAL(f);
+}
+
+NATIVE_FN(getcNative)
 {
     int i = argc == 1 ? AS_NUM(argv[0]) : 0;
     return NUM_VAL(getc(stdin));
 }
 
-static Value kbhitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(kbhitNative)
 {
     return BOOL_VAL(_kbhit());
 }
@@ -386,11 +1062,6 @@ static bool isWide()
     return false;
 }
 
-static inline Value peek(int dist)
-{
-    return vm.stackTop[-1 - dist];
-}
-
 static Value instanceOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 2)
@@ -400,22 +1071,26 @@ static Value instanceOf(int argc, Value *argv, bool *hasError, bool *pushedValue
         return NIL_VAL;
     }
     ObjClass *builtinClass = NULL;
+    if (!IS_CLASS(argv[1]))
+    {
+        runtimeError("'instanceof' expects a class as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
     if (!IS_INSTANCE(argv[0]))
     {
         if (isBuiltinClass(argv[0]))
         {
             builtinClass = getVmClass(argv[0]);
         }
+        else if (IS_CLASS(argv[0]))
+        {
+            return BOOL_VAL(AS_CLASS(argv[0]) == AS_CLASS(argv[1]));
+        }
         else
         {
             return BOOL_VAL(false);
         }
-    }
-    if (!IS_CLASS(argv[1]))
-    {
-        runtimeError("'instanceof' expects a class as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
-        *hasError = true;
-        return NIL_VAL;
     }
 
     if (builtinClass != NULL)
@@ -493,6 +1168,13 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
     }
 
     return OBJ_VAL(copyString(type, (int)strlen(type)));
+}
+
+static Value gcNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    int before = vm.bytesAllocated;
+    collectGarbage();
+    return NUM_VAL((double)(before - vm.bytesAllocated));
 }
 
 static Value sinNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -655,6 +1337,13 @@ char *valueToString(Value val, char *buff, int *len)
             ObjMap *map = AS_MAP(val);
             return mapToString(&map->map, buff, len);
         }
+        case OBJ_FOREIGN:
+        {
+            ObjForeign *obj = AS_FOREIGN(val);
+            sprintf(buff, "%s f<%p>", FOREIGN_TYPES[obj->type], obj->ptr);
+            *len = (int)strlen(buff);
+            return buff;
+        }
         case OBJ_CLASS:
             sprintf(buff, "%s", AS_CLASS(val)->name->chars);
             *len = (int)strlen(buff);
@@ -675,12 +1364,13 @@ char *valueToString(Value val, char *buff, int *len)
                     *len = 0;
                     return buff;
                 }
-                if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+                bool invokedNative = frameCount == vm.frameCount;
+                if (!invokedNative && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
                 {
                     *len = 0;
                     return buff;
                 }
-                Value str = peek(0); // pop();
+                Value str = invokedNative ? peek(0) : pop();
                 if (!IS_STR(str))
                 {
                     *len = 0;
@@ -718,9 +1408,12 @@ char *valueToString(Value val, char *buff, int *len)
             *len = (int)strlen(buff);
             return buff;
         case OBJ_SLICE:
-            sprintf(buff, "%s", "<slice>");
+        {
+            ObjSlice *slice = AS_SLICE(val);
+            sprintf(buff, "<slice[%d:%d:%d]>", slice->start, slice->end, slice->step);
             *len = (int)strlen(buff);
             return buff;
+        }
         }
     }
     snprintf(buff, 10, "%s", "<unknown>");
@@ -801,21 +1494,31 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     ObjList *list = AS_LIST(argv[0]);
     ObjString *sep = AS_STR(argv[1]);
-    char str[STR_BUFF] = {0};//ALLOCATE(char, 100);
+    // char str[STR_BUFF] = {0}; // ALLOCATE(char, 100);
+    int strAlloc = 100;
+    char *str = ALLOCATE(char, strAlloc);
+    str[0] = '\0';
+    int needed = 1;
     // sprintf(str, "%s", "");
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        // char temp[STR_BUFF] = //ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
+        needed += len + sep->len;
+
+        if (needed >= strAlloc)
+        {
+            int old = strAlloc;
+            strAlloc = (needed + 0.5 * needed);
+            str = GROW_ARRAY(char, str, old, strAlloc);
+        }
+
         sprintf(str, "%s%s%s", str, item, sep->chars);
-        // FREE_ARRAY(char, str, strlen(str) + 1);
-        // str = temp;
     }
     if (list->count > 0)
-        str[strlen(str) - strlen(sep->chars)] = '\0';
-    return OBJ_VAL(copyString(str, (int)strlen(str)));
+        str[needed - sep->len - 1] = '\0';
+    return OBJ_VAL(takeString(str, (int)strlen(str)));
 }
 
 static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1153,6 +1856,7 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
     if (getaddrinfo(host, NULL, &hints, &res) != 0)
     {
+        freeaddrinfo(res);
         runtimeError("Failed to get address info for host '%s'", host);
         *hasError = true;
         return BOOL_VAL(false);
@@ -1172,6 +1876,7 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
     if (connect(sock, (struct sockaddr *)serv_addr, sizeof(*serv_addr)) < 0)
     {
+        freeaddrinfo(res);
         runtimeError("Failed to connect to host '%s' on port '%d'", host, port);
         *hasError = true;
         return BOOL_VAL(false);
@@ -1410,50 +2115,6 @@ static Value writeNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         return BOOL_VAL(false);
     }
     return BOOL_VAL(true);
-}
-
-static Value fileExistsNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-{
-    if (argc != 1)
-    {
-        runtimeError("Expected 1 argument but %d passed in for fileExists(path)", argc);
-        *hasError = true;
-        return BOOL_VAL(false);
-    }
-    if (!IS_STR(argv[0]))
-    {
-        runtimeError("Expected a string but got '%s' for fileExists(path)", VALUE_TYPES[argv[0].type]);
-        *hasError = true;
-        return BOOL_VAL(false);
-    }
-    char *path = AS_CSTR(argv[0]);
-    struct stat buffer;
-    return BOOL_VAL(stat(path, &buffer) == 0);
-}
-
-static Value fileSizeNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-{
-    if (argc != 1)
-    {
-        runtimeError("Expected 1 argument but %d passed in for fileSize(path)", argc);
-        *hasError = true;
-        return BOOL_VAL(false);
-    }
-    if (!IS_STR(argv[0]))
-    {
-        runtimeError("Expected a string but got '%s' for fileSize(path)", VALUE_TYPES[argv[0].type]);
-        *hasError = true;
-        return BOOL_VAL(false);
-    }
-    char *path = AS_CSTR(argv[0]);
-    struct stat buffer;
-    if (stat(path, &buffer) != 0)
-    {
-        runtimeError("Failed to get file size");
-        *hasError = true;
-        return BOOL_VAL(false);
-    }
-    return NUM_VAL((double)buffer.st_size);
 }
 
 static Value sendNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1737,8 +2398,6 @@ static bool callValue(Value callee, int argC)
             }
             return true;
         }
-        case OBJ_CLOSURE:
-            return call(AS_CLOSURE(callee), argC);
         case OBJ_NATIVE:
         {
             NativeFn native = AS_NATIVE(callee);
@@ -1754,6 +2413,20 @@ static bool callValue(Value callee, int argC)
             }
             return true;
         }
+        case OBJ_FOREIGN:
+        {
+            ObjForeign *foreign = AS_FOREIGN(callee);
+            Value initMethod;
+            if (!tableGet(&foreign->methods, vm.initStr, &initMethod))
+            {
+                runtimeError("This foreign object %s does not have an init method", FOREIGN_TYPES[foreign->type]);
+                return false;
+            }
+            vm.stackTop[-argC - 1] = callee;
+            return call(AS_CLOSURE(initMethod), argC);
+        }
+        case OBJ_CLOSURE:
+            return call(AS_CLOSURE(callee), argC);
         default:
             break;
         }
@@ -1764,6 +2437,9 @@ static bool callValue(Value callee, int argC)
 
 static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
 {
+    if (klass == NULL)
+        return false;
+
     Value method;
     if (!tableGet(&klass->methods, name, &method))
     {
@@ -1779,14 +2455,28 @@ static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
 bool invoke(ObjString *name, int argc)
 {
     Value receiver = peek(argc);
+
+    if (IS_FOREIGN(receiver))
+    {
+        ObjForeign *foreign = AS_FOREIGN(receiver);
+        Value method;
+        if (!tableGet(&foreign->methods, name, &method))
+        {
+            runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
+            return false;
+        }
+        // vm.stackTop[-argc - 1] = method;
+        return callValue(method, argc);
+    }
+
     bool isInstance = IS_INSTANCE(receiver);
     bool isClass = IS_CLASS(receiver);
     if (!isInstance && !isClass)
     {
         if (isBuiltinClass(receiver))
             return invokeFromClass(getVmClass(receiver), name, argc);
-        else
-            runtimeError("Only Classes and their instances have methods. -- not '%s'", VALUE_TYPES[receiver.type]);
+
+        runtimeError("Only Classes and their instances have methods. -- not '%s'", VALUE_TYPES[receiver.type]);
         return false;
     }
 
@@ -1998,6 +2688,88 @@ ObjClass *primativeClass(char *name)
     return clazz;
 }
 
+static void *runCallableInNewThread(void *arg)
+{
+    acquireGVL();
+    ObjClosure *callable = (ObjClosure *)arg;
+    // if (!IS_CLOSURE(callable))
+    // {
+    //     runtimeError("Thread expects a closure as argument but got '%s'", VALUE_TYPES[callable.type]);
+    //     return NULL;
+    // }
+    // push(OBJ_VAL(callable));
+    if (!call(callable, 0))
+    {
+        releaseGVL();
+        return NULL;
+    }
+    if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+    {
+        releaseGVL();
+        return NULL;
+    }
+    releaseGVL();
+    return NULL; // pop();
+}
+
+static Value newThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'newThread()' expects one argument but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("'newThread()' expects a closure as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    pthread_t thread;
+    ObjClosure *closure = AS_CLOSURE(argv[0]);
+    if (pthread_create(&thread, NULL, runCallableInNewThread, closure) == 0)
+    {
+        releaseGVL();
+        acquireGVL();
+        return NUM_VAL((unsigned long)thread);
+    }
+    else
+    {
+        runtimeError("Failed to create thread");
+        *hasError = true;
+        return NIL_VAL;
+    }
+}
+
+static Value joinThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 1)
+    {
+        runtimeError("'joinThread()' expects one argument but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("'joinThread()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    pthread_t thread = (pthread_t)AS_NUM(argv[0]);
+    releaseGVL();
+    int ret;
+    if ((ret = pthread_join(thread, NULL)) != 0)
+    {
+        acquireGVL();
+        runtimeError("Failed to join thread");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    acquireGVL();
+    return BOOL_VAL(ret == 0);
+}
+
 static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc == 1)
@@ -2165,20 +2937,6 @@ static Value splitByWhitespaceNative(int argc, Value *argv, bool *hasError, bool
     }
     free(str);
     return OBJ_VAL(list);
-}
-
-char *trim(char *str)
-{
-    char *end;
-    while (isspace((unsigned char)*str))
-        str++;
-    if (*str == 0)
-        return str;
-    end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end))
-        end--;
-    end[1] = '\0';
-    return str;
 }
 
 static Value trimNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2426,6 +3184,23 @@ static Value invalidInitNative(int argc, Value *argv, bool *hasError, bool *push
 }
 
 /////////////////////// String CLASS NATIVE METHODS ///////////////////////
+
+static Value initStringNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc == 0)
+    {
+        return OBJ_VAL(copyString("", 0));
+    }
+    Value ret = argv[0];
+    if (!IS_STR(ret))
+    {
+        char str[STR_BUFF] = {0};
+        int len = 0;
+        valueToString(ret, str, &len);
+        ret = OBJ_VAL(copyString(str, len));
+    }
+    return ret;
+}
 
 static Value split2Native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -2800,17 +3575,36 @@ static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     ObjList *list = AS_LIST(argv[0]);
     ObjString *sep = AS_STR(peek(argc));
-    char str[STR_BUFF] = {0};
+    int strAlloc = 100;
+    char *str = ALLOCATE(char, strAlloc);
+    str[0] = '\0';
+    int needed = 0;
+    // sprintf(str, "%s", "");
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
+        // int strLen = strlen(str);
+        needed += len;
+
+        if (needed >= strAlloc)
+        {
+            int old = strAlloc;
+            strAlloc = (needed + 0.5 * needed);
+
+            str = GROW_ARRAY(char, str, old, strAlloc);
+        }
+
+        // GROW_ARRAY(char, str, len + strLen + sep->len + 1, strLen);
+        // char temp[STR_BUFF] = //ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
         sprintf(str, "%s%s%s", str, item, sep->chars);
+        // FREE_ARRAY(char, str, strlen(str) + 1);
+        // str = temp;
     }
     if (list->count > 0)
         str[strlen(str) - strlen(sep->chars)] = '\0';
-    return OBJ_VAL(copyString(str, (int)strlen(str)));
+    return OBJ_VAL(takeString(str, (int)strlen(str)));
 }
 
 static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2828,7 +3622,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         return NIL_VAL;
     }
     char *str = AS_CSTR(peek(argc));
-    char result[STR_BUFF] = {0};//ALLOCATE(char, STR_BUFF);
+    char result[STR_BUFF] = {0}; // ALLOCATE(char, STR_BUFF);
     int len = 0;
     int i = 0;
     int numFormats = 0;
@@ -2857,7 +3651,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
                 if (num < 0 || num >= argc)
                 {
                     runtimeError("Index out of range for string.format(). Expected a number between 0 & %d but got %ld", argc - 1, num);
-                    free(result);
+                    // free(result);
                     *hasError = true;
                     return NIL_VAL;
                 }
@@ -2890,11 +3684,86 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     return OBJ_VAL(copyString(result, (int)strlen(result)));
 }
 
+static Value strHashNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 0)
+    {
+        runtimeError("'hash()' expects 0 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(peek(argc)))
+    {
+        runtimeError("Expected a string to be caller but got '%s' for hash()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return NUM_VAL(AS_STR(peek(argc))->hash);
+}
+
+// THIS IS A MAYBE
+// static Value withColorNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     if (argc != 2)
+//     {
+//         runtimeError("'withColor()' expects 2 arguments %d were passed in", argc);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_STR(peek(argc)))
+//     {
+//         runtimeError("Expected a string to be caller but got '%s' for withColor()", VALUE_TYPES[peek(argc).type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_NUM(argv[0]))
+//     {
+//         runtimeError("Expected a number but got '%s' for withColor(color, str)", VALUE_TYPES[argv[0].type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_NUM(argv[1]))
+//     {
+//         runtimeError("Expected a string but got '%s' for withColor(color, str)", VALUE_TYPES[argv[1].type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     char *str = AS_CSTR(peek(argc));
+//     int color = (int)AS_NUM(argv[0]);
+//     char *result = ALLOCATE(char, strlen(str) + 100);
+//     sprintf(result, "\033[%dm%s\033[0m", color, str);
+//     return OBJ_VAL(takeString(result, (int)strlen(result)));
+// }
+
 ///////////////////////////////////////////////////////////////////////////
 
 //////////////////////// List CLASS NATIVE METHODS ////////////////////////
 
-static Value appendListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(initListNative)
+{
+    if (argc == 0)
+    {
+        return OBJ_VAL(newList());
+    }
+    if (argc == 1 && IS_NUM(argv[0]))
+    {
+        return OBJ_VAL(newListWithCapacity((int)AS_NUM(argv[0])));
+    }
+    runtimeError("Expected 0 or 1 argument but got %d for List()", argc);
+    *hasError = true;
+    return NIL_VAL;
+}
+
+NATIVE_FN(listOfNative)
+{
+    ObjList *list = newList();
+    for (int i = 0; i < argc; i++)
+        appendToList(list, argv[i]);
+    return OBJ_VAL(list);
+}
+
+NATIVE_FN(appendListNative)
 {
     if (argc != 1)
     {
@@ -2913,7 +3782,50 @@ static Value appendListNative(int argc, Value *argv, bool *hasError, bool *pushe
     return OBJ_VAL(list);
 }
 
-static Value extendListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(insertListNative)
+{
+    if (argc != 2)
+    {
+        runtimeError("'insert(at, thing)' expects 2 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for insert()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("Expected a number as the second argument but got '%s' for insert()", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    int index = AS_NUM(argv[0]);
+    if (index < 0 || index > list->count)
+    {
+        runtimeError("Index out of range for insert(). List has size %d. However, %d was provided", list->count, index);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (list->count == list->capacity)
+    {
+        int oldCapacity = list->capacity;
+        list->capacity = GROW_CAPACITY(oldCapacity);
+        list->items = GROW_ARRAY(Value, list->items, oldCapacity, list->capacity);
+    }
+    for (int i = list->count; i > index; i--)
+    {
+        list->items[i] = list->items[i - 1];
+    }
+    list->items[index] = argv[1];
+    list->count++;
+    return OBJ_VAL(list);
+}
+
+NATIVE_FN(extendListNative)
 {
     if (argc != 1)
     {
@@ -2955,7 +3867,7 @@ static void prependToList(ObjList *list, Value value)
     list->count++;
 }
 
-static Value prependListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(prependListNative)
 {
     if (argc != 1)
     {
@@ -2974,7 +3886,7 @@ static Value prependListNative(int argc, Value *argv, bool *hasError, bool *push
     return OBJ_VAL(list);
 }
 
-static Value containsListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(containsListNative)
 {
     if (argc != 1)
     {
@@ -2995,7 +3907,7 @@ static Value containsListNative(int argc, Value *argv, bool *hasError, bool *pus
     return BOOL_VAL(false);
 }
 
-static Value indexOfListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(indexOfListNative)
 {
     if (argc != 1)
     {
@@ -3016,7 +3928,7 @@ static Value indexOfListNative(int argc, Value *argv, bool *hasError, bool *push
     return NUM_VAL(-1);
 }
 
-static Value popListNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(popListNative)
 {
     if (argc != 0 && argc != 1)
     {
@@ -3061,7 +3973,7 @@ static Value popListNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     return list->items[--list->count];
 }
 
-static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(foreachNative)
 {
     if (argc != 1)
     {
@@ -3121,7 +4033,67 @@ static Value foreachNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     return OBJ_VAL(list);
 }
 
-static Value mapNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(removeIfNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'removeIf()' expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("Expected a closure but got '%s' for removeIf(closure)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for removeIf()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = AS_LIST(peek(argc));
+    // ObjClosure *closure = AS_CLOSURE(peek(0));
+    ObjClosure *closure = AS_CLOSURE(pop());
+    // push(OBJ_VAL(closure));
+    if (closure->function->arity != 1 && closure->function->arity != 2)
+    {
+        runtimeError("Expected a closure with 1 or 2 arguments but got %d", closure->function->arity);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    bool enumerate = closure->function->arity == 2;
+    int i = 0;
+    while (i < list->count)
+    {
+        push(OBJ_VAL(closure));
+
+        if (enumerate)
+            push(NUM_VAL(i));
+
+        push(list->items[i]);
+        if (!call(closure, enumerate ? 2 : 1))
+            return NIL_VAL;
+        if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+        {
+            *hasError = true;
+            return NIL_VAL;
+        }
+        if (IS_BOOL(peek(0)) && AS_BOOL(pop()))
+        {
+            for (int j = i; j < list->count - 1; j++)
+                list->items[j] = list->items[j + 1];
+            list->count--;
+        }
+        else
+            i++;
+    }
+    push(OBJ_VAL(list));
+    return OBJ_VAL(list);
+}
+
+NATIVE_FN(mapNative)
 {
     if (argc != 1)
     {
@@ -3155,9 +4127,6 @@ static Value mapNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
     for (int i = 0; i < list->count; i++)
     {
         push(OBJ_VAL(closure));
-        Value *stop = vm.stackTop; // This doesn't work since when I push/pop, it updates the stackTop
-        int stackCount = vm.stackTop - vm.stack;
-        int frameCount = vm.frameCount;
         ObjUpvalue *upvalues = vm.openUpvalues;
 
         if (enumerate)
@@ -3168,9 +4137,6 @@ static Value mapNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
             return NIL_VAL;
         if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
         {
-            // vm.stackTop = vm.stack + stackCount;
-            // vm.frameCount = frameCount;
-            // vm.openUpvalues = upvalues;
             *hasError = true;
             return NIL_VAL;
         }
@@ -3605,14 +4571,15 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
         return NIL_VAL;
     }
     Value str = argv[0];
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
     if (!IS_STR(str))
     {
         int len = 0;
-        char buff[STR_BUFF] = {0};// ALLOCATE(char, STR_BUFF);
+        char buff[STR_BUFF] = {0}; // ALLOCATE(char, STR_BUFF);
         valueToString(str, buff, &len);
         str = OBJ_VAL(copyString(buff, len));
+        // pop();
     }
-    ObjInstance *instance = AS_INSTANCE(peek(argc));
     Value value;
     if (!tableGet(&instance->fields, copyString("contents", 8), &value))
     {
@@ -3818,6 +4785,8 @@ static Value sbToArrayNative(int argc, Value *argv, bool *hasError, bool *pushed
 
 ////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////
+
 // TODO
 //////////////////////// Regex CLASS NATIVE METHODS ////////////////////////
 
@@ -3936,6 +4905,75 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
     return OBJ_VAL(copyString(str, len));
 }
 
+NATIVE_FN(eventInitNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'Event()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected an Event to be caller but got '%s' for Event())", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
+    return peek(argc);
+}
+
+NATIVE_FN(eventToStringNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'toStr()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected an Event to be caller but got '%s' for Event.toStr()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *instance = AS_INSTANCE(peek(argc));
+
+    Table *fields = &instance->fields;
+    int strAlloc = STR_BUFF;
+    char *str = ALLOCATE(char, strAlloc);
+    int len = 0;
+    sprintf(str, "Event{");
+    len = 6;
+
+    for (int i = 0; i < fields->capacity; i++)
+    {
+        if (fields->entries[i].key != NULL && fields->entries[i].key != vm.clazzStr)
+        {
+            ObjString *key = fields->entries[i].key;
+            Value value = fields->entries[i].value;
+
+            char valueStr[STR_BUFF] = {0};
+            int valueLen = 0;
+            valueToString(value, valueStr, &valueLen);
+            int tempLen = key->len + valueLen + 4; // 4 for ": " and ", "
+            if (len + tempLen >= strAlloc)
+            {
+                strAlloc = GROW_CAPACITY(strAlloc);
+                str = GROW_ARRAY(char, str, len, strAlloc);
+            }
+            sprintf(str + len, "%s: %s, ", key->chars, valueStr);
+            len += tempLen;
+        }
+    }
+
+    if (len > 6) // Remove the last ", " if there were any fields
+        len -= 2;
+    sprintf(str + len, "}");
+
+    return OBJ_VAL(takeString(str, len + 1));
+}
+
 ////////////////////////////////////////////////////////////////////////////
 
 void initVM(bool printBytecode, bool printExecStack)
@@ -3948,7 +4986,7 @@ void initVM(bool printBytecode, bool printExecStack)
     // {
     //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
     // }
-
+    acquireGVL();
     printBytecodeGlobal = printBytecode;
     printExecStackGlobaL = printExecStack;
     srand(time(NULL));
@@ -4013,10 +5051,19 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&errorClass->methods, copyString("toStr", 5), errorClass->toStr);
     tableSet(&errorClass->methods, copyString("init", 4), errorClass->initializer);
 
+    vm.eventClass = NULL;
+    ObjClass *eventClass = primativeClass("Event");
+    vm.eventClass = eventClass;
+    eventClass->initializer = OBJ_VAL(newNative(eventInitNative));
+    eventClass->toStr = OBJ_VAL(newNative(eventToStringNative));
+    tableSet(&eventClass->methods, copyString("init", 4), eventClass->initializer);
+    tableSet(&eventClass->methods, copyString("toStr", 5), eventClass->toStr);
+
     vm.stringClass = NULL;
     ObjClass *stringClass = primativeClass("String");
     vm.stringClass = stringClass;
-    stringClass->initializer = OBJ_VAL(newNative(invalidInitNative));
+    stringClass->initializer = OBJ_VAL(newNative(initStringNative));
+    stringClass->hashFn = OBJ_VAL(newNative(strHashNative));
     tableSet(&stringClass->methods, copyString("split", 5), OBJ_VAL(newNative(split2Native)));
     tableSet(&stringClass->methods, copyString("replace", 7), OBJ_VAL(newNative(replace2Native)));
     tableSet(&stringClass->methods, copyString("splitOnWs", 9), OBJ_VAL(newNative(splitByWhitespace2Native)));
@@ -4034,21 +5081,26 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&stringClass->methods, copyString("format", 6), OBJ_VAL(newNative(formatNative)));
     tableSet(&stringClass->methods, copyString("f", 1), OBJ_VAL(newNative(formatNative)));
     tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
+    tableSet(&stringClass->methods, copyString("_hash_", 6), stringClass->hashFn);
 
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
     vm.listClass = listClass;
-    listClass->initializer = OBJ_VAL(newNative(invalidInitNative));
+    listClass->initializer = OBJ_VAL(newNative(initListNative));
     tableSet(&listClass->methods, copyString("append", 6), OBJ_VAL(newNative(appendListNative)));
+    tableSet(&listClass->methods, copyString("of", 2), OBJ_VAL(newNative(listOfNative)));
     tableSet(&listClass->methods, copyString("extend", 6), OBJ_VAL(newNative(extendListNative)));
     tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
     tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
+
     // tableSet(&listClass->methods, copyString("remove", 6), OBJ_VAL(newNative(removeListNative)));
     // tableSet(&listClass->methods, copyString("clear", 5), OBJ_VAL(newNative(clearListNative)));
     tableSet(&listClass->methods, copyString("indexOf", 7), OBJ_VAL(newNative(indexOfListNative)));
+    tableSet(&listClass->methods, copyString("insert", 6), OBJ_VAL(newNative(insertListNative)));
     tableSet(&listClass->methods, copyString("pop", 3), OBJ_VAL(newNative(popListNative)));
     tableSet(&listClass->methods, copyString("foreach", 7), OBJ_VAL(newNative(foreachNative)));
     tableSet(&listClass->methods, copyString("map", 3), OBJ_VAL(newNative(mapNative)));
+    tableSet(&listClass->methods, copyString("filter", 6), OBJ_VAL(newNative(removeIfNative)));
     tableSet(&listClass->methods, copyString("init", 4), listClass->initializer);
 
     vm.mapClass = NULL;
@@ -4089,6 +5141,20 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&sb->methods, copyString("pop", 3), OBJ_VAL(newNative(sbPopNative)));
     tableSet(&sb->methods, copyString("toArray", 7), OBJ_VAL(newNative(sbToArrayNative)));
 
+    ObjClass *file = primativeClass("File");
+    file->initializer = OBJ_VAL(newNative(fileInitNative));
+    tableSet(&file->methods, copyString("exists", 6), OBJ_VAL(newNative(fileClassExistsNative)));
+
+    defineNative("tI", testRinitNative);
+    defineNative("tC", testRcloseNative);
+    defineNative("tPres", testRPresentNative);
+    defineNative("tP", testRprintNative);
+    defineNative("tPoll", testRpollNative);
+    defineNative("tClear", testRClearNative);
+    defineNative("tSetCell", testRsetCellNative);
+
+    defineNative("offset", offsetNative);
+
     defineNative("clock", clockNative);
     defineNative("input", inputNative);
     defineNative("getc", getcNative);
@@ -4112,6 +5178,7 @@ void initVM(bool printBytecode, bool printExecStack)
     defineNative("len", lenNative);
     defineNative("instanceof", instanceOf);
     defineNative("ord", ordNative);
+
     // Strings
     defineNative("split", splitNative);
     defineNative("splitOnWs", splitByWhitespaceNative);
@@ -4148,10 +5215,18 @@ void initVM(bool printBytecode, bool printExecStack)
     // Math
     defineNative("sin", sinNative);
     defineNative("cos", cosNative);
+
+    // GC
+    defineNative("gc", gcNative);
+
+    // Threads // SOON TO BE A BUILT-IN CLASS
+    defineNative("newThread", newThreadNative);
+    defineNative("joinThread", joinThreadNative);
 }
 
 void freeVM()
 {
+    releaseGVL();
     freeTable(&vm.globals);
     freeTable(&vm.strings);
     freeTable(&vm.imports);
@@ -4163,6 +5238,16 @@ void freeVM()
     vm.toStr = NULL;
     vm.eqStr = NULL;
     vm.clazzStr = NULL;
+    vm.indexStr = NULL;
+    vm.setStr = NULL;
+    vm.sizeStr = NULL;
+    vm.hashStr = NULL;
+    vm.ltStr = NULL;
+    vm.gtStr = NULL;
+    vm.errorClass = NULL;
+    vm.stringClass = NULL;
+    vm.listClass = NULL;
+    vm.mapClass = NULL;
     freeObjects();
 }
 
@@ -4432,7 +5517,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             else
             {
-                runtimeError("Operands must be numbers, strings or objects with a <_lt_> method.");
+                runtimeError("Operands must be numbers, strings or objects with a <_lt_> method. Not %s and %s", VALUE_TYPES[a.type], VALUE_TYPES[b.type]);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -4661,7 +5746,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value superclass = peek(1);
             if (!IS_CLASS(superclass))
             {
-                runtimeError("Superclass must be a class but got type: '%s''",  VALUE_TYPES[superclass.type]);
+                runtimeError("Superclass must be a class but got type: '%s''", VALUE_TYPES[superclass.type]);
                 return INTERPRET_RUNTIME_ERROR;
             }
             ObjClass *superclazz = AS_CLASS(superclass);
@@ -4752,8 +5837,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             {
                 if (!isBuiltinClass(peek(0)))
                 {
-                    return INTERPRET_RUNTIME_ERROR;
+                    if (IS_FOREIGN(peek(0)))
+                    {
+                        Value value;
+                        if (tableGet(&AS_FOREIGN(peek(0))->fields, name, &value))
+                        {
+                            pop();
+                            push(value);
+                            break;
+                        }
+                        else
+                        {
+                            runtimeError("Cannot find property %s in foreign object", name->chars);
+                            return INTERPRET_RUNTIME_ERROR;
+                        }
+                    }
+                    // handle foreign objects?
                     runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", VALUE_TYPES[peek(0).type]);
+                    return INTERPRET_RUNTIME_ERROR;
                 }
                 klass = getVmClass(peek(0));
                 Value native;
@@ -5096,16 +6197,48 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value file = pop();
             if (IS_STR(file))
             {
+                // How can I check a working directory?
+
                 ObjString *filePath = AS_STR(file);
+
+                if (filePath->chars[filePath->len - 1] != 'k' || filePath->chars[filePath->len - 2] != '.')
+                {
+                    char *newPath = (char *)malloc(filePath->len + 3);
+                    memcpy(newPath, filePath->chars, filePath->len);
+                    newPath[filePath->len] = '.';
+                    newPath[filePath->len + 1] = 'k';
+                    newPath[filePath->len + 2] = '\0';
+                    filePath = takeString(newPath, filePath->len + 2);
+                }
+
                 Value value;
                 if (tableGet(&vm.imports, filePath, &value))
                     break;
-                char *source = readFile(filePath->chars);
+
+                // Check known working directories
+                char *workingDirs[4] = {
+                    "./",
+                    "/usr/local/lib/dotk/",
+                    "/usr/lib/dotk/",
+                    NULL};
+                char *source = NULL;
+                for (int i = 0; workingDirs[i] != NULL; i++)
+                {
+                    char fullPath[PATH_MAX];
+                    snprintf(fullPath, sizeof(fullPath), "%s%s", workingDirs[i], filePath->chars);
+                    source = readFile(fullPath);
+                    if (source != NULL)
+                    {
+                        break;
+                    }
+                }
+
                 if (source == NULL)
                 {
                     runtimeError("Cannot import file:\"%s\"\n", filePath->chars);
                     return INTERPRET_RUNTIME_ERROR;
                 }
+
                 vm.importSources = (char **)realloc(vm.importSources, sizeof(char *) * ++vm.importCount);
                 vm.importSources[vm.importCount - 1] = source;
 
@@ -5130,6 +6263,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             break;
         }
+
         case OP_TRY:
         {
             Value *stop = vm.stackTop;

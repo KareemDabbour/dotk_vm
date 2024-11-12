@@ -121,6 +121,7 @@ static void parsePrecedence(Precedence precedence);
 static uint16_t parseVariable(const char *errMsg);
 static int resolveLocal(Compiler *compiler, Token *name);
 static int resolveUpValue(Compiler *compiler, Token *name);
+// static void optimizeFunction(ObjFunction *fn);
 
 static inline Chunk *currentChunk()
 {
@@ -236,6 +237,9 @@ static int emitJump(uint8_t inst)
 
 static void emitReturn()
 {
+    Chunk *chunk = currentChunk();
+    if (chunk != NULL && chunk->size > 0 && chunk->code[chunk->size - 1] == OP_RETURN)
+        return;
     if (current->type == TYPE_INITIALIZER)
         emitBytes(OP_GET_LOCAL, 0);
     else
@@ -576,7 +580,10 @@ static void expression()
 static void returnStatement()
 {
     if (current->type == TYPE_SCRIPT)
+    {
         error("Can't return from top-level code");
+        return;
+    }
 
     if (match(TOKEN_SEMICOLON))
         emitReturn();
@@ -628,9 +635,16 @@ static void function(FunctionType type)
         consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
         block();
     }
+    // optimizeFunction(current->function);
     ObjFunction *function = endCompiler();
     uint16_t constant = makeConstant(OBJ_VAL(function));
     emitBytes(OP_CLOSURE, constant);
+    if (check(TOKEN_LEFT_PAREN))
+    {
+        consume(TOKEN_LEFT_PAREN, "Expect ')' after parameters.");
+        uint8_t argCount = argList();
+        emitBytes(OP_CALL, argCount);
+    }
 
     for (int i = 0; i < function->upValueCount; i++)
     {
@@ -756,6 +770,12 @@ static void classDeclaration()
 }
 static void funDeclaration()
 {
+    if (check(TOKEN_LEFT_PAREN))
+    {
+        markInitialized();
+        function(TYPE_ANONYMOUS);
+        return;
+    }
     uint16_t global = parseVariable("Expect function name");
     markInitialized();
     function(TYPE_FUNCTION);
@@ -1286,6 +1306,21 @@ static void templateString(bool canAssign)
             case '\"':
                 new[realLen++] = '\"';
                 break;
+            case '0':
+            {
+                if (i + 2 < tokenLen && parser.prev.start[i + 1] == '3' && parser.prev.start[i + 2] == '3')
+                {
+                    new[realLen++] = '\033';
+                    i += 2;
+                }
+                else
+                    new[realLen++] = '\0';
+                // new[realLen++] = '\0';
+                break;
+            }
+            case 'e':
+                new[realLen++] = '\x1b';
+                break;
             case 'n':
                 new[realLen++] = '\n';
                 break;
@@ -1723,6 +1758,7 @@ ObjFunction *compile(const char *source, char *file, bool isRepl, bool printByte
 
     consume(TOKEN_EOF, "Expect end of expr");
     ObjFunction *function = endCompiler();
+    // optimizeChunk(currentChunk());
     return parser.hadError ? NULL : function;
 }
 
@@ -1735,3 +1771,52 @@ void markCompilerRoots()
         compiler = compiler->enclosing;
     }
 }
+// TODO WIP
+// static void optimizeFunction(ObjFunction *fn)
+// {
+// if (fn->chunk.size == 0)
+//     return;
+// uint8_t *code = fn->chunk.code;
+// int i = 0;
+// while (i < fn->chunk.size)
+// {
+//     switch (code[i])
+//     {
+//     case OP_ADD:
+//     {
+//         // check the last two instructions
+//         if (i >= 2 && code[i - 1] == OP_CONSTANT && code[i - 2] == OP_CONSTANT)
+//         {
+//             // get the two constants
+//             uint16_t a = (code[i - 1] << 8) | code[i];
+//             uint16_t b = (code[i - 2] << 8) | code[i - 1];
+//             // get the values of the constants
+//             Value aVal = fn->chunk.constants.values[a];
+//             Value bVal = fn->chunk.constants.values[b];
+//             // check if they are both numbers
+//             if (IS_NUM(aVal) && IS_NUM(bVal))
+//             {
+//                 // get the numbers
+//                 double aNum = AS_NUM(aVal);
+//                 double bNum = AS_NUM(bVal);
+//                 // create a new constant with the sum
+//                 Value sum = NUM_VAL(aNum + bNum);
+//                 // add the constant to the chunk
+//                 uint16_t sumConst = makeConstant(sum);
+//                 // replace the last two instructions with the new constant
+//                 code[i - 2] = sumConst >> 8;
+//                 code[i - 1] = sumConst & 0xff;
+//                 // remove the two instructions
+//                 for (int j = i; j < fn->chunk.size - 2; j++)
+//                 {
+//                     code[j] = code[j + 2];
+//                 }
+//                 fn->chunk.size -= 2;
+//                 i -= 2;
+//             }
+//         }
+//     }
+//     }
+//     i += 1;
+// }
+// }

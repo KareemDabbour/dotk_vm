@@ -1,3 +1,5 @@
+import "lang.k"
+
 ## A simple linked list implementation.
 class ListNode {
   init(value) {
@@ -1395,6 +1397,185 @@ class Strings{
     return (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
   }
 }
+
+class Pair {
+    init(first, second){
+        this.first = first;
+        this.second = second;
+    }
+
+    _lt_(other){
+        return this.wieght < other.wieght;
+    }
+
+    _gt_(other){
+        return this.wieght > other.wieght;
+    }
+
+    toStr(){
+        return "(${}, ${})".f(this.first, this.second);
+    }
+    _eq_(other){
+        return this.first == other.first && this.second == other.second;
+    }
+    _hash_(){
+        return hash(this.first) + hash(this.second);
+    }
+}
+
+class GraphPair<Pair>{
+  _lt_(other){
+    return this.second < other.second;
+  }
+  _gt_(other){
+    return this.second > other.second;
+  }
+}
+
+class Graph {
+    init(){
+        this.adjList = HashMap();
+    }
+
+    addEdge(u, v){
+        this.adjList.compute(u, fn (k, val) => val ? val.append(v) : {v});
+    }
+
+    _get_(u){
+        return this.adjList[u];
+    }
+
+    _set_(u, v){
+        this.addEdge(u, v);
+    }
+
+    _hash_(){
+        return hash(this.adjList);
+    }
+
+    minDist(dist, sptSet){
+        var min = Math.INF;
+        var minIndex = -1;
+        dist.keys().foreach(fn (i) {
+            if (!sptSet.contains(i) && (dist[i]) < min){
+                min = dist[i];
+                minIndex = i;
+            }
+        });
+        return minIndex;
+    }
+
+    dijkstra(src){
+        var dist = HashMap();
+        this.adjList.keys().foreach(fn (k) => dist[k] = Math.INF);
+        dist[src] = 0;
+        # print("dist: ${}".f(dist));
+        var sptSet = Set();
+        for (var i = 0; i < len(this.adjList); i+=1){
+            var u = this.minDist(dist, sptSet);
+            # print("u: ${}".f(u));
+            sptSet.add(u);
+            
+            var adj = this.adjList.get(u, []);
+            print "adj: ${}".f(adj);
+            adj.foreach(fn (v) {
+                # print "v: ${}".f(v);
+                if (!sptSet.contains(v) && dist[u] != Math.INF && (dist[u] + 1) < dist.get(v, Math.INF)){
+                    dist[v] = dist[u] + 1;
+                }
+            });
+        }
+        return dist;
+
+    }
+
+    toStr(){
+        var s = StringBuilder();
+        this.adjList.entries().foreach(fn (e) {
+            s.append(e[0]).append(" -> ").append(e[1]).append("\n");
+        });
+        return s.toStr();
+        # return this.adjList.toStr();
+    }
+}
+
+class WeightedDirectedGraph <Graph> {
+    init(){
+        this.adjList = HashMap();
+    }
+
+    addEdge(u, v, w){
+        this.adjList.compute(u, fn (k, val) => val ? val.append(GraphPair(v, w)) : {GraphPair(v, w)});
+    }
+
+    minDist(dist, sptSet){
+        var min = Math.INF;
+        var minIndex = -1;
+        var d = dist.keys();
+        for(var s = 0; s < len(d); s += 1){
+            var i = d[s];
+            if (!sptSet.contains(i) && (dist[i]) < min){
+                min = dist[i];
+                minIndex = i;
+            }
+        }
+        return minIndex;
+    }
+
+    dijkstra(src){
+        var dist = HashMap();
+        this.adjList.keys().foreach(fn (k) => dist[k] = Math.INF);
+        dist[src] = 0;
+        # print("dist: ${}".f(dist));
+        # print "adjList: ${}".f(this.adjList);
+        var sptSet = [];
+        for (var i = 0; i < len(this.adjList.keys()); i+=1){
+            var u = this.minDist(dist, sptSet);
+            # print("u: ${}".f(u));
+            sptSet.append(u);
+            
+            var adj = this.adjList.get(u, []);
+            # print "adj: ${}".f(adj);
+
+            
+            adj.foreach(fn (vP) {
+                var v = vP.name;
+                var d = dist[u];
+                # print "v: ${}".f(v);
+                # print "dist[u]: ${}".f(d);
+                # print "dist[v]: ${}".f(dist.get(v, Math.INF));
+                # print "spSet: ${}".f(sptSet);
+                if (!sptSet.contains(v) && d != Math.INF && (d + 1) < dist.get(v, Math.INF)){
+                    dist[v] = (dist[u] + 1);
+                }
+            });
+        }
+        return dist;
+
+    }
+
+    shortestPath(src, dest){
+        var dist = this.dijkstra(src);
+        return dist[dest];
+    }
+
+
+
+    toStr(){
+        var s = StringBuilder();
+
+        var d = this.adjList.entries()
+        
+        d.foreach(fn (e) {
+            s.append(e[0]).append(" -> ").append(e[1]).append("\n");
+        });
+
+        return s.toStr();
+        # return this.adjList.toStr();
+    }
+
+}
+
 
 var STDIN = 0
 var STDOUT = 1

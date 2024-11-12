@@ -1,39 +1,50 @@
-import "stdlib.k";
+import "lang";
 var BOARD_SIZE = 10;
 var HEIGHT = 15;
 var EFF_BOARD_SIZE = BOARD_SIZE + 2;
 
 var FILLED_ROW = [EFF_BOARD_SIZE]{1};
 
+fn colorize(text, color){
+    return "${}${}${}${}".f(Ansi.BOLD, color, text,Ansi.RESET);
+}
 
-var ICONS = {" . ", " # ",};
+var ICONS = {" . ", 
+            " # ", 
+            colorize(" # ", Ansi.RED), # 2
+            colorize(" # ", Ansi.GREEN), # 3
+            colorize(" # ", Ansi.YELLOW), # 4
+            colorize(" # ", Ansi.BLUE), # 5
+            colorize(" # ", Ansi.PURPLE), # 6
+            colorize(" # ", Ansi.CYAN), # 7
+            colorize(" # ", Ansi.WHITE)} # 8
 
 var PIECES = {
 
-    {{1,1,1,1}},
-
-    {{1, 0},
-     {1, 0},
-     {1, 1}},   
+    {{7,7,7,7}}
+    ,
+    {{4, 0},
+     {4, 0},
+     {4, 4}},   
     
     {{0, 1},
      {0, 1},
      {1, 1}},
 
-    {{0, 1},
-     {1, 1},
-     {0, 1}},
+    {{0, 6},
+     {6, 6},
+     {0, 6}},
 
-    {{0, 1},
-     {1, 1},
-     {1, 0}},
+    {{0, 2},
+     {2, 2},
+     {2, 0}},
 
-    {{1, 0},
-     {1, 1},
-     {0, 1}},
+    {{3, 0},
+     {3, 3},
+     {0, 3}},
 
-    {{1, 1},
-     {1, 1}}
+    {{4, 4},
+     {4, 4}}
 
 };
 
@@ -108,8 +119,7 @@ fn copyBoard(board){
 }
 
 fn getRandomPiece(){
-    var index = randInt(0, len(PIECES) - 1);
-    return PIECES[index];
+    return PIECES[randInt(0, len(PIECES) - 1)];
 }
 
 fn getRandomPosition(currPiece){
@@ -174,14 +184,19 @@ fn mergeBoardAndPiece(board, currPiece, piecePos){
 
     
 
-    var filledRows = 0;
-    for (var i = 0; i < HEIGHT - 1; i += 1){
-        if (board[i] == FILLED_ROW){
-            filledRows += 1;
+    var filledRows = -1;
+    board.foreach(fn (x) {
+        for(var tt =0; tt < len(x); tt+=1){
+            if(x[tt] == 0) return false;
         }
-    }
+        filledRows += 1;
+    });
+    # for (var i = 0; i < HEIGHT - 1; i += 1){
+        # if (board[i] == FILLED_ROW){
+
+    # }
     
-    return filledRows;
+    return filledRows; 
 }
 
 fn overlapCheck(board, currPiece, piecePos){
@@ -191,7 +206,7 @@ fn overlapCheck(board, currPiece, piecePos){
     var currPieceY = len(currPiece[0]);
     for(var x = 0; x<currPieceX; x+=1){
         for(var y = 0; y<currPieceY; y+=1){
-            if (currPiece[x][y] == 1 && board[piecePos[0] + x][piecePos[1] + y] == 1){
+            if (currPiece[x][y] >= 1 && board[piecePos[0] + x][piecePos[1] + y] >= 1){
                 return false;
             }
         }
@@ -227,8 +242,14 @@ fn canRotateAntiClockwise(board, currPiece, piecePos){
 
 fn clearFilledRows(board, filledRows){
     if (filledRows > 0){
-        board = Arrays.removeIf(board[:-2], 
-            fn (x) => x == FILLED_ROW;
+        board = board[:-2].filter( 
+            fn (x) 
+            {
+                for(var tt =0; tt < len(x); tt+=1){
+                    if(x[tt] == 0) return false;
+                }
+                return true;
+            }
         );
         var emptyRows = [filledRows];
         for(var i = 0; i < filledRows; i += 1){
@@ -238,7 +259,7 @@ fn clearFilledRows(board, filledRows){
             emptyRows[i] = emptyRow;
         }
 
-        board = {FILLED_ROW} + board + emptyRows;
+        board =  (emptyRows + board) + {FILLED_ROW}
 
     }
 

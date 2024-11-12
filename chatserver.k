@@ -10,14 +10,15 @@ var chat = []
 
 fn handleClient(clientSock){
     try{
+
         var data = clientSock.receive()
         
-            # print("Received: " + data)
         var json = JSON.parse(data)
         var json_chat = JSON.stringify(chat)
         if(json.containsKey("GET")){
             clientSock.send(json_chat)
         }else{
+            print("Received: " + data)
             chat.append(json)
         }
         clientSock.send(json_chat)
@@ -26,7 +27,7 @@ fn handleClient(clientSock){
     }
 }
 
-while (true){
+while (true) {
     var client = sock.accept()
     try{
         # fork a new thread to handle the client ... IF I COULD :( 

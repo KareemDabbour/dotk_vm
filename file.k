@@ -24,6 +24,8 @@ var SEEK_SET = 0
 var SEEK_CUR = 1
 var SEEK_END = 2
 
+var BUFFER_SIZE = 104857
+
 class File<Closable>{
     init(path, mode, permissions){
         if (type(path) != "string"){
@@ -40,10 +42,16 @@ class File<Closable>{
         this.size = fileSize(path)
         this.cursor = 0
     }
+    _size_(){
+        return this.size
+    }
 
     readAll(){
         if (this.mode & F_WO){
             print_error("Cannot read from write-only file")
+        }
+        if(this.size > BUFFER_SIZE){
+            print_error("File is too large to read all at once. Size: ${} > MAX: ${1}\nUse read(size: int) and buffer the file instead.".f(this.size, BUFFER_SIZE))
         }
         seek(this.fd, 0, SEEK_SET)
         var ret = read(this.fd)
