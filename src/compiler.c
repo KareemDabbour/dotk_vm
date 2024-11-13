@@ -161,6 +161,7 @@ static void advance()
     for (;;)
     {
         parser.current = scanToken();
+        // printf("TOKEN: %s - '%.*s'\n", TOKEN_NAMES[parser.current.type], parser.current.len, parser.current.start);
         if (parser.current.type != TOKEN_ERROR)
             break;
         errorAtCurrent(parser.current.start);
@@ -1276,6 +1277,78 @@ static void rawString(bool canAssign)
     emitConst(OBJ_VAL(copyString(parser.prev.start + 1, parser.prev.len - 2)));
 }
 
+static void interpolateString(bool canAssign)
+{
+    // Template strings can have escape sequences. Need to scan token chars and build up new string with converted escape sequences.
+
+    int tokenLen = parser.prev.len - 2;
+    int realLen = 0;
+
+    char *new = ALLOCATE(char, tokenLen);
+
+    for (int i = 1; i < tokenLen + 1; ++i)
+    {
+        char c = parser.prev.start[i];
+
+        // Can't have escape sequence with only 1 char left
+        if (i < tokenLen && c == '\\')
+        {
+            char next = parser.prev.start[++i];
+            switch (next)
+            {
+            case '\n':
+                break;
+            case '\\':
+                new[realLen++] = '\\';
+                break;
+            case '\'':
+                new[realLen++] = '\'';
+                break;
+            case '\"':
+                new[realLen++] = '\"';
+                break;
+            case '0':
+            {
+                if (i + 2 < tokenLen && parser.prev.start[i + 1] == '3' && parser.prev.start[i + 2] == '3')
+                {
+                    new[realLen++] = '\033';
+                    i += 2;
+                }
+                else
+                    new[realLen++] = '\0';
+                // new[realLen++] = '\0';
+                break;
+            }
+            case 'e':
+                new[realLen++] = '\x1b';
+                break;
+            case 'n':
+                new[realLen++] = '\n';
+                break;
+            case 't':
+                new[realLen++] = '\t';
+                break;
+            case 'r':
+                new[realLen++] = '\r';
+                break;
+            case '{':
+                new[realLen++] = '{';
+                break;
+            case '}':
+                new[realLen++] = '}';
+                break;
+            default:
+                break;
+            }
+            continue;
+        }
+
+        new[realLen++] = c;
+    }
+    emitConst(OBJ_VAL(copyString(new, realLen)));
+    FREE(char, new);
+}
+
 static void templateString(bool canAssign)
 {
     // Template strings can have escape sequences. Need to scan token chars and build up new string with converted escape sequences.
@@ -1340,6 +1413,33 @@ static void templateString(bool canAssign)
     }
     emitConst(OBJ_VAL(copyString(new, realLen)));
     FREE(char, new);
+}
+
+static void interpolation(bool canAssign)
+{
+    int count = 0;
+    do
+    {
+        bool concat = false;
+        if (parser.prev.len > 2)
+        {
+            concat = true;
+            interpolateString(canAssign);
+            if (count > 0)
+                emitByte(OP_ADD);
+        }
+        expression();
+        if (concat || (count > 0 && !concat))
+            emitByte(OP_ADD);
+        count++;
+    } while (match(TOKEN_INTERPOLATION));
+
+    consume(TOKEN_RAW_STRING, "Expect string after interpolation");
+    if (parser.prev.len > 2)
+    {
+        interpolateString(canAssign);
+        emitByte(OP_ADD);
+    }
 }
 
 static void basicString(bool canAssign)
@@ -1550,6 +1650,7 @@ ParseRule rules[] = {
     [TOKEN_IDENTIFIER] = {variable, NULL, PREC_NONE},
     [TOKEN_RAW_STRING] = {rawString, NULL, PREC_NONE},
     [TOKEN_TEMPLATE_STRING] = {templateString, NULL, PREC_NONE},
+    [TOKEN_INTERPOLATION] = {interpolation, NULL, PREC_NONE},
     [TOKEN_BASIC_STRING] = {basicString, NULL, PREC_NONE},
     [TOKEN_NUMBER] = {number, NULL, PREC_NONE},
     [TOKEN_AND] = {NULL, and_, PREC_AND},

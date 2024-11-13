@@ -297,7 +297,7 @@ if (g == "QUIT"){
     print "YOU DIED";
 }
 
-print "\nYOU SCORED " + s.score + " POINTS!";
+print f"\nYOU SCORED {s.score } POINTS!";
 
 
 var lines = []
@@ -319,8 +319,10 @@ foreach(lines, fn(it){
 var oldScore = m.getOrDefault(s.name, 0)
 if (oldScore < s.score) {
     m.put(s.name, s.score);
-    print "CONGRAULATIONS ${}! YOU GOT NEW HIGH SCORE!".f(s.name);
-    print "OLD: ${} NEW: ${}".f(oldScore, s.score);
+    print f"CONGRAULATIONS {name}! YOU GOT NEW HIGH SCORE!";
+    print f"OLD: {oldScore} NEW: {s.score}";
+}else{
+    print f"YOU DIDN'T BEAT YOUR HIGH SCORE OF {oldScore}";
 }
 
 m.sortByValue(SortOrder.DESC);
@@ -330,7 +332,7 @@ var iterator = m.entrySet.iterator()
 
 while(iterator.hasNext() && iterator.i <= 1){
     var entry = iterator.next();
-    print entry.key + ": " + entry.value;
+    print f"{entry.key}: {entry.value}";
 }
 
 print line;
@@ -339,7 +341,7 @@ print line;
 
 with(File(highscoresFile, "w"), fn(hs){
     foreach(m.entrySet, fn(it){
-        hs.write("${},${}\n".f(it.key,it.value))
+        hs.write(f"{it.key},{it.value}\n")
     })
 })
 print "SCORE SAVED!";

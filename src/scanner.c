@@ -6,6 +6,7 @@ typedef struct _Scanner
 {
     const char *start;
     const char *current;
+    int interpolationDepth;
     int line;
     int col;
 } Scanner;
@@ -16,6 +17,7 @@ void initScanner(const char *source)
 {
     scanner.start = source;
     scanner.current = source;
+    scanner.interpolationDepth = 0;
     scanner.line = 1;
     scanner.col = 1;
 }
@@ -304,6 +306,69 @@ static Token rawString()
     return makeToken(TOKEN_RAW_STRING);
 }
 
+static Token interpolateString()
+{
+    while (peek() != '"' && peek() != '\n' && !isAtEnd())
+    {
+        if (peek() == '\n')
+        {
+            scanner.line++;
+            scanner.col = 1;
+        }
+        else if (peek() == '\\' && peekNext() == '{')
+            advance();
+        else if (peek() == '\\' && peekNext() == '}')
+            advance();
+
+        else if (peek() == '{')
+        {
+            if (scanner.interpolationDepth >= UINT4_MAX)
+                return errorToken("Interpolation depth exceeded");
+
+            if (peekNext() == '}') // empty interpolation
+            {
+                advance(); // eat the '{'
+                while (peek() != '"' && !isAtEnd())
+                {
+                    if (peek() == '\n')
+                    {
+                        scanner.line++;
+                        scanner.col = 1;
+                    }
+                    advance();
+                }
+                if (isAtEnd())
+                    return errorToken("Unterminated template string.");
+                return errorToken("Empty interpolation");
+            }
+            scanner.interpolationDepth++;
+            advance();
+            Token tok = makeToken(TOKEN_INTERPOLATION);
+            return tok;
+        }
+        else if (peek() == '\\' && peekNext() == '\"')
+            advance();
+        else if (peek() == '\\' && peekNext() == '\n')
+        {
+            advance();
+            scanner.line++;
+            scanner.col = 1;
+        }
+
+        else if (peek() == '\\' && peekNext() == '\\')
+            advance();
+        advance();
+    }
+
+    if (isAtEnd())
+        return errorToken("Unterminated template string.");
+    if (peek() == '"')
+        advance();
+    else
+        return errorToken("Unterminated template string.");
+    return makeToken(TOKEN_RAW_STRING);
+}
+
 static Token templateString()
 {
     while (peek() != '"' && peek() != '\n' && !isAtEnd())
@@ -313,6 +378,33 @@ static Token templateString()
             scanner.line++;
             scanner.col = 1;
         }
+        // else if (peek() == '%' && peekNext() == '{')
+        // {
+        //     if (scanner.interpolationDepth >= UINT4_MAX)
+        //         return errorToken("Interpolation depth exceeded");
+
+        //     advance();             // eat the '%'
+        //     if (peekNext() == '}') // empty interpolation
+        //     {
+        //         advance(); // eat the '{'
+        //         while (peek() != '"' && !isAtEnd())
+        //         {
+        //             if (peek() == '\n')
+        //             {
+        //                 scanner.line++;
+        //                 scanner.col = 1;
+        //             }
+        //             advance();
+        //         }
+        //         if (isAtEnd())
+        //             return errorToken("Unterminated template string.");
+        //         return errorToken("Empty interpolation");
+        //     }
+        //     scanner.interpolationDepth++;
+        //     Token tok = makeToken(TOKEN_INTERPOLATION);
+        //     advance();
+        //     return tok;
+        // }
         else if (peek() == '\\' && peekNext() == '\"')
             advance();
         else if (peek() == '\\' && peekNext() == '\n')
@@ -379,6 +471,14 @@ Token scanToken()
         return makeToken(TOKEN_EOF);
 
     char c = advance();
+
+    if (c == 'f' && peek() == '"')
+    {
+        advance();
+        // advance();
+        scanner.start = scanner.current - 1;
+        return interpolateString();
+    }
     if (isAlpha(c))
         return identifier();
     if (isDigit(c))
@@ -396,7 +496,16 @@ Token scanToken()
     case '{':
         return makeToken(TOKEN_LEFT_BRACE);
     case '}':
+    {
+        if (scanner.interpolationDepth > 0)
+        {
+            scanner.interpolationDepth--;
+            // advance();
+            // scanner.start = scanner.current;
+            return interpolateString();
+        }
         return makeToken(TOKEN_RIGHT_BRACE);
+    }
     case ';':
         return makeToken(TOKEN_SEMICOLON);
     case ':':

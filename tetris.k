@@ -6,7 +6,7 @@ var EFF_BOARD_SIZE = BOARD_SIZE + 2;
 var FILLED_ROW = [EFF_BOARD_SIZE]{1};
 
 fn colorize(text, color){
-    return "${}${}${}${}".f(Ansi.BOLD, color, text,Ansi.RESET);
+    return f"{Ansi.BOLD}{color}{text}{Ansi.RESET}";
 }
 
 var ICONS = {" . ", 

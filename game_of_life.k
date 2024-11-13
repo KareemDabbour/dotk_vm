@@ -25,7 +25,7 @@ class GameOfLife{
         # var string = "";
         print(line);
         for (var row = 0; row < this.rows; row += 1){
-            print("|${}|".f("".join(this.board[row])));
+            print(f"|{"".join(this.board[row])}|");
         }
         print(line);
     }

@@ -18,7 +18,7 @@ var username = ARG_V[ARG_V.indexOf("-u")+1]
 fn render_chat(data){ #List<HashMap>: [{"usr": "user", "msg": "message"}]
     for(var i = 0; i < len(data); i+=1){
         if(data[i].containsKey("CON")){
-            print "${}[${}]${} CONNECTED".f(Ansi.ALL_COLORS[hash( data[i]["CON"]) % len(Ansi.ALL_COLORS)], data[i]["CON"], Ansi.RESET)
+            print f"{Ansi.ALL_COLORS[hash( data[i]["CON"]) % len(Ansi.ALL_COLORS)]}[{data[i]["CON"]}]{Ansi.RESET} CONNECTED"
             continue
         }
         print "${}[${}]${} ${}".f(Ansi.ALL_COLORS[hash( data[i]["USR"]) % len(Ansi.ALL_COLORS)], data[i]["USR"], Ansi.RESET, data[i]["MSG"])
@@ -33,7 +33,7 @@ initial_connection.port = port
 initial_connection.host = host
 initial_connection.connect()
 print "Connected to the server!"
-initial_connection.send(`{"CON": "${}"}`.f(username))
+initial_connection.send('{"CON": "${}"}'.f(username))
 var response = initial_connection.receive()
 var chat = JSON.parse(response)
 render_chat(chat)
@@ -54,7 +54,7 @@ while(true){
         sock.connect()
         if(kbhit()){
             var data = input()
-            sock.send(`{"MSG": "${}", "USR": "${}"}`.f(data, username))
+            sock.send(f"\{\"MSG\": \"{data}\", \"USR\": \"{username}\"\}")
             # clear()
 
         }else{

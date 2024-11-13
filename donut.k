@@ -8,7 +8,7 @@ var R2 = 2
 var K2 = 5
 var A = 0
 var B = 0
-fn wrap(s, col){return col + s + Ansi.RESET}
+fn wrap(s, col){return f"{col}{s}{Ansi.RESET}"}
 
 var s = ".,-~:;=!*#$@"
 

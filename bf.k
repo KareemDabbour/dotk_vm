@@ -80,13 +80,13 @@ var STDOUT = 1
 if(interpret) {
   while(true){
     try{
-      bf = input(Ansi.CYAN + "bf> " + Ansi.RESET).trim()
+      bf = input(f"{Ansi.CYAN}bf> {Ansi.RESET}").trim()
       if((bf.contains("quit")) || (bf.contains("exit"))) 
         exit(0)
       run(bf)
     }
     catch(e){
-      print Ansi.RED+"OOPS... ran into an error! Try again. ${}".f(e) + Ansi.RESET
+      print f"{Ansi.RED}OOPS... ran into an error! Try again. {e.message}{Ansi.RESET}"
     }
   }
 }

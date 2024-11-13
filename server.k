@@ -1,12 +1,12 @@
 import "socket.k";
-import "file.k";
+# import "file.k";
 
 var sock = Socket.withDefaults();
 sock.bindToPort(8080);
 sock.startListening();
 
 fn handlePost(r){
-    print(with(File(r.getPathStr()[1:], F_RW|F_CR, null), fn(f) => f.write(r.body.toStr())))
+    print(with(File(r.getPathStr()[1:], "r+"), fn(f) => f.write(r.body.toStr())))
 }
 
 fn handleGet(r){
@@ -39,6 +39,7 @@ fn processRequest(req){
         }
         default  {
             print("UNKNOWN Request: " + request.toStr());
+            print(f"REQ: '{req}'")
         }
     }
     
@@ -56,8 +57,8 @@ fn handle(sockIn){
         }
 
     }catch(e){
-        print ("ERROR in HANDLE::\n${}".f(e));
-        sockIn.send("HTTP/1.1 404 NOT FOUND\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
+        print (f"ERROR in HANDLE::\n{e}");
+        sockIn.send("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/html\r\n\r\n<html><body><h1>404 NOT FOUND</h1></body></html>");
         
     }
 

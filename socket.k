@@ -1,7 +1,7 @@
 import "json.k";
 import "lang.k";
 
-class Socket <Closable>{
+class Socket{
     SOL_SOCKET = 1;
     SO_ACCEPTCONN = 30;
     SO_BROADCAST = 6;
