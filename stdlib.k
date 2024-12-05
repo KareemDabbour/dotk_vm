@@ -128,7 +128,7 @@ class Collection <Iterable> {
   }
 }
 
-class LinkedList <Iterable> {
+class LinkedList <Collection> {
 
   init() {
     this.head = null;
@@ -166,24 +166,6 @@ class LinkedList <Iterable> {
     # this._length = this._length + 1;
     this._length += 1;
     return this;
-  }
-
-  # Pop the last value off the list && return it. Do nothing if
-  # list if empty;
-  pop() {
-    if (this.tail == null) {
-      return;
-    }
-    var node = this.tail;
-    var previous = node.previous;
-    this.tail = previous;
-    if (previous != null) {
-      previous.next = null;
-    } else {
-      this.head = null;
-    }
-    this._length = this._length - 1;
-    return node.value;
   }
 
   map(f){
@@ -310,6 +292,129 @@ class LinkedList <Iterable> {
     }
     return ret;
   }
+}
+
+
+class SortedLinkedList <LinkedList>{
+  # init(){
+  #   this.head = null;
+  #   this.tail = null;
+  #   this._length = 0;
+  # }
+  # Append value to appropiate spot in list (sorted).
+  add(value) {
+    var node = ListNode(value);
+    if (this.head == null) {
+      this.head = node;
+      this.tail = node;
+    } else {
+      var current = this.head;
+      var previous = null;
+      while (current != null && current.value < value) {
+        previous = current;
+        current = current.next;
+      }
+      if (previous == null) {
+        node.next = this.head;
+        this.head.previous = node;
+        this.head = node;
+      } else if (current == null) {
+        previous.next = node;
+        node.previous = previous;
+        this.tail = node;
+      } else {
+        previous.next = node;
+        node.previous = previous;
+        node.next = current;
+        current.previous = node;
+      }
+    }
+    # this._length = this._length + 1;
+    this._length += 1;
+    return this;
+  }
+
+  # add to the beginning of the list
+  prepend(value){
+    var node = ListNode(value);
+    if (this.head == null) {
+      this.head = node;
+      this.tail = node;
+    } else {
+      node.next = this.head;
+      this.head.previous = node;
+      this.head = node;
+    }
+    # this._length = this._length + 1;
+    this._length += 1;
+    return this;
+  }
+
+  # Pop the last value off the list && return it. Do nothing if
+  # list if empty;
+  pop() {
+    if (this.tail == null) {
+      return;
+    }
+    var node = this.tail;
+    var previous = node.previous;
+    this.tail = previous;
+    if (previous != null) {
+      previous.next = null;
+    } else {
+      this.head = null;
+    }
+    this._length = this._length - 1;
+    return node.value;
+  }
+
+  popFirst(){
+    if (this.head == null) {
+      return;
+    }
+    var node = this.head;
+    var next = node.next;
+    this.head = next;
+    if (next != null) {
+      next.previous = null;
+    } else {
+      this.tail = null;
+    }
+    this._length = this._length - 1;
+    return node.value;
+  }
+
+  map(f){
+    var node = this.head;
+    while (node != null){
+        node.value = f(node.value);
+        node = node.next;
+    }
+  }
+
+  # Call f(value) for each value in the list, from first value
+  # appended to last. If f returns a truthy value, stop iterating.
+  foreach(f) {
+    var node = this.head;
+    while (node != null) {
+      if (f(node.value)) {
+        return;
+      }
+      node = node.next;
+    }
+  }
+
+  findFirst(f){
+    var node = this.head;
+    while (node != null){
+        if (f(node.value)){
+            return node.value;
+        }
+        node = node.next;
+    }
+    return null;
+  }
+
 }
 
 # ~ 
@@ -568,7 +673,7 @@ class MapEntry{
     this.value = value;
   }
   toStr(){
-    return "${}: ${}".f(this.key, this.value);
+    return f"{this.key}: {this.value}";
   }
   _lt_(other){
     return this.value < other.value
@@ -783,7 +888,7 @@ class Map {
   }
 }
 
-class Set <Iterable> {
+class Set <Collection> {
   INITIAL_CAPACITY = 16;
   GROW_FACTOR = 2;
   MAX_LOAD_FACTOR = 0.75;
@@ -956,7 +1061,7 @@ class Set <Iterable> {
   }
 }
 
-class ArrayList <Iterable> {
+class ArrayList <Collection> {
   INITIAL_CAPACITY = 32;
   init(){
     this.capacity = ArrayList.INITIAL_CAPACITY;
@@ -1230,131 +1335,6 @@ class ArrayList <Iterable> {
   clone(){
     return ArrayList.of(this)
   }
-}
-
-class SortedLinkedList{
-  init(){
-    this.head = null;
-    this.tail = null;
-    this._length = 0;
-  }
-  # Append value to appropiate spot in list (sorted).
-  add(value) {
-    var node = ListNode(value);
-    if (this.head == null) {
-      this.head = node;
-      this.tail = node;
-    } else {
-      var current = this.head;
-      var previous = null;
-      while (current != null && current.value < value) {
-        previous = current;
-        current = current.next;
-      }
-      if (previous == null) {
-        node.next = this.head;
-        this.head.previous = node;
-        this.head = node;
-      } else if (current == null) {
-        previous.next = node;
-        node.previous = previous;
-        this.tail = node;
-      } else {
-        previous.next = node;
-        node.previous = previous;
-        node.next = current;
-        current.previous = node;
-      }
-    }
-    # this._length = this._length + 1;
-    this._length += 1;
-    return this;
-  }
-
-  isEmpty(){
-    return this._length == 0;
-  }
-  # add to the beginning of the list
-  prepend(value){
-    var node = ListNode(value);
-    if (this.head == null) {
-      this.head = node;
-      this.tail = node;
-    } else {
-      node.next = this.head;
-      this.head.previous = node;
-      this.head = node;
-    }
-    # this._length = this._length + 1;
-    this._length += 1;
-    return this;
-  }
-
-  # Pop the last value off the list && return it. Do nothing if
-  # list if empty;
-  pop() {
-    if (this.tail == null) {
-      return;
-    }
-    var node = this.tail;
-    var previous = node.previous;
-    this.tail = previous;
-    if (previous != null) {
-      previous.next = null;
-    } else {
-      this.head = null;
-    }
-    this._length = this._length - 1;
-    return node.value;
-  }
-
-  popFirst(){
-    if (this.head == null) {
-      return;
-    }
-    var node = this.head;
-    var next = node.next;
-    this.head = next;
-    if (next != null) {
-      next.previous = null;
-    } else {
-      this.tail = null;
-    }
-    this._length = this._length - 1;
-    return node.value;
-  }
-
-  map(f){
-    var node = this.head;
-    while (node != null){
-        node.value = f(node.value);
-        node = node.next;
-    }
-  }
-
-  # Call f(value) for each value in the list, from first value
-  # appended to last. If f returns a truthy value, stop iterating.
-  foreach(f) {
-    var node = this.head;
-    while (node != null) {
-      if (f(node.value)) {
-        return;
-      }
-      node = node.next;
-    }
-  }
-
-  findFirst(f){
-    var node = this.head;
-    while (node != null){
-        if (f(node.value)){
-            return node.value;
-        }
-        node = node.next;
-    }
-    return null;
-  }
-
 }
 
 class Strings{

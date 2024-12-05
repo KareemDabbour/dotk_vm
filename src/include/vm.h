@@ -57,7 +57,7 @@ typedef struct _VM
     ObjClass *listClass;
     ObjClass *mapClass;
     ObjClass *errorClass;
-    ObjClass *eventClass;
+    ObjClass *baseObj;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
 
@@ -90,6 +90,13 @@ extern VM vm;
 void push(Value value);
 Value pop();
 void rotateStack();
+Value peek(int distance);
+void runtimeError(const char *format, ...);
+ObjClass *getVmClass(Value val);
+// static void defineNative(const char *name, NativeFn function);
+
+typedef void (*DefineNativeFn)(const char *name, NativeFn function);
+typedef ObjClass *(*DefineNativeClassFn)(char *name);
 
 // This is so I can use the equal override in classes for the builtin Map class
 void markMap(Map *map);

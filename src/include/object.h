@@ -21,7 +21,7 @@
 #define IS_SLICE(value) isObjType(value, OBJ_SLICE)
 #define IS_FOREIGN(value) isObjType(value, OBJ_FOREIGN)
 #define IS_FOREIGN_TYPE(value, f_type) (IS_FOREIGN(value) && (AS_FOREIGN(value))->type == f_type)
-#define IS_BUILTIN(value) isAnyObjType(value, OBJ_MAP | OBJ_LIST | OBJ_STRING)
+#define IS_BUILTIN(value) isObjType(value, OBJ_MAP) || isObjType(value, OBJ_LIST) || isObjType(value, OBJ_STRING)
 
 #define AS_CLASS(value) ((ObjClass *)AS_OBJ(value))
 #define AS_INSTANCE(value) ((ObjInstance *)AS_OBJ(value))
@@ -74,12 +74,14 @@ typedef enum
 {
     TYPE_FILE,
     TYPE_VM,
+    TYPE_REGEX,
     TYPE_UNKNOWN,
 } ForeignType;
 
-static const char *FOREIGN_TYPES[3] = {
+static const char *FOREIGN_TYPES[4] = {
     "FILE",
     "VM",
+    "REGEX",
     "UNKNOWN"};
 
 struct Obj

@@ -285,7 +285,7 @@ static void markRoots()
     }
 
     markTable(&vm.globals);
-    // markTable(&vm.strings);
+    markTable(&vm.strings);
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
     markCompilerRoots();
@@ -303,6 +303,7 @@ static void markRoots()
     markObj((Obj *)vm.mapClass);
     markObj((Obj *)vm.lastError);
     markObj((Obj *)vm.errorClass);
+    markObj((Obj *)vm.baseObj);
 }
 
 void traceReferences()

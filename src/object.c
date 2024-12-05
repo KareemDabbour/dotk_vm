@@ -133,7 +133,16 @@ ObjClass *newClass(ObjString *name)
 
     initTable(&clazz->methods);
     initTable(&clazz->staticVars);
-    tableSet(&clazz->staticVars, vm.clazzStr, (Value){.type = VAL_OBJ, .as.obj = &clazz->name->obj});
+    if (vm.baseObj != NULL)
+    {
+        tableAddAll(&vm.baseObj->methods, &clazz->methods);
+        clazz->toStr = vm.baseObj->toStr;
+        clazz->superclass = vm.baseObj;
+    }
+    push(OBJ_VAL(copyString("superClass", 10)));
+    tableSet(&clazz->staticVars, AS_STR(pop()), vm.baseObj != NULL ? OBJ_VAL(vm.baseObj) : NIL_VAL);
+
+    tableSet(&clazz->staticVars, vm.clazzStr, OBJ_VAL(clazz));
     return clazz;
 }
 
@@ -248,6 +257,11 @@ static void printFunction(ObjFunction *function)
     if (function->name == NULL)
     {
         printf("<script>");
+        return;
+    }
+    if (function->arity)
+    {
+        printf("<%s (%d)>", function->name->chars, function->arity);
         return;
     }
     printf("<%s>", function->name->chars);
