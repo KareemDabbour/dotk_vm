@@ -5213,6 +5213,166 @@ NATIVE_FN(deleteVarNative)
     return BOOL_VAL(true);
 }
 
+static int compareValuesAsc(const void *a, const void *b)
+{
+    Value va = *(Value *)a;
+    Value vb = *(Value *)b;
+    if (IS_NIL(va) && IS_NIL(vb))
+        return 0;
+    if (IS_NIL(va))
+        return 1;
+    if (IS_NIL(vb))
+        return -1;
+    if (IS_NUM(va) && IS_NUM(vb))
+    {
+        double na = AS_NUM(va);
+        double nb = AS_NUM(vb);
+        if (na == nb)
+            return 0;
+        return na > nb ? 1 : -1;
+    }
+    if (IS_BOOL(va) && IS_BOOL(vb))
+    {
+        bool ba = AS_BOOL(va);
+        bool bb = AS_BOOL(vb);
+        if (ba == bb)
+            return 0;
+        return ba > bb ? 1 : -1;
+    }
+    if (IS_STR(va) && IS_STR(vb))
+    {
+        ObjString *sa = AS_STR(va);
+        ObjString *sb = AS_STR(vb);
+        return strcmp(sa->chars, sb->chars);
+    }
+    return 0;
+}
+
+static int compareValuesDes(const void *a, const void *b)
+{
+    Value va = *(Value *)a;
+    Value vb = *(Value *)b;
+    if (IS_NIL(va) && IS_NIL(vb))
+        return 0;
+    if (IS_NIL(va))
+        return -1;
+    if (IS_NIL(vb))
+        return 1;
+    if (IS_NUM(va) && IS_NUM(vb))
+    {
+        double na = AS_NUM(va);
+        double nb = AS_NUM(vb);
+        if (na == nb)
+            return 0;
+        return na < nb ? 1 : -1;
+    }
+    if (IS_BOOL(va) && IS_BOOL(vb))
+    {
+        bool ba = AS_BOOL(va);
+        bool bb = AS_BOOL(vb);
+        if (ba == bb)
+            return 0;
+        return ba < bb ? 1 : -1;
+    }
+    if (IS_STR(va) && IS_STR(vb))
+    {
+        ObjString *sa = AS_STR(va);
+        ObjString *sb = AS_STR(vb);
+        return strcmp(sb->chars, sa->chars);
+    }
+    return 0;
+}
+
+static int customCompareValues(const void *a, const void *b)
+{
+    if (!IS_CLOSURE(peek(0)))
+    {
+        runtimeError("Expected a closure but got '%s' for List::sort(cmpFn)", VALUE_TYPES[peek(0).type]);
+        return 0;
+    }
+    ObjClosure *cmpFn = AS_CLOSURE(peek(0));
+    Value va = *(Value *)a;
+    Value vb = *(Value *)b;
+    // printf("customCompareValues\n");
+    push(va);
+    push(vb);
+    if (!call(cmpFn, 2))
+    {
+        runtimeError("Error calling custom compare function");
+        return 0;
+    }
+    if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+    {
+        runtimeError("Error calling custom compare function");
+        return 0;
+    }
+    Value result = pop();
+    if (!IS_NUM(result))
+    {
+        runtimeError("Expected a number but got '%s' for List::sort(cmpFn)", VALUE_TYPES[result.type]);
+        return 0;
+    }
+    push(OBJ_VAL(cmpFn));
+    return AS_NUM(result);
+}
+
+NATIVE_FN(sortListNative)
+{
+    // How would I be able to provide a custom compare function
+    if (argc != 0 && argc != 1)
+    {
+        runtimeError("'list::sort(<optional> cmpFn | <optional> descending)', expects 0 or 1 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list but got '%s' for list::sort()", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjClosure *cmpFn = NULL;
+    bool desc = false;
+    if (argc == 1 && IS_CLOSURE(argv[0]))
+    {
+        cmpFn = AS_CLOSURE(argv[0]);
+        if (cmpFn->function->arity != 2)
+        {
+            runtimeError("Expected a closure with 2 arguments but got %d", cmpFn->function->arity);
+            *hasError = true;
+            return NIL_VAL;
+        }
+    }
+    else if (argc == 1 && IS_BOOL(argv[0]))
+    {
+        desc = AS_BOOL(argv[0]);
+    }
+    else if (argc == 1)
+    {
+        runtimeError("Expected a closure or boolean but got '%s' for List::sort(cmpFn|descending)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjList *list = AS_LIST(peek(argc));
+    if (list->count == 0)
+        return peek(argc);
+    Value *items = list->items;
+
+    if (cmpFn == NULL)
+    {
+        qsort(items, list->count, sizeof(Value), desc ? compareValuesDes : compareValuesAsc);
+    }
+    else
+    {
+        push(OBJ_VAL(cmpFn));
+        qsort(items, list->count, sizeof(Value), customCompareValues);
+        pop();
+    }
+
+    return peek(argc);
+}
+
 ////////////////////////////////////////////////////////////////////////////
 
 void initVM(bool printBytecode, bool printExecStack)
@@ -5332,6 +5492,7 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&listClass->methods, copyString("extend", 6), OBJ_VAL(newNative(extendListNative)));
     tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
     tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
+    tableSet(&listClass->methods, copyString("sort", 4), OBJ_VAL(newNative(sortListNative)));
 
     // tableSet(&listClass->methods, copyString("remove", 6), OBJ_VAL(newNative(removeListNative)));
     // tableSet(&listClass->methods, copyString("clear", 5), OBJ_VAL(newNative(clearListNative)));
