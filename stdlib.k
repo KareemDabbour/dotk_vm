@@ -912,11 +912,10 @@ class Set <Collection> {
     if(this._size >= this.capacity * Set.MAX_LOAD_FACTOR)
       this.resize();
     
-
     var hashRes = hash(value) % this.capacity;
     var entryList = this.entries[hashRes];
     if(entryList == null){
-      var entry = LinkedList();
+      var entry = [];
       entry.append(value);
       this.entries[hashRes] = entry;
     }else if (entryList.contains(value))

@@ -4291,12 +4291,11 @@ static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     ObjMap *map = newMap();
-    map->capacity = 64;
     map->map.capacity = 64;
     map->map.count = 0;
     map->count = 0;
     map->map.entries = ALLOCATE(MapEntry, map->capacity);
-    for (int i = 0; i < map->capacity; i++)
+    for (int i = 0; i < map->map.capacity; i++)
     {
         map->map.entries[i].key = NIL_VAL;
         map->map.entries[i].value = NIL_VAL;
@@ -4323,7 +4322,7 @@ static Value mapClearNative(int argc, Value *argv, bool *hasError, bool *pushedV
     ObjMap *map = AS_MAP(peek(argc));
     map->count = 0;
     map->map.count = 0;
-    for (int i = 0; i < map->capacity; i++)
+    for (int i = 0; i < map->map.capacity; i++)
     {
         map->map.entries[i].key = NIL_VAL;
         map->map.entries[i].value = NIL_VAL;
@@ -4343,7 +4342,7 @@ static Value mapKeysNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     ObjMap *map = AS_MAP(peek(argc));
     ObjList *list = newList();
     push(OBJ_VAL(list));
-    for (int i = 0; i < map->capacity; i++)
+    for (int i = 0; i < map->map.capacity; i++)
     {
         if (map->map.entries[i].isUsed)
             appendToList(list, map->map.entries[i].key);
@@ -4363,7 +4362,7 @@ static Value mapValuesNative(int argc, Value *argv, bool *hasError, bool *pushed
     ObjMap *map = AS_MAP(peek(argc));
     ObjList *list = newList();
     push(OBJ_VAL(list));
-    for (int i = 0; i < map->capacity; i++)
+    for (int i = 0; i < map->map.capacity; i++)
     {
         if (map->map.entries[i].isUsed)
             appendToList(list, map->map.entries[i].value);
@@ -4383,14 +4382,17 @@ static Value mapEntriesNative(int argc, Value *argv, bool *hasError, bool *pushe
     ObjMap *map = AS_MAP(peek(argc));
     ObjList *list = newList();
     push(OBJ_VAL(list));
-    for (int i = 0; i < map->capacity; i++)
+    for (int i = 0; i < map->map.capacity; i++)
     {
         if (map->map.entries[i].isUsed)
         {
-            ObjList *entry = newList();
+            ObjInstance *entry = newInstance(vm.baseObj);
             push(OBJ_VAL(entry));
-            appendToList(entry, map->map.entries[i].key);
-            appendToList(entry, map->map.entries[i].value);
+            tableSet(&entry->fields, copyString("key", 3), map->map.entries[i].key);
+            tableSet(&entry->fields, copyString("value", 5), map->map.entries[i].value);
+            // ObjList *entry = newList();
+            // appendToList(entry, map->map.entries[i].key);
+            // appendToList(entry, map->map.entries[i].value);
             appendToList(list, OBJ_VAL(entry));
             pop();
         }
@@ -4459,7 +4461,7 @@ static Value mapSetNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     ObjMap *map = AS_MAP(peek(argc));
     mapSet(&map->map, argv[0], argv[1]);
-
+    map->capacity = map->map.capacity;
     return argv[1];
 }
 
@@ -4604,6 +4606,7 @@ static Value mapComputeIfAbsentNative(int argc, Value *argv, bool *hasError, boo
             return NIL_VAL;
         val = pop();
         mapSet(&map->map, argv[0], val);
+        map->capacity = map->map.capacity;
     }
 
     return OBJ_VAL(map);
@@ -4652,6 +4655,7 @@ static Value mapComputeIfPresentNative(int argc, Value *argv, bool *hasError, bo
         }
         val = pop();
         mapSet(&map->map, argv[0], val);
+        map->capacity = map->map.capacity;
     }
 
     return OBJ_VAL(map);

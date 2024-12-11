@@ -30,6 +30,9 @@
 			"include": "#strings"
 		},
 		{
+			"include": "#template-strings"
+		},
+		{
 			"include": "#rawStrings"
 		}
 	],
@@ -195,6 +198,35 @@
 				{
 					"match": "\\+|-|/|//|\\*|%",
 					"name": "keyword.operator.dotk"
+				}
+			]
+		},
+		"template-strings": {
+			"name": "string.quoted.double",
+			"begin": "(f)(\")",
+			"beginCaptures": {
+				"1": {
+					"name": "keyword.other.dotk"
+				},
+				"0": {
+					"name": "string.quoted.double"
+				}
+			},
+			"end": "\"",
+			"endCaptures": {
+				"0": {
+					"name": "string.quoted.double"
+				}
+			},
+			"patterns": [
+				{
+					"begin": "{",
+					"end": "}",
+					"patterns": [
+						{
+							"include": "$self"
+						}
+					]
 				}
 			]
 		}
