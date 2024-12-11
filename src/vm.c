@@ -2775,63 +2775,63 @@ static void *runCallableInNewThread(void *arg)
     return NULL; // pop();
 }
 
-static Value newThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-{
-    if (argc != 1)
-    {
-        runtimeError("'newThread()' expects one argument but %d were passed in", argc);
-        *hasError = true;
-        return NIL_VAL;
-    }
-    if (!IS_CLOSURE(argv[0]))
-    {
-        runtimeError("'newThread()' expects a closure as argument but got '%s'", VALUE_TYPES[argv[0].type]);
-        *hasError = true;
-        return NIL_VAL;
-    }
-    pthread_t thread;
-    ObjClosure *closure = AS_CLOSURE(argv[0]);
-    if (pthread_create(&thread, NULL, runCallableInNewThread, closure) == 0)
-    {
-        releaseGVL();
-        acquireGVL();
-        return NUM_VAL((unsigned long)thread);
-    }
-    else
-    {
-        runtimeError("Failed to create thread");
-        *hasError = true;
-        return NIL_VAL;
-    }
-}
+// static Value newThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     if (argc != 1)
+//     {
+//         runtimeError("'newThread()' expects one argument but %d were passed in", argc);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_CLOSURE(argv[0]))
+//     {
+//         runtimeError("'newThread()' expects a closure as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     pthread_t thread;
+//     ObjClosure *closure = AS_CLOSURE(argv[0]);
+//     if (pthread_create(&thread, NULL, runCallableInNewThread, closure) == 0)
+//     {
+//         releaseGVL();
+//         acquireGVL();
+//         return NUM_VAL((unsigned long)thread);
+//     }
+//     else
+//     {
+//         runtimeError("Failed to create thread");
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+// }
 
-static Value joinThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-{
-    if (argc != 1)
-    {
-        runtimeError("'joinThread()' expects one argument but %d were passed in", argc);
-        *hasError = true;
-        return NIL_VAL;
-    }
-    if (!IS_NUM(argv[0]))
-    {
-        runtimeError("'joinThread()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
-        *hasError = true;
-        return NIL_VAL;
-    }
-    pthread_t thread = (pthread_t)AS_NUM(argv[0]);
-    releaseGVL();
-    int ret;
-    if ((ret = pthread_join(thread, NULL)) != 0)
-    {
-        acquireGVL();
-        runtimeError("Failed to join thread");
-        *hasError = true;
-        return NIL_VAL;
-    }
-    acquireGVL();
-    return BOOL_VAL(ret == 0);
-}
+// static Value joinThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+// {
+//     if (argc != 1)
+//     {
+//         runtimeError("'joinThread()' expects one argument but %d were passed in", argc);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     if (!IS_NUM(argv[0]))
+//     {
+//         runtimeError("'joinThread()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     pthread_t thread = (pthread_t)AS_NUM(argv[0]);
+//     releaseGVL();
+//     int ret;
+//     if ((ret = pthread_join(thread, NULL)) != 0)
+//     {
+//         acquireGVL();
+//         runtimeError("Failed to join thread");
+//         *hasError = true;
+//         return NIL_VAL;
+//     }
+//     acquireGVL();
+//     return BOOL_VAL(ret == 0);
+// }
 
 static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -4292,6 +4292,7 @@ static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     ObjMap *map = newMap();
     map->map.capacity = 64;
+    map->capacity = 64;
     map->map.count = 0;
     map->count = 0;
     map->map.entries = ALLOCATE(MapEntry, map->capacity);
@@ -5630,8 +5631,8 @@ void initVM(bool printBytecode, bool printExecStack)
     defineNative("__del__", deleteVarNative);
 
     // Threads // SOON TO BE A BUILT-IN CLASS
-    defineNative("newThread", newThreadNative);
-    defineNative("joinThread", joinThreadNative);
+    // defineNative("newThread", newThreadNative);
+    // defineNative("joinThread", joinThreadNative);
 
     // defineNative("loadLib", loadLibNative);
 }
