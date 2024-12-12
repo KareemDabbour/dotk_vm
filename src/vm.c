@@ -5380,6 +5380,70 @@ NATIVE_FN(sortListNative)
 
 ////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////
+
+NATIVE_FN(forkNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'fork()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    pid_t pid = fork();
+    if (pid == -1)
+    {
+        runtimeError("Failed to fork");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return NUM_VAL(pid);
+}
+
+NATIVE_FN(waitNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'wait()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    int status;
+    pid_t pid = wait(&status);
+    if (pid == -1)
+    {
+        runtimeError("Failed to wait");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return NUM_VAL(status);
+}
+
+NATIVE_FN(pipeNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'pipe()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    int fd[2];
+    if (pipe(fd) == -1)
+    {
+        runtimeError("Failed to create pipe");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *entry = newInstance(vm.baseObj);
+    push(OBJ_VAL(entry));
+    tableSet(&entry->fields, copyString("send", 4), NUM_VAL(fd[1]));
+    tableSet(&entry->fields, copyString("read", 4), NUM_VAL(fd[0]));
+
+    return pop();
+}
+
+////////////////////////////////////////////////////////////////////////////
+
 void initVM(bool printBytecode, bool printExecStack)
 {
     if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
@@ -5584,6 +5648,10 @@ void initVM(bool printBytecode, bool printExecStack)
     defineNative("len", lenNative);
     defineNative("instanceof", instanceOf);
     defineNative("ord", ordNative);
+
+    defineNative("fork", forkNative);
+    defineNative("wait", waitNative);
+    defineNative("pipe", pipeNative);
 
     // Strings
     defineNative("split", splitNative);

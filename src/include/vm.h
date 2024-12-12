@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #define BUFFER_SIZE 104855
 #define STR_BUFF BUFFER_SIZE
