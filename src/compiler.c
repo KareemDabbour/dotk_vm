@@ -294,9 +294,9 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     if (type == TYPE_ANONYMOUS)
         current->function->name = copyString("<anon_fn>", 10);
     else if (type == TYPE_TRY)
-        current->function->name = copyString("<try_block>", 12);
+        current->function->name = copyString("<try>", 5);
     else if (type == TYPE_CATCH)
-        current->function->name = copyString("<catch_block>", 14);
+        current->function->name = copyString("<catch>", 7);
     else if (type != TYPE_SCRIPT)
         current->function->name = copyString(parser.prev.start, parser.prev.len);
     else
@@ -773,7 +773,6 @@ static void funDeclaration()
 {
     if (check(TOKEN_LEFT_PAREN))
     {
-        markInitialized();
         function(TYPE_ANONYMOUS);
         return;
     }
@@ -945,26 +944,26 @@ static void forStatement()
         patchJump(bodyJump);
     }
 
-    int innerVar = -1;
-    if (loopVar != -1)
-    {
-        beginScope();
-        emitBytes(OP_GET_LOCAL, (uint8_t)loopVar);
-        addLocal(loopVarName);
-        markInitialized();
+    // int innerVar = -1;
+    // if (loopVar != -1)
+    // {
+    //     beginScope();
+    //     emitBytes(OP_GET_LOCAL, (uint8_t)loopVar);
+    //     addLocal(loopVarName);
+    //     markInitialized();
 
-        innerVar = current->localCount - 1;
-    }
+    //     innerVar = current->localCount - 1;
+    // }
 
     statement();
 
-    if (loopVar != -1)
-    {
-        emitBytes(OP_GET_LOCAL, (uint8_t)innerVar);
-        emitBytes(OP_SET_LOCAL, (uint8_t)loopVar);
-        emitByte(OP_POP);
-        endScope();
-    }
+    // if (loopVar != -1)
+    // {
+    //     emitBytes(OP_GET_LOCAL, (uint8_t)innerVar);
+    //     emitBytes(OP_SET_LOCAL, (uint8_t)loopVar);
+    //     emitByte(OP_POP);
+    //     endScope();
+    // }
 
     emitLoop(innermostLoopStart);
 
@@ -1404,6 +1403,8 @@ static void templateString(bool canAssign)
                 new[realLen++] = '\r';
                 break;
             default:
+                new[realLen++] = c;
+                new[realLen++] = next;
                 break;
             }
             continue;
@@ -1598,7 +1599,6 @@ static void sliceNoEnd(bool canAssign)
 
 static void anonFunction(bool canAssign)
 {
-    markInitialized();
     function(TYPE_ANONYMOUS);
 }
 

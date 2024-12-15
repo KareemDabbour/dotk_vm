@@ -1178,7 +1178,7 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
     switch (val.type)
     {
     case VAL_NUMBER:
-        type = val.as.number == roundf(val.as.number) ? "int" : "float";
+        type = val.as.number == round(val.as.number) ? "int" : "float";
         break;
     case VAL_BOOL:
         type = "bool";
@@ -1339,7 +1339,7 @@ static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         *hasError = true;
         return NIL_VAL;
     }
-    if (roundf(AS_NUM(argv[0])) == AS_NUM(argv[0]))
+    if (round(AS_NUM(argv[0])) == AS_NUM(argv[0]))
         sleep(AS_NUM(argv[0]));
     else
         usleep(AS_NUM(argv[0]) * 1000000);
@@ -1611,7 +1611,7 @@ static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         return NUM_VAL((double)num);
     }
     if (argv[0].type == VAL_NUMBER)
-        return NUM_VAL(roundf(AS_NUM(argv[0])));
+        return NUM_VAL(round(AS_NUM(argv[0])));
     if (argv[0].type == VAL_BOOL)
         return NUM_VAL(AS_BOOL(argv[0]) ? 1 : 0);
     if (argv[0].type == VAL_NIL)
@@ -3269,7 +3269,7 @@ NATIVE_FN(regexMatchStrNative)
 {
     if (argc != 1)
     {
-        runtimeError("'match()' expects 1 arguments %d were passed in", argc);
+        runtimeError("'str.match(pattern)' expects 1 argument. %d were passed in", argc);
         *hasError = true;
         return NIL_VAL;
     }
@@ -3297,18 +3297,110 @@ NATIVE_FN(regexMatchStrNative)
     }
     ObjList *list = newList();
     push(OBJ_VAL(list));
-    regmatch_t match;
+    int numGroup = regex.re_nsub + 1;
+    regmatch_t match[numGroup];
     int status;
-    while ((status = regexec(&regex, str, 1, &match, 0)) == 0)
+    while ((status = regexec(&regex, str, numGroup, match, 0)) == 0)
     {
-        int start = match.rm_so;
-        int end = match.rm_eo;
-        appendToList(list, OBJ_VAL(copyString(str + start, end - start)));
+        int start;
+        int end;
+        if (numGroup == 1)
+        {
+            start = match[numGroup - 1].rm_so;
+            end = match[numGroup - 1].rm_eo;
+            appendToList(list, OBJ_VAL(copyString(str + start, end - start)));
+        }
+        else
+        {
+            ObjList *inner = newList();
+            push(OBJ_VAL(inner));
+            for (int i = 0; i < numGroup; i++)
+            {
+                if (match[i].rm_so == -1)
+                    break;
+                start = match[i].rm_so;
+                end = match[i].rm_eo;
+                appendToList(inner, OBJ_VAL(copyString(str + start, end - start)));
+            }
+            appendToList(list, pop());
+        }
+
         str += end;
         if (*str == '\0')
             break;
     }
     // pop();
+    regfree(&regex);
+    return pop();
+}
+
+NATIVE_FN(regexFindAllNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'str.findall(pattern) expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(peek(argc)))
+    {
+        runtimeError("Expected a string but got '%s' for str.findall(pattern)", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("Expected a string but got '%s' for str.findall(pattern)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    char *str = AS_CSTR(peek(argc));
+    char *pattern = AS_CSTR(argv[0]);
+    regex_t regex;
+    int er;
+    if ((er = regcomp(&regex, pattern, REG_EXTENDED)) != 0)
+    {
+        runtimeError("Invalid regex pattern");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjList *list = newList();
+    push(OBJ_VAL(list));
+    int numGroup = regex.re_nsub + 1;
+    regmatch_t match[numGroup];
+    int status;
+    while ((status = regexec(&regex, str, numGroup, match, 0)) == 0)
+    {
+        int start;
+        int end;
+
+        if (numGroup == 1 || numGroup == 2)
+        {
+            start = match[numGroup - 1].rm_so;
+            end = match[numGroup - 1].rm_eo;
+            appendToList(list, OBJ_VAL(copyString(str + start, end - start)));
+        }
+        else
+        {
+            ObjList *inner = newList();
+            push(OBJ_VAL(inner));
+
+            for (int i = 1; i < numGroup; i++)
+            {
+                if (match[i].rm_so == -1)
+                    break;
+                start = match[i].rm_so;
+                end = match[i].rm_eo;
+                appendToList(inner, OBJ_VAL(copyString(str + start, end - start)));
+            }
+            appendToList(list, pop());
+        }
+        str += end;
+        if (*str == '\0')
+            break;
+    }
+
     regfree(&regex);
     return pop();
 }
@@ -5534,6 +5626,7 @@ void initVM(bool printBytecode, bool printExecStack)
     stringClass->hashFn = OBJ_VAL(newNative(strHashNative));
     tableSet(&stringClass->methods, copyString("split", 5), OBJ_VAL(newNative(split2Native)));
     tableSet(&stringClass->methods, copyString("match", 5), OBJ_VAL(newNative(regexMatchStrNative)));
+    tableSet(&stringClass->methods, copyString("findall", 7), OBJ_VAL(newNative(regexFindAllNative)));
     tableSet(&stringClass->methods, copyString("replace", 7), OBJ_VAL(newNative(replace2Native)));
     tableSet(&stringClass->methods, copyString("splitOnWs", 9), OBJ_VAL(newNative(splitByWhitespace2Native)));
     tableSet(&stringClass->methods, copyString("trim", 4), OBJ_VAL(newNative(trim2Native)));
