@@ -509,12 +509,20 @@ Token scanToken()
     case ';':
         return makeToken(TOKEN_SEMICOLON);
     case ':':
-        return makeToken(
-            match('@') ? TOKEN_COLON_AT : TOKEN_COLON);
+    {
+        if (match('@'))
+            return makeToken(TOKEN_COLON_AT);
+        else if (match(':'))
+            return makeToken(TOKEN_DOUBLE_COLON);
+        else
+            return makeToken(TOKEN_COLON);
+    }
+    case '^':
+        return makeToken(TOKEN_CARET);
     case ',':
         return makeToken(TOKEN_COMMA);
     case '.':
-        return makeToken(TOKEN_DOT);
+        return makeToken(match('{') ? TOKEN_DOT_BRACKET : TOKEN_DOT);
     case '%':
         return makeToken(TOKEN_PERCENT);
     case '@':
@@ -566,11 +574,23 @@ Token scanToken()
             return makeToken(TOKEN_EQUAL);
     }
     case '<':
-        return makeToken(
-            match('=') ? TOKEN_LESS_EQUAL : TOKEN_LESS);
+    {
+        if (match('<'))
+            return makeToken(TOKEN_LESS_LESS);
+        else if (match('='))
+            return makeToken(TOKEN_LESS_EQUAL);
+
+        return makeToken(TOKEN_LESS);
+    }
     case '>':
-        return makeToken(
-            match('=') ? TOKEN_GREATER_EQUAL : TOKEN_GREATER);
+    {
+        if (match('>'))
+            return makeToken(TOKEN_GREATER_GREATER);
+        else if (match('='))
+            return makeToken(TOKEN_GREATER_EQUAL);
+
+        return makeToken(TOKEN_GREATER);
+    }
     case '`':
         return rawString();
     case '"':

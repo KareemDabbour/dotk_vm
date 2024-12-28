@@ -421,6 +421,15 @@ static void binary(bool canAssign)
     case TOKEN_PIPE:
         emitByte(OP_BIN_OR);
         break;
+    case TOKEN_CARET:
+        emitByte(OP_BIN_XOR);
+        break;
+    case TOKEN_LESS_LESS:
+        emitByte(OP_BIN_SHIFT_LEFT);
+        break;
+    case TOKEN_GREATER_GREATER:
+        emitByte(OP_BIN_SHIFT_RIGHT);
+        break;
     case TOKEN_PLUS:
         emitByte(OP_ADD);
         break;
@@ -1613,8 +1622,32 @@ static void trinary(bool canAssign)
     ternaryThen = oldTer;
 }
 
+static void map(bool canAssign)
+{
+
+    uint16_t itemCount = 0;
+    if (!check(TOKEN_RIGHT_BRACE))
+    {
+        do
+        {
+            if (check(TOKEN_RIGHT_BRACE))
+                break;
+            expression();
+            consume(TOKEN_DOUBLE_COLON, "Expect '::' after key in map literal");
+            expression();
+
+            if (itemCount == UINT16_COUNT)
+                error("Cannot have more than 256 items in a list literal");
+            itemCount++;
+        } while (match(TOKEN_COMMA));
+    }
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after map literal");
+    emitBytes(OP_BUILD_MAP, itemCount);
+}
+
 ParseRule rules[] = {
     [TOKEN_LEFT_BRACKET] = {defaultSizeList, subscript, PREC_SUBSCRIPT},
+    [TOKEN_DOT_BRACKET] = {map, NULL, PREC_NONE},
     [TOKEN_COLON] = {sliceNoStart, sliceOrTernary, PREC_OR},
     [TOKEN_COLON_AT] = {sliceJustStep, sliceNoEnd, PREC_OR},
     [TOKEN_RIGHT_BRACKET] = {NULL, NULL, PREC_NONE},
@@ -1627,6 +1660,9 @@ ParseRule rules[] = {
     [TOKEN_MINUS] = {unary, binary, PREC_TERM},
     [TOKEN_AMP] = {NULL, binary, PREC_TERM},
     [TOKEN_PIPE] = {NULL, binary, PREC_TERM},
+    [TOKEN_CARET] = {NULL, binary, PREC_TERM},
+    [TOKEN_LESS_LESS] = {NULL, binary, PREC_TERM},
+    [TOKEN_GREATER_GREATER] = {NULL, binary, PREC_TERM},
     [TOKEN_MINUS_EQUAL] = {NULL, binary, PREC_TERM},
     [TOKEN_PLUS] = {NULL, binary, PREC_TERM},
     [TOKEN_PLUS_EQUAL] = {NULL, binary, PREC_TERM},

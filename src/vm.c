@@ -367,11 +367,37 @@ static char *mapToString(Map *map, char *buff, int *len)
         MapEntry *entry = &map->entries[i];
         if (!entry->isUsed)
             continue;
-        char *key = valueToString(entry->key, buff + index, len);
-        index += *len;
+
+        char *key;
+        if (IS_MAP(entry->key) && &(AS_MAP(entry->key)->map) == map)
+        {
+
+            buff[index++] = '{';
+            buff[index++] = '.';
+            buff[index++] = '.';
+            buff[index++] = '.';
+            buff[index++] = '}';
+        }
+        else
+        {
+            key = valueToString(entry->key, buff + index, len);
+            index += *len;
+        }
         buff[index++] = ':';
-        char *value = valueToString(entry->value, buff + index, len);
-        index += *len;
+        char *value;
+        if (IS_MAP(entry->value) && &(AS_MAP(entry->value)->map) == map)
+        {
+            buff[index++] = '{';
+            buff[index++] = '.';
+            buff[index++] = '.';
+            buff[index++] = '.';
+            buff[index++] = '}';
+        }
+        else
+        {
+            value = valueToString(entry->value, buff + index, len);
+            index += *len;
+        }
         buff[index++] = ',';
     }
     if (map->count > 0)
@@ -1388,6 +1414,16 @@ char *valueToString(Value val, char *buff, int *len)
             buff[index++] = '[';
             for (int i = 0; i < list->count; i++)
             {
+                if (IS_LIST(list->items[i]) && AS_LIST(list->items[i]) == list)
+                {
+                    buff[index++] = '[';
+                    buff[index++] = '.';
+                    buff[index++] = '.';
+                    buff[index++] = '.';
+                    buff[index++] = ']';
+                    buff[index++] = ',';
+                    continue;
+                }
                 valueToString(list->items[i], buff + index, len);
                 index += *len;
                 buff[index++] = ',';
@@ -2080,6 +2116,41 @@ static Value readNative(int argc, Value *argv, bool *hasError, bool *pushedValue
         return NIL_VAL;
     }
     return OBJ_VAL(copyString(buffer, valread));
+}
+
+NATIVE_FN(pollNative)
+{
+    if (argc != 2)
+    {
+        runtimeError("Expected 2 argument but %d passed in for poll(socket, timeout)", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[1]))
+    {
+        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", VALUE_TYPES[argv[1].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    int sock = (int)AS_NUM(argv[0]);
+    int timeout = (int)AS_NUM(argv[1]);
+    struct pollfd fds[1];
+    fds[0].fd = sock;
+    fds[0].events = POLLIN;
+    int ret = poll(fds, 1, timeout);
+    if (ret < 0)
+    {
+        runtimeError("Failed to poll socket");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return BOOL_VAL(fds[0].revents & POLLIN);
 }
 
 static Value readSizeNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -3643,9 +3714,9 @@ static Value titleNative(int argc, Value *argv, bool *hasError, bool *pushedValu
 
 static Value trimLeft2Native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-    if (argc != 0)
+    if (argc != 0 && argc != 1)
     {
-        runtimeError("'trimLeft()' expects 0 argument %d were passed in", argc);
+        runtimeError("'str.trimLeft(<optional> str)' expects 0 or 1 arguments %d were passed in", argc);
         *hasError = true;
         return NIL_VAL;
     }
@@ -3655,6 +3726,23 @@ static Value trimLeft2Native(int argc, Value *argv, bool *hasError, bool *pushed
         *hasError = true;
         return NIL_VAL;
     }
+    if (argc == 1)
+    {
+        if (!IS_STR(argv[0]))
+        {
+            runtimeError("Expected a string but got '%s' for trimLeft(str)", VALUE_TYPES[argv[0].type]);
+            *hasError = true;
+            return NIL_VAL;
+        }
+        char *str = AS_CSTR(peek(argc));
+        char *sep = AS_CSTR(argv[0]);
+        int sepLen = strlen(sep);
+        int i = 0;
+        while (strncmp(str + i, sep, sepLen) == 0 && (str + i) < (str + strlen(str)))
+            i += sepLen;
+        return OBJ_VAL(copyString(str + i, (int)strlen(str) - i));
+    }
+
     char *str = AS_CSTR(peek(argc));
     int i = 0;
     while (isspace((unsigned char)str[i]))
@@ -5768,6 +5856,7 @@ void initVM(bool printBytecode, bool printExecStack)
     defineNative("listen", listenNative);
     defineNative("accept", acceptNative);
     defineNative("read", readNative);
+    defineNative("poll", pollNative);
     defineNative("send", sendNative);
     defineNative("sendFile", sendFileWithFileDescriptorNative);
     // File
@@ -5782,6 +5871,8 @@ void initVM(bool printBytecode, bool printExecStack)
     // Math
     defineNative("sin", sinNative);
     defineNative("cos", cosNative);
+    // defineNative("min", minNative);
+    // defineNative("max", maxNative);
 
     // GC
     defineNative("gc", gcNative);
@@ -6131,6 +6222,28 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             int start = (int)AS_NUM(pop());
             ObjSlice *slice = newSlice(start, end, step);
             push(OBJ_VAL(slice));
+            break;
+        }
+        case OP_BUILD_MAP:
+        {
+            ObjMap *map = newMap();
+            uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
+            push(OBJ_VAL(map));
+
+            for (int i = itemCount; i >= 1; i--)
+            {
+                Value value = peek((i * 2) - 1);
+                Value key = peek(i * 2);
+
+                mapSet(&map->map, key, value);
+            }
+            pop();
+            popN(itemCount * 2);
+
+            push(OBJ_VAL(map));
+            map->capacity = map->map.capacity;
+            map->count = map->map.count;
+
             break;
         }
         case OP_BUILD_LIST:
@@ -6629,8 +6742,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     "Operands must be two numbers");
                 return INTERPRET_RUNTIME_ERROR;
             }
-            int b = AS_NUM(pop());
-            int a = AS_NUM(pop());
+            long b = AS_NUM(pop());
+            long a = AS_NUM(pop());
             push(NUM_VAL((a & b)));
             break;
         }
@@ -6642,9 +6755,48 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     "Operands must be two numbers");
                 return INTERPRET_RUNTIME_ERROR;
             }
-            int b = AS_NUM(pop());
-            int a = AS_NUM(pop());
+            long b = AS_NUM(pop());
+            long a = AS_NUM(pop());
             push(NUM_VAL((a | b)));
+            break;
+        }
+        case OP_BIN_XOR:
+        {
+            if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
+            {
+                runtimeError(
+                    "Operands must be two numbers");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            long b = AS_NUM(pop());
+            long a = AS_NUM(pop());
+            push(NUM_VAL((a ^ b)));
+            break;
+        }
+        case OP_BIN_SHIFT_LEFT:
+        {
+            if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
+            {
+                runtimeError(
+                    "Operands must be two numbers");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            long b = AS_NUM(pop());
+            long a = AS_NUM(pop());
+            push(NUM_VAL((a << b)));
+            break;
+        }
+        case OP_BIN_SHIFT_RIGHT:
+        {
+            if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
+            {
+                runtimeError(
+                    "Operands must be two numbers");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            long b = AS_NUM(pop());
+            long a = AS_NUM(pop());
+            push(NUM_VAL((a >> b)));
             break;
         }
         case OP_EQUAL:
@@ -6968,6 +7120,12 @@ inline void push(Value value)
 inline Value pop()
 {
     return *(--vm.stackTop);
+}
+
+inline Value popN(int n)
+{
+    vm.stackTop -= n;
+    return *(vm.stackTop);
 }
 
 void rotateStack()

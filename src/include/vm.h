@@ -10,6 +10,7 @@
 #include <math.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -90,6 +91,7 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions,
 extern VM vm;
 void push(Value value);
 Value pop();
+Value popN(int n);
 void rotateStack();
 Value peek(int distance);
 void runtimeError(const char *format, ...);

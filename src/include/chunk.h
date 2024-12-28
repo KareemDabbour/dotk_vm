@@ -26,9 +26,12 @@ typedef enum
     OP_LOOP,
     OP_EQUAL,
     OP_LESS,
+    OP_BIN_SHIFT_LEFT,
     OP_GREATER,
+    OP_BIN_SHIFT_RIGHT,
     OP_BIN_OR,
     OP_BIN_AND,
+    OP_BIN_XOR,
     OP_ADD,
     OP_SUB,
     OP_MULT,
@@ -57,6 +60,7 @@ typedef enum
     OP_STATIC_VAR,
     OP_IMPORT,
     OP_BUILD_SLICE,
+    OP_BUILD_MAP,
     OP_TRY,
     OP_CATCH
 } OpCode;

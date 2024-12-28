@@ -119,6 +119,12 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_ADD", offset);
     case OP_BIN_AND:
         return simpleInst("OP_BIN_AND", offset);
+    case OP_BIN_XOR:
+        return simpleInst("OP_BIN_XOR", offset);
+    case OP_BIN_SHIFT_LEFT:
+        return simpleInst("OP_BIN_SHIFT_LEFT", offset);
+    case OP_BIN_SHIFT_RIGHT:
+        return simpleInst("OP_BIN_SHIFT_RIGHT", offset);
     case OP_BIN_OR:
         return simpleInst("OP_BIN_OR", offset);
     case OP_SUB:
@@ -239,6 +245,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return byteInst("OP_SET_UPVALUE", chunk, offset);
     case OP_BUILD_LIST:
         return byteInst("OP_BUILD_LIST", chunk, offset);
+    case OP_BUILD_MAP:
+        return byteInst("OP_BUILD_MAP", chunk, offset);
     case OP_BUILD_DEFAULT_LIST:
         return byteInst("OP_BUILD_DEFAULT_LIST", chunk, offset);
     case OP_CALL:
