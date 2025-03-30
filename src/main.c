@@ -13,13 +13,13 @@
 struct stat statbuf;
 pthread_mutex_t GVL;
 
-static void repl(int argC, char **argV, bool piped)
+static void repl(int argC, char **argV, bool piped, bool runShellAfter)
 {
     enableRawMode();
     char line[1024];
     Stack *line_stack = &(Stack){.current_line = NULL, .size = 0};
     init_stack(line_stack);
-    if (!piped)
+    if (!piped && !runShellAfter)
         printf("DotK Interactive Shell\n");
     for (;;)
     {
@@ -50,6 +50,7 @@ static void printUsage()
     fprintf(stderr,
             "Usage: dotk <file.k>\n"
             "Flags: \n"
+            "   -i:          Run the file and start the interactive shell\n"
             "   --help:      Print this message (if set, all other flags will be ignored)\n"
             "   --pbytecode: Print the bytecode\n"
             "   --pexec:     Print the execution stack\n"
@@ -63,6 +64,7 @@ int main(int argc, char *argv[])
     int printBytecode = -1;
     int printExecStack = -1;
     int file = -1;
+    int runShellAfter = -1;
     bool piped = ((fstat(0, &statbuf) == 0) && (S_ISFIFO(statbuf.st_mode) || S_ISREG(statbuf.st_mode)));
 
     for (int i = 1; i < argc; i++)
@@ -77,6 +79,8 @@ int main(int argc, char *argv[])
             printBytecode = i;
         else if (strncmp(argv[i], "--pexec", 8) == 0)
             printExecStack = i;
+        else if (strncmp(argv[i], "-i", 3) == 0)
+            runShellAfter = i;
         else if (ex != NULL && strcmp(ex, ".k") == 0)
             file = i;
     }
@@ -90,14 +94,19 @@ int main(int argc, char *argv[])
         last = printBytecode;
     if (printExecStack > last)
         last = printExecStack;
+    if (runShellAfter > last)
+        last = runShellAfter;
     if (file > last)
         last = file;
     last++;
     if (file == -1)
-        repl(argc - last, argv + last, piped);
+        repl(argc - last, argv + last, piped, false);
     else
+    {
         runFile(argv[file], argc - last, argv + last);
-
+        if (runShellAfter != -1)
+            repl(argc - last, argv + last, piped, true);
+    }
     freeVM();
     pthread_mutex_destroy(&GVL);
 

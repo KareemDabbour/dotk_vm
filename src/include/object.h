@@ -75,13 +75,15 @@ typedef enum
     TYPE_FILE,
     TYPE_VM,
     TYPE_REGEX,
+    TYPE_SQLITE,
     TYPE_UNKNOWN,
 } ForeignType;
 
-static const char *FOREIGN_TYPES[4] = {
+static const char *FOREIGN_TYPES[5] = {
     "FILE",
     "VM",
     "REGEX",
+    "SQLITE",
     "UNKNOWN"};
 
 struct Obj

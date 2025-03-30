@@ -36,29 +36,39 @@ fn render_chat(data){
 var users = HashMap()
 var num_users = 0
 var initial_connection = Socket.newSocket()
+var chat = []
 initial_connection.port = port
 initial_connection.host = host
-initial_connection.connect()
-print "Connected to the server!"
-initial_connection.send('{"CON": "${}"}'.f(username))
-var response = initial_connection.receive()
-var chat = []
-render_chat(JSON.parse(response))
 
-while(true){
-    if(kbhit()){
-        var data = input()
-        initial_connection.send('{"MSG": "' + data + '", "USR": "' + username + '"}')
-    }else{
-        initial_connection.send('{"GET": "GET"}')
+with(initial_connection, fn(in) {
+    if (!in.connect()){
+        print "Failed to connect to the server"
+        return;
     }
-    sleep(0.6)
-    
-    # clear()
-    render_chat(JSON.parse(initial_connection.receive()))
-}
+    print "Connected to the server!"
+    in.send('{"CON": "${}"}'.f(username))
+    var response = in.receive()
+    render_chat(JSON.parse(response))
+    try{
+        while(true){
+            if(kbhit()){
+                var data = input()
+                in.send('{"MSG": "' + data + '", "USR": "' + username + '"}')
+            }else{
+                in.send('{"GET": "GET"}')
+            }
+            sleep(0.6)
+            
+            # clear()
 
-initial_connection.close()
+            render_chat(JSON.parse(in.receive()))
+        }
+    }catch(e){
+        print(f"ERROR: disconnected from server")
+    }
+
+})
+
 
 
 

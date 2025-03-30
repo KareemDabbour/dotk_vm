@@ -285,7 +285,7 @@ static void markRoots()
     }
 
     markTable(&vm.globals);
-    markTable(&vm.strings);
+    // markTable(&vm.strings);
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
     markCompilerRoots();

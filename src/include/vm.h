@@ -11,12 +11,13 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sqlite3.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
 #define BUFFER_SIZE 104855
 #define STR_BUFF BUFFER_SIZE
-#define FRAMES_MAX 64 * 2 * 2 * 2 * 2
+#define FRAMES_MAX 64 * 2 * 2
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
 #define NATIVE_FN(fn) static Value fn(int argc, Value *argv, bool *hasError, bool *pushedValue)
 

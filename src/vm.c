@@ -45,6 +45,11 @@ static void resetStack()
     vm.openUpvalues = NULL;
 }
 
+static bool isFalsey(Value value)
+{
+    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0) || (IS_MAP(value) && AS_MAP(value)->count == 0);
+}
+
 Value peek(int dist)
 {
     return vm.stackTop[-1 - dist];
@@ -1069,6 +1074,192 @@ NATIVE_FN(fileInitNative)
     return OBJ_VAL(f);
 }
 
+NATIVE_FN(sqlExecNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'SQL.exec(<query>)' expects 1 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
+    {
+        runtimeError("'SQL.exec(<query>)' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("'SQL.exec(<query>)' expects a string as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *db = AS_FOREIGN(peek(argc));
+    sqlite3 *db_ptr = db->ptr;
+    char *query = AS_CSTR(argv[0]);
+    char *err = NULL;
+    int rc = sqlite3_exec(db_ptr, query, NULL, 0, &err);
+    if (rc != SQLITE_OK)
+    {
+        runtimeError("Failed to execute query: %s", err);
+        sqlite3_free(err);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return NIL_VAL;
+}
+
+NATIVE_FN(sqlCloseNative)
+{
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
+    {
+        runtimeError("'SQL.close()' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *db = AS_FOREIGN(peek(argc));
+    Value closed = BOOL_VAL(true);
+    if (!tableGet(&db->fields, copyString("isClosed", 8), &closed))
+    {
+        runtimeError("Could not check if database has been closed or not");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (AS_BOOL(closed))
+        return closed;
+
+    closed = BOOL_VAL(true);
+
+    tableSet(&db->fields, copyString("isClosed", 8), closed);
+    sqlite3 *db_ptr = db->ptr;
+    sqlite3_close(db_ptr);
+    db->ptr = NULL;
+    return closed;
+}
+
+NATIVE_FN(sqlQueryNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'SQL.query(<query>)' expects 1 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
+    {
+        runtimeError("'SQL.query(<query>)' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("'SQL.query(<query>)' expects a string as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *db = AS_FOREIGN(peek(argc));
+    sqlite3 *db_ptr = db->ptr;
+    char *query = AS_CSTR(argv[0]);
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db_ptr, query, -1, &stmt, NULL);
+    if (rc != SQLITE_OK)
+    {
+        runtimeError("Failed to prepare query: %s", sqlite3_errmsg(db_ptr));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    ObjInstance *ret = newInstance(vm.baseObj);
+
+    ObjList *rows = newList();
+    int col_count = sqlite3_column_count(stmt);
+    ObjList *row = newList();
+    push(OBJ_VAL(row));
+    for (int i = 0; i < col_count; i++)
+    {
+        const char *col_name = sqlite3_column_name(stmt, i);
+        appendToList(row, OBJ_VAL(copyString(col_name, (int)strlen(col_name))));
+    }
+    // appendToList(rows, OBJ_VAL(row));
+    tableSet(&ret->fields, copyString("columns", 7), OBJ_VAL(row));
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        ObjList *row = newList();
+        push(OBJ_VAL(row));
+        for (int i = 0; i < col_count; i++)
+        {
+            switch (sqlite3_column_type(stmt, i))
+            {
+                case SQLITE_INTEGER:
+                appendToList(row, NUM_VAL(sqlite3_column_int(stmt, i)));
+                break;
+                case SQLITE_FLOAT:
+                appendToList(row, NUM_VAL(sqlite3_column_double(stmt, i)));
+                break;
+                case SQLITE_TEXT:
+                appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_text(stmt, i), (int)strlen((char *)sqlite3_column_text(stmt, i)))));
+                break;
+                case SQLITE_BLOB:
+                appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i))));
+                break;
+                case SQLITE_NULL:
+                appendToList(row, NIL_VAL);
+                break;
+                default:
+                appendToList(row, OBJ_VAL(copyString("UNKNOWN", 7)));
+            }
+        }
+        appendToList(rows, OBJ_VAL(row));
+        pop();
+    }
+    
+    sqlite3_finalize(stmt);
+    tableSet(&ret->fields, copyString("rows", 4), OBJ_VAL(rows));
+    pop();
+    return OBJ_VAL(ret);
+}
+NATIVE_FN(sqlInitNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'SQL(<filepath>)' expects 1 argument but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_STR(argv[0]))
+    {
+        runtimeError("'SQL(<file>)' expects a string as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    char *path = AS_CSTR(argv[0]);
+    sqlite3 *db;
+    int rc = sqlite3_open(path, &db);
+    if (rc != SQLITE_OK)
+    {
+        runtimeError("Failed to open database '%s'", path);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjForeign *f = newForeignObj(TYPE_SQLITE, db, false);
+    tableSet(&f->fields, copyString("path", 4), argv[0]);
+    tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
+
+    tableSet(&f->methods, copyString("close", 5), OBJ_VAL(newNative(sqlCloseNative)));
+    tableSet(&f->methods, copyString("exec", 4), OBJ_VAL(newNative(sqlExecNative)));
+    tableSet(&f->methods, copyString("query", 5), OBJ_VAL(newNative(sqlQueryNative)));
+    // tableSet(&f->methods, copyString("lastInsertId", 12), OBJ_VAL(newNative(sqlLastInsertIdNative)));
+    // tableSet(&f->methods, copyString("changes", 7), OBJ_VAL(newNative(sqlChangesNative)));
+
+    return OBJ_VAL(f);
+}
+
 // NATIVE_FN(regexExecNative)
 // {
 //     //     if (argc != 2)
@@ -1410,7 +1601,7 @@ char *valueToString(Value val, char *buff, int *len)
         case OBJ_LIST:
         {
             ObjList *list = AS_LIST(val);
-            int index = 0;
+            long index = 0;
             buff[index++] = '[';
             for (int i = 0; i < list->count; i++)
             {
@@ -1689,7 +1880,7 @@ static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushed
     return NIL_VAL;
 }
 
-static Value boolCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+NATIVE_FN(boolCastNative)
 {
     if (argc != 1)
     {
@@ -1697,14 +1888,17 @@ static Value boolCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
+    if (argv[0].type == VAL_OBJ)
     {
-        char *str = AS_STR(argv[0])->chars;
-        if (strcmp(str, "true") == 0)
-            return BOOL_VAL(true);
-        if (strcmp(str, "false") == 0)
-            return BOOL_VAL(false);
-        return BOOL_VAL(AS_STR(argv[0])->len);
+        if(AS_OBJ(argv[0])->type == OBJ_STRING){
+            char *str = AS_STR(argv[0])->chars;
+            if (strcmp(str, "true") == 0)
+                return BOOL_VAL(true);
+            if (strcmp(str, "false") == 0)
+                return BOOL_VAL(false);
+            return BOOL_VAL(AS_STR(argv[0])->len);
+        }
+        return BOOL_VAL(!isFalsey(argv[0]));
     }
     if (argv[0].type == VAL_NUMBER)
         return BOOL_VAL(AS_NUM(argv[0]) != 0);
@@ -2762,11 +2956,6 @@ static bool defineMethod(ObjString *name)
 
     pop();
     return true;
-}
-
-static bool isFalsey(Value value)
-{
-    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0) || (IS_MAP(value) && AS_MAP(value)->count == 0);
 }
 
 static ObjString *addTwoStrings(char *a, char *b, int lenA, int lenB)
@@ -5228,6 +5417,8 @@ NATIVE_FN(baseToStrNative)
     }
     if (!IS_INSTANCE(peek(argc)))
     {
+        if (IS_STR(peek(argc)))
+            return peek(argc);
         runtimeError("Expected an Object to be caller but got '%s' for Object.toStr()", VALUE_TYPES[peek(argc).type]);
         *hasError = true;
         return NIL_VAL;
@@ -5712,6 +5903,9 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.stringClass = stringClass;
     stringClass->initializer = OBJ_VAL(newNative(initStringNative));
     stringClass->hashFn = OBJ_VAL(newNative(strHashNative));
+
+    tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
+    tableSet(&stringClass->methods, copyString("_hash_", 6), stringClass->hashFn);
     tableSet(&stringClass->methods, copyString("split", 5), OBJ_VAL(newNative(split2Native)));
     tableSet(&stringClass->methods, copyString("match", 5), OBJ_VAL(newNative(regexMatchStrNative)));
     tableSet(&stringClass->methods, copyString("findall", 7), OBJ_VAL(newNative(regexFindAllNative)));
@@ -5730,8 +5924,6 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&stringClass->methods, copyString("join", 4), OBJ_VAL(newNative(join2Native)));
     tableSet(&stringClass->methods, copyString("format", 6), OBJ_VAL(newNative(formatNative)));
     tableSet(&stringClass->methods, copyString("f", 1), OBJ_VAL(newNative(formatNative)));
-    tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
-    tableSet(&stringClass->methods, copyString("_hash_", 6), stringClass->hashFn);
 
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
@@ -5795,6 +5987,12 @@ void initVM(bool printBytecode, bool printExecStack)
     ObjClass *file = primativeClass("File");
     file->initializer = OBJ_VAL(newNative(fileInitNative));
     tableSet(&file->methods, copyString("exists", 6), OBJ_VAL(newNative(fileClassExistsNative)));
+
+    ObjClass *sql = primativeClass("SQL");
+    sql->initializer = OBJ_VAL(newNative(sqlInitNative));
+    tableSet(&sql->methods, copyString("close", 5), OBJ_VAL(newNative(sqlCloseNative)));
+    tableSet(&sql->methods, copyString("exec", 4), OBJ_VAL(newNative(sqlExecNative)));
+    tableSet(&sql->methods, copyString("query", 5), OBJ_VAL(newNative(sqlQueryNative)));
 
     defineNative("tI", testRinitNative);
     defineNative("tC", testRcloseNative);
@@ -6654,11 +6852,12 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 break;
             }
             int strLen = 0;
-            char str[STR_BUFF] = {0};
+            char *str = ALLOCATE(char, STR_BUFF * 2); // TODO: make value to string dynamically resize the buffer
+            // char str[STR_BUFF] = {0};
             valueToString(pop(), str, &strLen);
             printf("%.*s", strLen, str);
             // printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
-
+            free(str);
             printf("\n");
             break;
         }

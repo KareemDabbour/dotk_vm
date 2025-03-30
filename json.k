@@ -93,7 +93,7 @@ class JSONParser{
     return JSONParseState.PARSE_ERROR;
   }
   parseObject(){
-    var ret = HashMap();
+    var ret = .{};
     this.index += 1;
     var c;
     while (this.index < len(this.string)){

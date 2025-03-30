@@ -75,6 +75,10 @@ static void disableRawMode()
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
+static bool is_ctrl_arrow_char_term(char c){
+    return c == ' ' || c == '.' || c == '_' || c == '-' || c == '+' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '<' || c == '>';
+}
+
 // Function to handle user input and editing
 static void handleInput(char *line, Stack *stack, bool piped)
 {
@@ -176,9 +180,9 @@ static void handleInput(char *line, Stack *stack, bool piped)
                         if (c == 'D') // left arrow
                         {
                             int spaces = 0;
-                            while ((position - spaces) > 0 && line[(position - spaces) - 1] == ' ')
+                            while ((position - spaces) > 0 && is_ctrl_arrow_char_term(line[(position - spaces) - 1]))
                                 spaces++;
-                            while ((position - spaces) > 0 && line[(position - spaces) - 1] != ' ')
+                            while ((position - spaces) > 0 && !is_ctrl_arrow_char_term(line[(position - spaces) - 1]))
                                 spaces++;
                             position -= spaces;
                             if (spaces > 0)
@@ -187,9 +191,9 @@ static void handleInput(char *line, Stack *stack, bool piped)
                         else if (c == 'C') // right arrow
                         {
                             int spaces = 0;
-                            while ((position + spaces) < lineLen && line[position + spaces] == ' ')
+                            while ((position + spaces) < lineLen && is_ctrl_arrow_char_term(line[position + spaces]))
                                 spaces++;
-                            while ((position + spaces) < lineLen && line[position + spaces] != ' ')
+                            while ((position + spaces) < lineLen && !is_ctrl_arrow_char_term(line[position + spaces]))
                                 spaces++;
                             position += spaces;
                             if (spaces > 0)
@@ -203,9 +207,9 @@ static void handleInput(char *line, Stack *stack, bool piped)
                 if (position == lineLen)
                     continue;
                 int spaces = 0;
-                while ((position + spaces) < lineLen && line[position + spaces] == ' ')
+                while ((position + spaces) < lineLen && is_ctrl_arrow_char_term(line[position + spaces]))
                     spaces++;
-                while ((position + spaces) < lineLen && line[position + spaces] != ' ')
+                while ((position + spaces) < lineLen && !is_ctrl_arrow_char_term(line[position + spaces]))
                     spaces++;
                 if (spaces <= 0)
                     continue;
@@ -271,9 +275,9 @@ static void handleInput(char *line, Stack *stack, bool piped)
                 continue;
 
             int spaces = 0;
-            while ((position - spaces) > 0 && line[(position - spaces) - 1] == ' ')
+            while ((position - spaces) > 0 && is_ctrl_arrow_char_term(line[(position - spaces) - 1]))
                 spaces++;
-            while ((position - spaces) > 0 && line[(position - spaces) - 1] != ' ')
+            while ((position - spaces) > 0 && !is_ctrl_arrow_char_term(line[(position - spaces) - 1]))
                 spaces++;
             if (spaces <= 0)
                 continue;

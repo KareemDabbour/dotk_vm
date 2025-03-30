@@ -1,5 +1,4 @@
 import "lang.k"
-
 ## A simple linked list implementation.
 class ListNode {
   init(value) {
@@ -937,8 +936,8 @@ class Set <Collection> {
   }
 
   sort(){
-    var res = this.allEntries[:this._size];
-    Arrays.mergeSort(res);
+    var res = this.allEntries[:this._size].sort();
+    # Arrays.mergeSort(res);
     for(var i = 0; i < len(res); i+=1){
       this.allEntries[i] = res[i];
     }
@@ -1007,7 +1006,7 @@ class Set <Collection> {
     if(entryList == null){
       return null;
     }
-    var ret = entryList.removeIf(fn (other) => value == other);
+    var ret = entryList.filter(fn (other) => value == other);
     if (ret != null){
       var temp = Arrays.removeIf(
           this.allEntries[:this._size], 
@@ -1432,6 +1431,10 @@ class Graph {
         return hash(this.adjList);
     }
 
+    hasEdge(u, v){
+        return this.adjList.get(u, []).contains(v);
+    }
+
     minDist(dist, sptSet){
         var min = Math.INF;
         var minIndex = -1;
@@ -1471,11 +1474,110 @@ class Graph {
     toStr(){
         var s = StringBuilder();
         this.adjList.entries().foreach(fn (e) {
-            s.append(e[0]).append(" -> ").append(e[1]).append("\n");
+            s.append(e.key).append(" -> ").append(e.value).append("\n");
         });
         return s.toStr();
         # return this.adjList.toStr();
     }
+}
+
+class UndirectedGraph <Graph> {
+    init(){
+        this.adjList = HashMap();
+    }
+
+    addEdge(u, v){
+        this.adjList.compute(u, fn (k, val) => val ? val.append(v) : {v});
+        this.adjList.compute(v, fn (k, val) => val ? val.append(u) : {u});
+    }
+
+    hasEdge(u, v){
+        return this.adjList.get(u, []).contains(v);
+    }
+
+    minDist(dist, sptSet){
+        var min = Math.INF;
+        var minIndex = -1;
+        var d = dist.keys();
+        for(var s = 0; s < len(d); s += 1){
+            var i = d[s];
+            if (!sptSet.contains(i) && (dist[i]) < min){
+                min = dist[i];
+                minIndex = i;
+            }
+        }
+        return minIndex;
+    }
+
+    dijkstra(src){
+        var dist = HashMap();
+        this.adjList.keys().foreach(fn (k) => dist[k] = Math.INF);
+        dist[src] = 0;
+        # print("dist: ${}".f(dist));
+        # print "adjList: ${}".f(this.adjList);
+        var sptSet = [];
+        for (var i = 0; i < len(this.adjList.keys()); i+=1){
+            var u = this.minDist(dist, sptSet);
+            # print("u: ${}".f(u));
+            sptSet.append(u);
+            
+            var adj = this.adjList.get(u, []);
+            # print "adj: ${}".f(adj);
+
+            
+            adj.foreach(fn (v) {
+                var d = dist[u];
+                # print "v: ${}".f(v);
+                # print "dist[u]: ${}".f(d);
+                # print "dist[v]: ${}".f(dist.get(v, Math.INF));
+                # print "spSet: ${}".f(sptSet);
+                if (!sptSet.contains(v) && d != Math.INF && (d + 1) < dist.get(v, Math.INF)){
+                    dist[v] = (dist[u] + 1);
+                }
+            });
+        }
+        return dist;
+
+    }
+
+    shortestPathLen(src, dest){
+        var dist = this.dijkstra(src);
+        return dist[dest];
+    }
+
+    shortestPath(src, dest){
+        var dist = this.dijkstra(src);
+        var ret = [];
+        var u = dest;
+        while ( u != src){
+            ret.append(u);
+            var adj = this.adjList.get(u, []);
+            var min = Math.INF;
+            var minV = -1;
+            adj.foreach(fn (v) {
+                if (dist[v] < min){
+                    min = dist[v];
+                    minV = v;
+                }
+            });
+            u = minV;
+        }
+        ret.append(src);
+        return ret[:@-1];
+
+    }
+
+    toStr(){
+        var s = StringBuilder();
+        
+        this.adjList.entries().foreach(fn (e) {
+            s.append(e.key).append(" -> ").append(e.value).append("\n");
+        });
+
+        return s.toStr();
+        # return this.adjList.toStr();
+    }
+
 }
 
 class WeightedDirectedGraph <Graph> {
@@ -1518,7 +1620,7 @@ class WeightedDirectedGraph <Graph> {
 
             
             adj.foreach(fn (vP) {
-                var v = vP.name;
+                var v = vP.first;
                 var d = dist[u];
                 # print "v: ${}".f(v);
                 # print "dist[u]: ${}".f(d);
@@ -1533,20 +1635,41 @@ class WeightedDirectedGraph <Graph> {
 
     }
 
-    shortestPath(src, dest){
+    shortestPathLen(src, dest){
         var dist = this.dijkstra(src);
         return dist[dest];
+    }
+
+    shortestPath(src, dest){
+        var dist = this.dijkstra(src);
+        var ret = [];
+        var u = dest;
+        while (u != src){
+            ret.append(u);
+            var adj = this.adjList.get(u, []);
+            var min = Math.INF;
+            var minV = -1;
+            adj.foreach(fn (vP) {
+                var v = vP.first;
+                if (dist[v] < min){
+                    min = dist[v];
+                    minV = v;
+                }
+            });
+            u = minV;
+        }
+        ret.append(src);
+        return ret[:@-1];
+        
     }
 
 
 
     toStr(){
         var s = StringBuilder();
-
-        var d = this.adjList.entries()
         
-        d.foreach(fn (e) {
-            s.append(e[0]).append(" -> ").append(e[1]).append("\n");
+        this.adjList.entries().foreach(fn (e) {
+            s.append(e.key).append(" -> ").append(e.value).append("\n");
         });
 
         return s.toStr();

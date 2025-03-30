@@ -3,9 +3,47 @@ fn with(closable, f){
     try{
         closable.close()
     }catch(e){
-        print("Error closing closable: ${}".f(e.message))
+        print(e.message)
     }
     return ret
+}
+
+fn min(a, b){
+    if(a < b){
+        return a
+    }
+    return b
+}
+
+fn max(a, b){
+    if(a > b){
+        return a
+    }
+    return b
+}
+
+fn abs(a){
+    if(a < 0){
+        return -a
+    }
+    return a
+}
+
+fn __hierarchy__(obj){
+    var oType = type(obj) 
+    if (oType != "class"){
+        write(1,f"type: {oType} is not a class\n")
+        return {};
+    }
+
+    var h = []
+    var r = obj
+    while(r){
+        h.append(r)
+        r = r.superClass
+    }
+
+    return h[:@-1]
 }
 
 class Ansi{
