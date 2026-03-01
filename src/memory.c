@@ -7,7 +7,7 @@
 #include "include/debug.h"
 #endif
 
-#define GC_HEAP_GROW_FACTOR 2;
+#define GC_HEAP_GROW_FACTOR 2
 
 void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 {
@@ -17,10 +17,19 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 #if DEBUG_STRESS_GC
         collectGarbage();
 #endif
+        if (vm.bytesAllocated > vm.maxHeapSize)
+        {
+
+            // collectGarbage();
+
+            // if (vm.bytesAllocated > vm.maxHeapSize)
+            // {
+            //     fprintf(stderr, "KAREEM -- OUT OF MEMORY (%ld)\n", vm.bytesAllocated);
+            //     exit(1);
+            // }
+        }
         if (vm.bytesAllocated > vm.nextGC)
         {
-            // fprintf(stderr, "KAREEM -- COLLECTING GARBAGE from %ld. Next GC: %ld\n", vm.bytesAllocated, vm.nextGC);
-            // printf("KAREEM -- CALLLINGGNGNNG\n");
             collectGarbage();
         }
     }
@@ -79,7 +88,6 @@ static void blackenObject(Obj *object)
     printValue(OBJ_VAL(object), 1);
     printf("\n");
 #endif
-    markObj(object);
     switch (object->type)
     {
     case OBJ_CLOSURE:
@@ -147,7 +155,6 @@ static void blackenObject(Obj *object)
     case OBJ_INSTANCE:
     {
         ObjInstance *instance = (ObjInstance *)object;
-        markObj((Obj *)instance);
         markObj((Obj *)instance->klass);
         markTable(&instance->fields);
         break;
@@ -156,6 +163,16 @@ static void blackenObject(Obj *object)
     {
         ObjFunction *function = (ObjFunction *)object;
         markObj((Obj *)function->name);
+        for (int i = 0; i < function->paramCount; i++)
+        {
+            markValue(function->chunk.constants.values[function->paramNameConsts[i]]);
+        }
+        for (int i = 0; i < function->localNameCount; i++)
+        {
+            uint16_t idx = function->localNameConsts[i];
+            if (idx != UINT16_MAX)
+                markValue(function->chunk.constants.values[idx]);
+        }
         markArray(&function->chunk.constants);
         break;
     }
@@ -166,9 +183,15 @@ static void blackenObject(Obj *object)
         markValue(((ObjUpvalue *)object)->closed);
         break;
     }
+    case OBJ_FOREIGN:
+    {
+        ObjForeign *foreign = (ObjForeign *)object;
+        markTable(&foreign->fields);
+        markTable(&foreign->methods);
+        break;
+    }
     case OBJ_STRING:
     case OBJ_NATIVE:
-    case OBJ_FOREIGN:
         break;
     default:
         break;
@@ -178,7 +201,7 @@ static void blackenObject(Obj *object)
 static void freeObject(Obj *object)
 {
 #ifdef DEBUG_LOG_GC
-    printf("%p free type %s\n", (void *)object, OBJECT_TYPES[object->type]);
+    fprintf(stderr, "%p free type %s\n", (void *)object, OBJECT_TYPES[object->type]);
 #endif
     switch (object->type)
     {
@@ -192,6 +215,8 @@ static void freeObject(Obj *object)
     case OBJ_FUNCTION:
     {
         ObjFunction *func = (ObjFunction *)object;
+        FREE_ARRAY(uint16_t, func->paramNameConsts, func->paramCount);
+        FREE_ARRAY(uint16_t, func->localNameConsts, func->localNameCount);
         freeChunk(&func->chunk);
         FREE(ObjFunction, object);
         break;
@@ -199,7 +224,7 @@ static void freeObject(Obj *object)
     case OBJ_LIST:
     {
         ObjList *list = (ObjList *)object;
-        FREE_ARRAY(Value *, list->items, list->count);
+        FREE_ARRAY(Value, list->items, list->capacity);
         FREE(ObjList, object);
         break;
     }
@@ -285,9 +310,11 @@ static void markRoots()
     }
 
     markTable(&vm.globals);
+    markTable(&vm.constGlobals);
     // markTable(&vm.strings);
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
+    markObj((Obj *)vm.currentModuleExports);
     markCompilerRoots();
     markObj((Obj *)vm.initStr);
     markObj((Obj *)vm.toStr);
@@ -355,9 +382,9 @@ void collectGarbage()
     vm.nextGC = vm.bytesAllocated * GC_HEAP_GROW_FACTOR;
 #ifdef DEBUG_LOG_GC
     printf("-- gc end\n");
-    printf("   collected %zu bytes (from %zu to %zu) next at %zu\n",
-           before - vm.bytesAllocated, before, vm.bytesAllocated,
-           vm.nextGC);
+    fprintf(stderr, "   collected %zu bytes (from %zu to %zu) next at %zu\n",
+            before - vm.bytesAllocated, before, vm.bytesAllocated,
+            vm.nextGC);
 #endif
 }
 

@@ -9,7 +9,9 @@ typedef struct
 {
     Value key;
     Value value;
+    uint32_t keyHash;
     bool isUsed;
+    bool isTombstone;
 } MapEntry;
 
 typedef struct

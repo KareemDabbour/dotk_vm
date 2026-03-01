@@ -1,5 +1,5 @@
 import "stdlib.k"
-# import "file.k"
+import "file"
 
 # var rows = 30;
 var size = 30;

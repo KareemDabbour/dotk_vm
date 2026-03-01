@@ -103,6 +103,40 @@ static int invokeInst(const char *name, Chunk *chunk, int offset)
     return offset;
 }
 
+static int invokeKwInst(const char *name, Chunk *chunk, int offset)
+{
+    uint16_t constant;
+    uint8_t positional;
+    uint8_t keyword;
+    if (nextWideOp)
+    {
+        nextWideOp = false;
+        constant = chunk->code[offset + 1] << 8 | chunk->code[offset + 2];
+        positional = chunk->code[offset + 3];
+        keyword = chunk->code[offset + 4];
+        offset += 5;
+    }
+    else
+    {
+        constant = chunk->code[offset + 1];
+        positional = chunk->code[offset + 2];
+        keyword = chunk->code[offset + 3];
+        offset += 4;
+    }
+    printf("%-16s (%d positional, %d keyword) %4d '", name, positional, keyword, constant);
+    printValue(chunk->constants.values[constant], PRINT_VERBOSE_OBJECTS_DEPTH);
+    printf("'\n");
+    return offset;
+}
+
+static int callKwInst(const char *name, Chunk *chunk, int offset)
+{
+    uint8_t positional = chunk->code[offset + 1];
+    uint8_t keyword = chunk->code[offset + 2];
+    printf("%-16s (%d positional, %d keyword)\n", name, positional, keyword);
+    return offset + 3;
+}
+
 int disassembleInst(Chunk *chunk, int offset)
 {
     printf("%04d ", offset);
@@ -143,6 +177,10 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_NEGATE", offset);
     case OP_RETURN:
         return simpleInst("OP_RETURN", offset);
+    case OP_RETURN_NIL:
+        return simpleInst("OP_RETURN_NIL", offset);
+    case OP_RETURN_THIS:
+        return simpleInst("OP_RETURN_THIS", offset);
     case OP_NIL:
         return simpleInst("OP_NIL", offset);
     case OP_TRUE:
@@ -211,16 +249,22 @@ int disassembleInst(Chunk *chunk, int offset)
         return longConstInst("OP_CONST_LONG", chunk, offset);
     case OP_CONSTANT:
         return constInst("OP_CONST", chunk, offset);
+    case OP_EXPORT:
+        return constInst("OP_EXPORT", chunk, offset);
     case OP_IMPORT:
         return simpleInst("OP_IMPORT", offset);
     case OP_GET_SUPER:
         return constInst("OP_GET_SUPER", chunk, offset);
     case OP_DEF_GLOBAL:
         return constInst("OP_DEF_GLOBAL", chunk, offset);
+    case OP_DEF_CONST_GLOBAL:
+        return constInst("OP_DEF_CONST_GLOBAL", chunk, offset);
     case OP_TRY:
         return simpleInst("OP_TRY", offset);
     case OP_CATCH:
         return simpleInst("OP_CATCH", offset);
+    case OP_NOP:
+        return simpleInst("OP_NOP", offset);
     case OP_GET_GLOBAL:
         return constInst("OP_GET_GLOBAL", chunk, offset);
     case OP_SET_GLOBAL:
@@ -251,10 +295,16 @@ int disassembleInst(Chunk *chunk, int offset)
         return byteInst("OP_BUILD_DEFAULT_LIST", chunk, offset);
     case OP_CALL:
         return byteInst("OP_CALL", chunk, offset);
+    case OP_CALL_KW:
+        return callKwInst("OP_CALL_KW", chunk, offset);
     case OP_INVOKE:
         return invokeInst("OP_INVOKE", chunk, offset);
+    case OP_INVOKE_KW:
+        return invokeKwInst("OP_INVOKE_KW", chunk, offset);
     case OP_SUPER_INVOKE:
         return invokeInst("OP_SUPER_INVOKE", chunk, offset);
+    case OP_SUPER_INVOKE_KW:
+        return invokeKwInst("OP_SUPER_INVOKE_KW", chunk, offset);
     case OP_JUMP_IF_FALSE:
         return jumpInst("OP_JUMP_IF_FALSE", 1, chunk, offset);
     case OP_JUMP:

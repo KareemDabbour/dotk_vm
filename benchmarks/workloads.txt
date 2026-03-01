@@ -1,0 +1,8 @@
+# One relative path per line. Keep workloads deterministic and non-interactive.
+# You can add your own real-world scripts here.
+
+./tests/core/01_basic_arithmetic.k
+./tests/functions/01_recursion_factorial.k
+./tests/collections/02_map_basics.k
+./tests/strings/02_split_replace_find.k
+./tests/gc/03_gc_reachable_collections.k

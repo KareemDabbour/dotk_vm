@@ -44,17 +44,28 @@ typedef struct _VM
     Value *stackTop;
     Table strings;
     Table globals;
+    Table constGlobals;
     Table imports;
     Table importFuncs;
+    ObjMap *currentModuleExports;
+    bool currentModuleHasExplicitExports;
     ObjString *initStr;
     ObjString *toStr;
+    ObjString *strDunderStr;
     ObjString *eqStr;
+    ObjString *eqDunderStr;
     ObjString *ltStr;
+    ObjString *ltDunderStr;
     ObjString *gtStr;
+    ObjString *gtDunderStr;
     ObjString *indexStr;
+    ObjString *getitemDunderStr;
     ObjString *setStr;
+    ObjString *setitemDunderStr;
     ObjString *sizeStr;
+    ObjString *lenDunderStr;
     ObjString *hashStr;
+    ObjString *hashDunderStr;
     ObjString *clazzStr;
     ObjClass *stringClass;
     ObjClass *listClass;
@@ -66,6 +77,7 @@ typedef struct _VM
 
     size_t bytesAllocated;
     size_t nextGC;
+    size_t maxHeapSize;
     Obj *objects;
     int grayCount;
     int grayCapacity;
@@ -101,6 +113,14 @@ ObjClass *getVmClass(Value val);
 
 typedef void (*DefineNativeFn)(const char *name, NativeFn function);
 typedef ObjClass *(*DefineNativeClassFn)(char *name);
+
+void vmDefineNative(const char *name, NativeFn function);
+ObjClass *vmDefineClass(const char *name);
+void vmDefineGlobalValue(const char *name, Value value);
+ObjClass *vmGetClassByName(const char *name);
+void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function);
+void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn function);
+void vmEnableDebugger(bool enabled);
 
 // This is so I can use the equal override in classes for the builtin Map class
 void markMap(Map *map);

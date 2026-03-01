@@ -29,4 +29,5 @@ replay_pid*
 
 # Out file
 *.out
+*.so
 dotk.out

@@ -25,6 +25,8 @@ void markMap(Map *map)
     for (int i = 0; i < map->capacity; i++)
     {
         MapEntry *entry = &map->entries[i];
+        if (!entry->isUsed)
+            continue;
         markValue(entry->value);
         markValue(entry->key);
     }

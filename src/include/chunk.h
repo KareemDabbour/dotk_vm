@@ -13,7 +13,9 @@ typedef enum
     OP_POP,
     OP_DUP,
     OP_CALL,
+    OP_CALL_KW,
     OP_DEF_GLOBAL,
+    OP_DEF_CONST_GLOBAL,
     OP_GET_LOCAL,
     OP_SET_LOCAL,
     OP_GET_GLOBAL,
@@ -44,25 +46,31 @@ typedef enum
     OP_PRINT,
     OP_CLOSURE,
     OP_RETURN,
+    OP_RETURN_NIL,
+    OP_RETURN_THIS,
     OP_CLASS,
     OP_METHOD,
     OP_INVOKE,
+    OP_INVOKE_KW,
     OP_INHERIT,
     OP_SET_PROPERTY,
     OP_GET_PROPERTY,
     OP_GET_SUPER,
     OP_SUPER_INVOKE,
+    OP_SUPER_INVOKE_KW,
     OP_BUILD_LIST,
     OP_BUILD_DEFAULT_LIST,
     OP_INDEX_SUBSCR,
     OP_STORE_SUBSCR,
     OP_WIDE,
     OP_STATIC_VAR,
+    OP_EXPORT,
     OP_IMPORT,
     OP_BUILD_SLICE,
     OP_BUILD_MAP,
     OP_TRY,
-    OP_CATCH
+    OP_CATCH,
+    OP_NOP
 } OpCode;
 
 typedef struct
@@ -76,13 +84,35 @@ typedef struct
 
 typedef struct
 {
+    int line;
+    char *file;
+    const char *lineStart;
+} PositionSource;
+
+typedef struct
+{
+    int offset;
+    uint32_t sourceIndex;
+    uint16_t col;
+} PositionEntry;
+
+#ifndef DOTK_ENABLE_DEBUG_POSITIONS
+#define DOTK_ENABLE_DEBUG_POSITIONS 1
+#endif
+
+typedef struct
+{
     int size;
     int capacity;
     uint8_t *code;
     ValueArray constants;
+    bool hasDebugPositions;
+    int sourceCount;
+    int sourceCapacity;
+    PositionSource *sources;
     int posCount;
     int posCapacity;
-    Position *positions;
+    PositionEntry *positions;
 } Chunk;
 
 void initChunk(Chunk *chunk);

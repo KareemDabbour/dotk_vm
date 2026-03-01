@@ -97,6 +97,12 @@ typedef struct
 {
     Obj obj;
     int arity;
+    int minArity;
+    int paramCount;
+    bool isVariadic;
+    uint16_t *paramNameConsts;
+    int localNameCount;
+    uint16_t *localNameConsts;
     int upValueCount;
     Chunk chunk;
     ObjString *name;
@@ -173,8 +179,6 @@ typedef struct _ObjList
 typedef struct _ObjMap
 {
     Obj obj;
-    int count;
-    int capacity;
     Map map;
 } ObjMap;
 
@@ -226,6 +230,7 @@ ObjBoundBuiltin *newBoundBuiltin(Value receiver, ObjNative *native);
 ObjNative *newNative(NativeFn function);
 ObjString *takeString(char *chars, int len);
 ObjString *copyString(const char *chars, int len);
+ObjString *copyStringUninterned(const char *chars, int len);
 ObjUpvalue *newUpvalue(Value *slot);
 void printObj(Value value, int depth);
 

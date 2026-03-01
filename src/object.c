@@ -17,7 +17,7 @@ static Obj *allocateObject(size_t size, ObjType type)
     object->next = vm.objects;
     vm.objects = object;
 #ifdef DEBUG_LOG_GC
-    printf("%p allocate %zu for %s\n", (void *)object, size, OBJECT_TYPES[type]);
+    fprintf(stderr, "%p allocate %zu for %s\n", (void *)object, size, OBJECT_TYPES[type]);
 #endif
     return object;
 }
@@ -45,8 +45,6 @@ ObjMap *newMap()
     ObjMap *map = ALLOCATE_OBJ(ObjMap, OBJ_MAP);
     initMap(&map->map);
     map->map.entries = NULL;
-    map->count = 0;
-    map->capacity = 0;
     return map;
 }
 
@@ -163,6 +161,12 @@ ObjFunction *newFunction()
 {
     ObjFunction *func = ALLOCATE_OBJ(ObjFunction, OBJ_FUNCTION);
     func->arity = 0;
+    func->minArity = 0;
+    func->paramCount = 0;
+    func->isVariadic = false;
+    func->paramNameConsts = NULL;
+    func->localNameCount = 0;
+    func->localNameConsts = NULL;
     func->upValueCount = 0;
     func->name = NULL;
     initChunk(&func->chunk);
@@ -243,6 +247,20 @@ ObjString *copyString(const char *chars, int length)
     return allocateString(heapChars, length, hash);
 }
 
+ObjString *copyStringUninterned(const char *chars, int length)
+{
+    uint32_t hash = hashString(chars, length);
+    char *heapChars = ALLOCATE(char, length + 1);
+    memcpy(heapChars, chars, length);
+    heapChars[length] = '\0';
+
+    ObjString *string = ALLOCATE_OBJ(ObjString, OBJ_STRING);
+    string->len = length;
+    string->chars = heapChars;
+    string->hash = hash;
+    return string;
+}
+
 ObjUpvalue *newUpvalue(Value *slot)
 {
     ObjUpvalue *upvalue = ALLOCATE_OBJ(ObjUpvalue, OBJ_UPVALUE);
@@ -272,7 +290,7 @@ static void printList(ObjList *list, int depth)
     printf("[");
     for (int i = 0; i < list->count - 1; i++)
     {
-        if (list->items[i].as.obj == &list->obj)
+        if (IS_OBJ(list->items[i]) && AS_OBJ(list->items[i]) == &list->obj)
             printf("[...]");
         else
             printValue(list->items[i], depth - 1);
@@ -280,7 +298,7 @@ static void printList(ObjList *list, int depth)
     }
     if (list->count != 0)
     {
-        if (list->items[list->count - 1].as.obj == &list->obj)
+        if (IS_OBJ(list->items[list->count - 1]) && AS_OBJ(list->items[list->count - 1]) == &list->obj)
             printf("[...]");
         else
             printValue(list->items[list->count - 1], depth - 1);
@@ -331,7 +349,7 @@ static void printMap(ObjMap *map, int depth)
             printf(": ");
             printValue(map->map.entries[i].value, depth - 1);
 
-            if (++fields < map->count)
+            if (++fields < map->map.count)
                 printf(", ");
         }
     }

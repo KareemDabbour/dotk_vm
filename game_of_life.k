@@ -1,6 +1,6 @@
 
 var rows = 50;
-var cols = 25;
+var cols = 100;
 var line = " ${} ".f("".join([cols]{"-"}))
 # var string;
 class GameOfLife{
@@ -43,6 +43,33 @@ class GameOfLife{
         return total_alive;
     }
     gen(){
+        # var ret = create_board(this.rows, this.cols);
+        var n = 0;
+        for (var row = 0; row < this.rows; row += 1){
+            for (var col = 0; col < this.cols; col += 1){
+                # ret[row][col] = " ";
+                n = this.get_side_ones(row, col);
+                
+                if (this.board[row][col] == "▓"){
+                    if( n < 2) {
+                        this.board[row][col] = " ";
+                    }
+                    if (n == 2 || n == 3){
+                        this.board[row][col] = "▓";
+                    }
+                    if (n > 3) {
+                        this.board[row][col] = " ";
+                    }
+                }else{
+                    if (n == 3){
+                        this.board[row][col] = "▓";
+                    }
+                }
+            }
+        }
+        # this.board = ret;
+    }
+    gen2(){
         var ret = create_board(this.rows, this.cols);
         var n = 0;
         for (var row = 0; row < this.rows; row += 1){
@@ -71,8 +98,8 @@ class GameOfLife{
     }
     step(){
         this.draw_board();
-        this.gen();
-        sleep(0.05);
+        this.gen2();
+        # sleep(0.05);
         clear();
     }
     run(){

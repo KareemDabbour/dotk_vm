@@ -27,6 +27,9 @@
 			"include": "#template-strings"
 		},
 		{
+			"include": "#prefixed-strings"
+		},
+		{
 			"include": "#variables"
 		},
 		{
@@ -41,7 +44,7 @@
 			"patterns": [
 				{
 					"name": "keyword.control",
-					"match": "\\b(if|else|return|while|break|continue|for|import|var|fn|class|_get_|_set_|_size_|_hash_|toStr|_lt_|_gt_|_eq_|init|try|catch)\\b"
+					"match": "\\b(if|else|return|while|break|continue|for|switch|case|default|try|catch|import|from|as|module|export|var|const|fn|class|this|super|_get_|_set_|_size_|_hash_|toStr|_lt_|_gt_|_eq_|init)\\b"
 				}
 			]
 		},
@@ -73,7 +76,11 @@
 			"patterns": [
 				{
 					"name": "support.constant",
-					"match": "\\b(true|false|null|bool|int|str|list|float)\\b"
+					"match": "\\b(true|false|null|nil|bool|int|str|list|float)\\b"
+				},
+				{
+					"name": "keyword.operator.word.dotk",
+					"match": "\\b(and|or)\\b"
 				}
 			]
 		},
@@ -95,7 +102,7 @@
 					"include": "#strings"
 				},
 				{
-					"include": "rawStrings"
+					"include": "#rawStrings"
 				}
 			]
 		},
@@ -179,6 +186,17 @@
 				}
 			]
 		},
+		"prefixed-strings": {
+			"name": "string.quoted.double.dotk",
+			"begin": "(?:b|x|bin)\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.dotk",
+					"match": "\\\\."
+				}
+			]
+		},
 		"rawStrings": {
 			"name": "string.quoted.double.dotk",
 			"begin": "`",
@@ -201,7 +219,11 @@
 					"name": "keyword.operator.logical.dotk"
 				},
 				{
-					"match": "\\+|-|/|//|\\*|%",
+					"match": "\\+=|-=|\\*=|/=|//=|=|::|\\?",
+					"name": "keyword.operator.assignment.dotk"
+				},
+				{
+					"match": "<<|>>|\\*\\*|\\+|-|//|/|\\*|%|\\^|@",
 					"name": "keyword.operator.dotk"
 				}
 			]

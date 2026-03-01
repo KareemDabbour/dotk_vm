@@ -1,4 +1,7 @@
-import "lang.k";
+print_error("This file is deprecated. Please use the new file system module instead.")
+
+import "lang.k"
+
 
 var F_RO = 0
 var F_WO = 1

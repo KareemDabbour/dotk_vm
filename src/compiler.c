@@ -4,6 +4,7 @@
 #include "include/compiler.h"
 #include "include/memory.h"
 #include "include/object.h"
+#include "include/optimizer.h"
 #include "include/scanner.h"
 
 // #ifdef DEBUG_PRINT_CODE
@@ -50,12 +51,14 @@ typedef struct _Local
     Token name;
     int depth;
     bool isCaptured;
+    bool isConst;
 } Local;
 
 typedef struct _UpValue
 {
     uint8_t index;
     bool isLocal;
+    bool isConst;
 } UpValue;
 
 typedef enum _FunctionType
@@ -102,23 +105,27 @@ int breakAddresses[UINT8_COUNT] = {0};
 bool inTernary = false;
 int ternaryThen = -1;
 int ternaryElse = -1;
+static int gCompilerOptimizationLevel = 1;
 
 static void expression();
-static void declareVar();
+static void declareVar(bool isConst);
 static void namedVariable(Token name, bool canAssign);
 static void statement();
 static bool identifierEqual(Token *a, Token *b);
 static void variable(bool canAssign);
 static void varDeclaration();
 static void importStatement();
+static void fromImportStatement();
+static void moduleDeclaration();
+static void exportStatement();
 static uint16_t identifierConst(Token *name);
 static void defineVar(uint16_t global);
-static void addLocal(Token name);
+static void addLocal(Token name, bool isConst);
 static void markInitialized();
 static void declaration();
 static ParseRule *getRule(TokenType type);
 static void parsePrecedence(Precedence precedence);
-static uint16_t parseVariable(const char *errMsg);
+static uint16_t parseVariable(const char *errMsg, bool isConst);
 static int resolveLocal(Compiler *compiler, Token *name);
 static int resolveUpValue(Compiler *compiler, Token *name);
 // static void optimizeFunction(ObjFunction *fn);
@@ -133,6 +140,7 @@ static void errorAt(Token *token, const char *message)
     if (parser.panicMode)
         return;
     parser.panicMode = true;
+    parser.hadError = true;
     fprintf(stderr, "%s:%d:%d Error", parser.file, token->line, token->col);
     if (token->type == TOKEN_EOF)
     {
@@ -239,13 +247,12 @@ static int emitJump(uint8_t inst)
 static void emitReturn()
 {
     Chunk *chunk = currentChunk();
-    if (chunk != NULL && chunk->size > 0 && chunk->code[chunk->size - 1] == OP_RETURN)
+    if (chunk != NULL && chunk->size > 0 && (chunk->code[chunk->size - 1] == OP_RETURN || chunk->code[chunk->size - 1] == OP_RETURN_NIL || chunk->code[chunk->size - 1] == OP_RETURN_THIS))
         return;
     if (current->type == TYPE_INITIALIZER)
-        emitBytes(OP_GET_LOCAL, 0);
+        emitByte(OP_RETURN_THIS);
     else
-        emitByte(OP_NIL);
-    emitByte(OP_RETURN);
+        emitByte(OP_RETURN_NIL);
 }
 
 static uint16_t makeConstant(Value value)
@@ -307,6 +314,7 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     local->name.start = "";
     local->name.len = 0;
     local->isCaptured = false;
+    local->isConst = false;
     if (type != TYPE_FUNCTION && type != TYPE_TRY && type != TYPE_CATCH && type != TYPE_ANONYMOUS && type != TYPE_SCRIPT)
     {
         local->name.start = "this";
@@ -318,6 +326,24 @@ static ObjFunction *endCompiler()
 {
     emitReturn();
     ObjFunction *func = current->function;
+
+    if (!parser.hadError && gCompilerOptimizationLevel > 0)
+        optimizeFunction(func, gCompilerOptimizationLevel);
+
+    if (!parser.hadError)
+    {
+        char errBuf[256];
+        if (!optimizerValidateFunction(func, errBuf, sizeof(errBuf)))
+        {
+            parser.hadError = true;
+            const char *fname = (func->name == NULL) ? "<script>" : func->name->chars;
+            fprintf(stderr, "%s:0:0 Error: optimizer produced invalid bytecode for %s: %s\n",
+                    parser.file,
+                    fname,
+                    errBuf[0] == '\0' ? "unknown validation error" : errBuf);
+        }
+    }
+
     // #if DEBUG_PRINT_CODE
     if (unlikely(current->printBytecode))
         if (!parser.hadError)
@@ -474,27 +500,97 @@ static void binary(bool canAssign)
     }
 }
 
-static uint8_t argList()
+typedef struct
 {
-    uint8_t argC = 0;
+    uint8_t positional;
+    uint8_t keyword;
+} ArgInfo;
+
+static void addFunctionParamName(ObjFunction *function, Token *paramName)
+{
+    uint16_t constant = makeConstant(OBJ_VAL(copyString(paramName->start, paramName->len)));
+    int oldCount = function->paramCount;
+    function->paramNameConsts = GROW_ARRAY(uint16_t, function->paramNameConsts, oldCount, oldCount + 1);
+    function->paramNameConsts[oldCount] = constant;
+    function->paramCount = oldCount + 1;
+}
+
+static void setFunctionLocalName(ObjFunction *function, int slotIndex, Token *localName)
+{
+    if (slotIndex < 0)
+        return;
+
+    if (function->localNameCount <= slotIndex)
+    {
+        int oldCount = function->localNameCount;
+        int newCount = slotIndex + 1;
+        function->localNameConsts = GROW_ARRAY(uint16_t, function->localNameConsts, oldCount, newCount);
+        for (int i = oldCount; i < newCount; i++)
+            function->localNameConsts[i] = UINT16_MAX;
+        function->localNameCount = newCount;
+    }
+
+    if (localName == NULL || localName->start == NULL || localName->len <= 0)
+    {
+        function->localNameConsts[slotIndex] = UINT16_MAX;
+        return;
+    }
+
+    uint16_t constant = makeConstant(OBJ_VAL(copyString(localName->start, localName->len)));
+    function->localNameConsts[slotIndex] = constant;
+}
+
+static ArgInfo argList()
+{
+    ArgInfo info = {.positional = 0, .keyword = 0};
+    bool hasKeywordArgs = false;
     if (!check(TOKEN_RIGHT_PAREN))
     {
         do
         {
+            if (match(TOKEN_AT))
+            {
+                hasKeywordArgs = true;
+                consume(TOKEN_IDENTIFIER, "Expect keyword argument name after '@'.");
+                Token keywordName = parser.prev;
+                if (!match(TOKEN_EQUAL) && !match(TOKEN_DOUBLE_COLON))
+                    error("Expect '=' or '::' after keyword argument name.");
+
+                emitConst(OBJ_VAL(copyString(keywordName.start, keywordName.len)));
+                expression();
+
+                if (info.keyword == 255)
+                    error("Can't have more than 255 keyword arguments");
+                info.keyword++;
+                continue;
+            }
+
+            if (hasKeywordArgs)
+                error("Positional arguments must come before keyword arguments.");
+
             expression();
-            if (argC == 255)
+            if (info.positional == 255)
                 error("Can't have more than 255 arguments");
-            argC++;
+            info.positional++;
         } while (match(TOKEN_COMMA));
     }
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
-    return argC;
+    return info;
 }
 
 static void call(bool canAssign)
 {
-    uint8_t argCount = argList();
-    emitBytes(OP_CALL, argCount);
+    ArgInfo args = argList();
+    if (args.keyword > 0)
+    {
+        emitByte(OP_CALL_KW);
+        emitByte(args.positional);
+        emitByte(args.keyword);
+    }
+    else
+    {
+        emitBytes(OP_CALL, args.positional);
+    }
 }
 
 static void dot(bool canAssign)
@@ -509,10 +605,12 @@ static void dot(bool canAssign)
     }
     else if (canAssign && match(TOKEN_LEFT_PAREN))
     {
-        uint8_t argc = argList();
+        ArgInfo args = argList();
 
-        emitBytes(OP_INVOKE, name);
-        emitByte(argc);
+        emitBytes(args.keyword > 0 ? OP_INVOKE_KW : OP_INVOKE, name);
+        emitByte(args.positional);
+        if (args.keyword > 0)
+            emitByte(args.keyword);
     }
     else if (canAssign && match(TOKEN_PLUS_EQUAL))
     {
@@ -624,15 +722,41 @@ static void function(FunctionType type)
     beginScope();
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
+    bool hasVariadicParam = false;
     if (!check(TOKEN_RIGHT_PAREN))
     {
         do
         {
+            bool isVariadicParam = match(TOKEN_STAR);
+            if (isVariadicParam)
+            {
+                if (hasVariadicParam)
+                    error("Function can only have one variadic parameter.");
+                hasVariadicParam = true;
+            }
+            else if (hasVariadicParam)
+            {
+                error("Variadic parameter must be the last parameter.");
+            }
+
+            consume(TOKEN_IDENTIFIER, "Expect parameter name.");
+            Token parameter = parser.prev;
+
             current->function->arity++;
+            current->function->minArity = hasVariadicParam ? current->function->arity - 1 : current->function->arity;
+            current->function->isVariadic = hasVariadicParam;
+
             if (current->function->arity >= UINT16_MAX)
                 errorAtCurrent("Can't have more than 65535 parameters");
-            uint16_t constant = parseVariable("Expect parameter name.");
-            defineVar(constant);
+
+            declareVar(false);
+            addFunctionParamName(current->function, &parameter);
+            defineVar(0);
+
+            if (hasVariadicParam && check(TOKEN_COMMA))
+            {
+                error("Variadic parameter must be last.");
+            }
         } while (match(TOKEN_COMMA));
     }
 
@@ -652,8 +776,17 @@ static void function(FunctionType type)
     if (check(TOKEN_LEFT_PAREN))
     {
         consume(TOKEN_LEFT_PAREN, "Expect ')' after parameters.");
-        uint8_t argCount = argList();
-        emitBytes(OP_CALL, argCount);
+        ArgInfo args = argList();
+        if (args.keyword > 0)
+        {
+            emitByte(OP_CALL_KW);
+            emitByte(args.positional);
+            emitByte(args.keyword);
+        }
+        else
+        {
+            emitBytes(OP_CALL, args.positional);
+        }
     }
 
     for (int i = 0; i < function->upValueCount; i++)
@@ -708,10 +841,12 @@ static void super_(bool canAssign)
     namedVariable(synthToken("this"), false);
     if (match(TOKEN_LEFT_PAREN))
     {
-        uint8_t argCount = argList();
+        ArgInfo args = argList();
         namedVariable(synthToken("super"), false);
-        emitBytes(OP_SUPER_INVOKE, name);
-        emitByte(argCount);
+        emitBytes(args.keyword > 0 ? OP_SUPER_INVOKE_KW : OP_SUPER_INVOKE, name);
+        emitByte(args.positional);
+        if (args.keyword > 0)
+            emitByte(args.keyword);
     }
     else
     {
@@ -724,7 +859,7 @@ static void createBuiltinClass()
 {
     Token className = synthToken("String");
     uint16_t nameConst = identifierConst(&className);
-    declareVar();
+    declareVar(false);
     emitBytes(OP_CLASS, nameConst);
     defineVar(nameConst);
     ClassCompiler classCompiler;
@@ -737,7 +872,7 @@ static void classDeclaration()
     consume(TOKEN_IDENTIFIER, "Expect class name");
     Token className = parser.prev;
     uint16_t nameConst = identifierConst(&parser.prev);
-    declareVar();
+    declareVar(false);
 
     emitBytes(OP_CLASS, nameConst);
 
@@ -755,7 +890,7 @@ static void classDeclaration()
         if (identifierEqual(&className, &parser.prev))
             error("A class can't inherit from itself");
         beginScope();
-        addLocal(synthToken("super"));
+        addLocal(synthToken("super"), false);
         defineVar(0);
         namedVariable(className, false);
         // namedVariable(parser.prev, false);
@@ -785,7 +920,7 @@ static void funDeclaration()
         function(TYPE_ANONYMOUS);
         return;
     }
-    uint16_t global = parseVariable("Expect function name");
+    uint16_t global = parseVariable("Expect function name", false);
     markInitialized();
     function(TYPE_FUNCTION);
     defineVar(global);
@@ -793,7 +928,7 @@ static void funDeclaration()
 
 static void varDeclaration()
 {
-    uint16_t global = parseVariable("Expect variable name");
+    uint16_t global = parseVariable("Expect variable name", false);
 
     if (match(TOKEN_EQUAL))
     {
@@ -811,13 +946,15 @@ static void varDeclaration()
 
 static void constDeclaration()
 {
-    Token name = parser.current;
-    uint16_t global = parseVariable("Expect constant name");
+    uint16_t global = parseVariable("Expect constant name", true);
     consume(TOKEN_EQUAL, "Expect '=' after constant name");
     expression();
     // consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
     match(TOKEN_SEMICOLON);
-    defineVar(global);
+    if (current->scopeDepth > 0)
+        defineVar(global);
+    else
+        emitBytes(OP_DEF_CONST_GLOBAL, global);
 }
 
 static void expressionStatement()
@@ -1072,6 +1209,11 @@ static void synchronize()
         case TOKEN_CLASS:
         case TOKEN_FUN:
         case TOKEN_VAR:
+        case TOKEN_CONST:
+        case TOKEN_MODULE:
+        case TOKEN_EXPORT:
+        case TOKEN_FROM:
+        case TOKEN_IMPORT:
         case TOKEN_FOR:
         case TOKEN_IF:
         case TOKEN_WHILE:
@@ -1095,6 +1237,12 @@ static void declaration()
         varDeclaration();
     else if (match(TOKEN_CONST))
         constDeclaration();
+    else if (match(TOKEN_MODULE))
+        moduleDeclaration();
+    else if (match(TOKEN_EXPORT))
+        exportStatement();
+    else if (match(TOKEN_FROM))
+        fromImportStatement();
     else if (match(TOKEN_IMPORT))
         importStatement();
     else
@@ -1196,7 +1344,7 @@ static void enterTryCatch()
     innermostLoopEnd = -1;
     initCompiler(&compiler, TYPE_CATCH, parser.file, current->isRepl, current->printBytecode);
     beginScope();
-    uint16_t catchVar = parseVariable("Expect variable name");
+    uint16_t catchVar = parseVariable("Expect variable name", false);
     defineVar(catchVar);
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after catch variable");
     statement();
@@ -1254,7 +1402,91 @@ static void statement()
 
 static void number(bool canAssign)
 {
-    double value = strtod(parser.prev.start, NULL);
+    int len = parser.prev.len;
+    char *raw = ALLOCATE(char, len + 1);
+    memcpy(raw, parser.prev.start, len);
+    raw[len] = '\0';
+
+    double value = 0;
+
+    if (len > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X'))
+    {
+        uint64_t acc = 0;
+        bool hasDigit = false;
+        for (int i = 2; i < len; i++)
+        {
+            char c = raw[i];
+            int d = -1;
+            if (c >= '0' && c <= '9')
+                d = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                d = 10 + (c - 'a');
+            else if (c >= 'A' && c <= 'F')
+                d = 10 + (c - 'A');
+            else
+            {
+                error("Invalid hex literal.");
+                FREE_ARRAY(char, raw, len + 1);
+                emitConst(NUM_VAL(0));
+                return;
+            }
+            hasDigit = true;
+            acc = (acc << 4) | (uint64_t)d;
+        }
+        if (!hasDigit)
+            error("Hex literal must contain at least one digit.");
+        value = (double)acc;
+    }
+    else if (len > 2 && raw[0] == '0' && (raw[1] == 'b' || raw[1] == 'B'))
+    {
+        uint64_t acc = 0;
+        bool hasDigit = false;
+        for (int i = 2; i < len; i++)
+        {
+            char c = raw[i];
+            if (c != '0' && c != '1')
+            {
+                error("Invalid binary literal.");
+                FREE_ARRAY(char, raw, len + 1);
+                emitConst(NUM_VAL(0));
+                return;
+            }
+            hasDigit = true;
+            acc = (acc << 1) | (uint64_t)(c - '0');
+        }
+        if (!hasDigit)
+            error("Binary literal must contain at least one digit.");
+        value = (double)acc;
+    }
+    else if (len > 2 && raw[0] == '0' && (raw[1] == 'y' || raw[1] == 'Y'))
+    {
+        int acc = 0;
+        bool hasDigit = false;
+        for (int i = 2; i < len; i++)
+        {
+            char c = raw[i];
+            if (c < '0' || c > '9')
+            {
+                error("Invalid byte literal.");
+                FREE_ARRAY(char, raw, len + 1);
+                emitConst(NUM_VAL(0));
+                return;
+            }
+            hasDigit = true;
+            acc = (acc * 10) + (c - '0');
+        }
+        if (!hasDigit)
+            error("Byte literal must contain at least one digit.");
+        if (acc < 0 || acc > 255)
+            error("Byte literal out of range. Expected value in [0, 255].");
+        value = (double)acc;
+    }
+    else
+    {
+        value = strtod(raw, NULL);
+    }
+
+    FREE_ARRAY(char, raw, len + 1);
     emitConst(NUM_VAL(value));
 }
 
@@ -1457,6 +1689,116 @@ static void basicString(bool canAssign)
     templateString(canAssign);
 }
 
+static void byteString(bool canAssign)
+{
+    templateString(canAssign);
+}
+
+static int hexDigitVal(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F')
+        return 10 + (c - 'A');
+    return -1;
+}
+
+static bool isIgnoredByteSep(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '_';
+}
+
+static void hexString(bool canAssign)
+{
+    int inLen = parser.prev.len - 2;
+    const char *src = parser.prev.start + 1;
+    char *out = ALLOCATE(char, inLen + 1);
+    int outLen = 0;
+    int hi = -1;
+
+    for (int i = 0; i < inLen; i++)
+    {
+        char c = src[i];
+        if (isIgnoredByteSep(c))
+            continue;
+
+        int d = hexDigitVal(c);
+        if (d < 0)
+        {
+            FREE_ARRAY(char, out, inLen + 1);
+            error("Invalid hex string literal. Use only [0-9a-fA-F], spaces, or '_' separators.");
+            emitConst(OBJ_VAL(copyString("", 0)));
+            return;
+        }
+
+        if (hi < 0)
+            hi = d;
+        else
+        {
+            out[outLen++] = (char)((hi << 4) | d);
+            hi = -1;
+        }
+    }
+
+    if (hi >= 0)
+    {
+        FREE_ARRAY(char, out, inLen + 1);
+        error("Hex string literal must contain an even number of hex digits.");
+        emitConst(OBJ_VAL(copyString("", 0)));
+        return;
+    }
+
+    emitConst(OBJ_VAL(copyString(out, outLen)));
+    FREE_ARRAY(char, out, inLen + 1);
+}
+
+static void binaryString(bool canAssign)
+{
+    int inLen = parser.prev.len - 2;
+    const char *src = parser.prev.start + 1;
+    char *out = ALLOCATE(char, inLen + 1);
+    int outLen = 0;
+    int bits = 0;
+    uint8_t acc = 0;
+
+    for (int i = 0; i < inLen; i++)
+    {
+        char c = src[i];
+        if (isIgnoredByteSep(c))
+            continue;
+
+        if (c != '0' && c != '1')
+        {
+            FREE_ARRAY(char, out, inLen + 1);
+            error("Invalid binary string literal. Use only 0/1 with optional spaces or '_' separators.");
+            emitConst(OBJ_VAL(copyString("", 0)));
+            return;
+        }
+
+        acc = (uint8_t)((acc << 1) | (uint8_t)(c - '0'));
+        bits++;
+        if (bits == 8)
+        {
+            out[outLen++] = (char)acc;
+            bits = 0;
+            acc = 0;
+        }
+    }
+
+    if (bits != 0)
+    {
+        FREE_ARRAY(char, out, inLen + 1);
+        error("Binary string literal must contain full bytes (groups of 8 bits).");
+        emitConst(OBJ_VAL(copyString("", 0)));
+        return;
+    }
+
+    emitConst(OBJ_VAL(copyString(out, outLen)));
+    FREE_ARRAY(char, out, inLen + 1);
+}
+
 static void namedVariable(Token name, bool canAssign)
 {
 #define SHORT_HAND_ASSIGN(op)            \
@@ -1470,39 +1812,92 @@ static void namedVariable(Token name, bool canAssign)
 
     uint8_t getOp, setOp;
     int arg = resolveLocal(current, &name);
+    bool isConst = false;
+    bool isUnresolved = false;
 
     if (arg != -1)
     {
         getOp = OP_GET_LOCAL;
         setOp = OP_SET_LOCAL;
+        isConst = current->locals[arg].isConst;
     }
     else if ((arg = resolveUpValue(current, &name)) != -1)
     {
         getOp = OP_GET_UPVALUE;
         setOp = OP_SET_UPVALUE;
+        isConst = current->upValues[arg].isConst;
     }
     else
     {
         arg = identifierConst(&name);
         getOp = OP_GET_GLOBAL;
         setOp = OP_SET_GLOBAL;
+        isUnresolved = true;
     }
 
     if (canAssign && match(TOKEN_EQUAL))
     {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+            return;
+        }
+
         expression();
+
         emitBytes(setOp, (uint16_t)arg);
     }
     else if (canAssign && match(TOKEN_PLUS_EQUAL))
-        SHORT_HAND_ASSIGN(OP_ADD);
+    {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+        }
+        else
+            SHORT_HAND_ASSIGN(OP_ADD);
+    }
     else if (canAssign && match(TOKEN_MINUS_EQUAL))
-        SHORT_HAND_ASSIGN(OP_SUB);
+    {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+        }
+        else
+            SHORT_HAND_ASSIGN(OP_SUB);
+    }
     else if (canAssign && match(TOKEN_SLASH_EQUAL))
-        SHORT_HAND_ASSIGN(OP_DIV);
+    {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+        }
+        else
+            SHORT_HAND_ASSIGN(OP_DIV);
+    }
     else if (canAssign && match(TOKEN_SLASH_SLASH_EQUAL))
-        SHORT_HAND_ASSIGN(OP_INT_DIV);
+    {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+        }
+        else
+            SHORT_HAND_ASSIGN(OP_INT_DIV);
+    }
     else if (canAssign && match(TOKEN_STAR_EQUAL))
-        SHORT_HAND_ASSIGN(OP_MULT);
+    {
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            expression();
+        }
+        else
+            SHORT_HAND_ASSIGN(OP_MULT);
+    }
     else
         emitBytes(getOp, arg);
 }
@@ -1688,6 +2083,9 @@ ParseRule rules[] = {
     [TOKEN_TEMPLATE_STRING] = {templateString, NULL, PREC_NONE},
     [TOKEN_INTERPOLATION] = {interpolation, NULL, PREC_NONE},
     [TOKEN_BASIC_STRING] = {basicString, NULL, PREC_NONE},
+    [TOKEN_BYTE_STRING] = {byteString, NULL, PREC_NONE},
+    [TOKEN_HEX_STRING] = {hexString, NULL, PREC_NONE},
+    [TOKEN_BINARY_STRING] = {binaryString, NULL, PREC_NONE},
     [TOKEN_NUMBER] = {number, NULL, PREC_NONE},
     [TOKEN_AND] = {NULL, and_, PREC_AND},
     [TOKEN_CLASS] = {NULL, NULL, PREC_NONE},
@@ -1709,6 +2107,10 @@ ParseRule rules[] = {
     [TOKEN_ERROR] = {NULL, NULL, PREC_NONE},
     [TOKEN_EOF] = {NULL, NULL, PREC_NONE},
     [TOKEN_IMPORT] = {NULL, NULL, PREC_NONE},
+    [TOKEN_FROM] = {NULL, NULL, PREC_NONE},
+    [TOKEN_AS] = {NULL, NULL, PREC_NONE},
+    [TOKEN_MODULE] = {NULL, NULL, PREC_NONE},
+    [TOKEN_EXPORT] = {NULL, NULL, PREC_NONE},
     [TOKEN_QUESTION] = {NULL, trinary, PREC_ASSIGNMENT},
 };
 
@@ -1765,14 +2167,14 @@ static int resolveLocal(Compiler *compiler, Token *name)
     return -1;
 }
 
-static int addUpValue(Compiler *compiler, uint8_t index, bool isLocal)
+static int addUpValue(Compiler *compiler, uint8_t index, bool isLocal, bool isConst)
 {
     int upValueCount = compiler->function->upValueCount;
 
     for (int i = 0; i < upValueCount; i++)
     {
         UpValue *upValue = &compiler->upValues[i];
-        if (upValue->index == index && upValue->isLocal == isLocal)
+        if (upValue->index == index && upValue->isLocal == isLocal && upValue->isConst == isConst)
             return i;
     }
 
@@ -1784,6 +2186,7 @@ static int addUpValue(Compiler *compiler, uint8_t index, bool isLocal)
 
     compiler->upValues[upValueCount].isLocal = isLocal;
     compiler->upValues[upValueCount].index = index;
+    compiler->upValues[upValueCount].isConst = isConst;
     return compiler->function->upValueCount++;
 }
 
@@ -1795,16 +2198,16 @@ static int resolveUpValue(Compiler *compiler, Token *name)
     if (local != -1)
     {
         compiler->enclosing->locals[local].isCaptured = true;
-        return addUpValue(compiler, (uint8_t)local, true);
+        return addUpValue(compiler, (uint8_t)local, true, compiler->enclosing->locals[local].isConst);
     }
 
     int upValue = resolveUpValue(compiler->enclosing, name);
     if (upValue != -1)
-        return addUpValue(compiler, (uint8_t)upValue, false);
+        return addUpValue(compiler, (uint8_t)upValue, false, compiler->enclosing->upValues[upValue].isConst);
     return -1;
 }
 
-static void addLocal(Token name)
+static void addLocal(Token name, bool isConst)
 {
     if (current->localCount == LOCALS_MAX)
     {
@@ -1816,9 +2219,12 @@ static void addLocal(Token name)
     local->name = name;
     local->depth = -1;
     local->isCaptured = false;
+    local->isConst = isConst;
+
+    setFunctionLocalName(current->function, current->localCount - 1, &name);
 }
 
-static void declareVar()
+static void declareVar(bool isConst)
 {
     if (current->scopeDepth == 0)
         return;
@@ -1836,14 +2242,14 @@ static void declareVar()
         }
     }
 
-    addLocal(*name);
+    addLocal(*name, isConst);
 }
 
-static uint16_t parseVariable(const char *errMsg)
+static uint16_t parseVariable(const char *errMsg, bool isConst)
 {
     consume(TOKEN_IDENTIFIER, errMsg);
 
-    declareVar();
+    declareVar(isConst);
     if (current->scopeDepth > 0)
         return 0;
 
@@ -1873,10 +2279,81 @@ static ParseRule *getRule(TokenType type)
     return &rules[type];
 }
 
+static void moduleDeclaration()
+{
+    consume(TOKEN_IDENTIFIER, "Expect module name after 'module'.");
+
+    if (match(TOKEN_LEFT_BRACE))
+    {
+        while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF))
+            declaration();
+        consume(TOKEN_RIGHT_BRACE, "Expect '}' after module body.");
+        match(TOKEN_SEMICOLON);
+        return;
+    }
+
+    match(TOKEN_SEMICOLON);
+}
+
+static void exportStatement()
+{
+    do
+    {
+        consume(TOKEN_IDENTIFIER, "Expect exported symbol name.");
+        uint16_t symbol = identifierConst(&parser.prev);
+        emitBytes(OP_EXPORT, symbol);
+    } while (match(TOKEN_COMMA));
+
+    match(TOKEN_SEMICOLON);
+}
+
 static void importStatement()
 {
     expression();
     emitByte(OP_IMPORT);
+
+    if (match(TOKEN_AS))
+    {
+        uint16_t alias = parseVariable("Expect alias name after 'as'.", false);
+        defineVar(alias);
+    }
+    else
+    {
+        emitByte(OP_POP);
+    }
+
+    match(TOKEN_SEMICOLON);
+}
+
+static void fromImportStatement()
+{
+    expression();
+    emitByte(OP_IMPORT);
+
+    consume(TOKEN_IMPORT, "Expect 'import' after module path in from-import statement.");
+
+    do
+    {
+        consume(TOKEN_IDENTIFIER, "Expect symbol name to import.");
+        Token importedName = parser.prev;
+        Token aliasName = importedName;
+
+        if (match(TOKEN_AS))
+        {
+            consume(TOKEN_IDENTIFIER, "Expect alias name after 'as'.");
+            aliasName = parser.prev;
+        }
+
+        uint16_t importedNameConst = identifierConst(&importedName);
+        uint16_t aliasConst = identifierConst(&aliasName);
+
+        emitByte(OP_DUP);
+        emitBytes(OP_CONSTANT, importedNameConst);
+        emitByte(OP_INDEX_SUBSCR);
+        defineVar(aliasConst);
+    } while (match(TOKEN_COMMA));
+
+    emitByte(OP_POP);
     match(TOKEN_SEMICOLON);
 }
 
@@ -1897,6 +2374,20 @@ ObjFunction *compile(const char *source, char *file, bool isRepl, bool printByte
     ObjFunction *function = endCompiler();
     // optimizeChunk(currentChunk());
     return parser.hadError ? NULL : function;
+}
+
+void compileSetOptimizationLevel(int level)
+{
+    if (level < 0)
+        level = 0;
+    if (level > 2)
+        level = 2;
+    gCompilerOptimizationLevel = level;
+}
+
+int compileGetOptimizationLevel(void)
+{
+    return gCompilerOptimizationLevel;
 }
 
 void markCompilerRoots()

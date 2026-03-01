@@ -27,6 +27,11 @@ static bool isDigit(char c)
     return c >= '0' && c <= '9';
 }
 
+static bool isHexDigit(char c)
+{
+    return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 static bool isAlpha(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
@@ -54,6 +59,18 @@ static char peekNext()
     if (isAtEnd())
         return '\0';
     return scanner.current[1];
+}
+
+static char peekN(int offset)
+{
+    const char *p = scanner.current;
+    for (int i = 0; i < offset; i++)
+    {
+        if (*p == '\0')
+            return '\0';
+        p++;
+    }
+    return *p;
 }
 
 static bool match(char expected)
@@ -144,6 +161,18 @@ static TokenType identifierType()
 {
     switch (*scanner.start)
     {
+    case 'a':
+        if (scanner.current - scanner.start > 1)
+        {
+            switch (scanner.start[1])
+            {
+            case 'n':
+                return checkKeyword(2, 1, "d", TOKEN_AND);
+            case 's':
+                return checkKeyword(2, 0, "", TOKEN_AS);
+            }
+        }
+        break;
     case 'b':
         return checkKeyword(1, 4, "reak", TOKEN_BREAK);
     case 'c':
@@ -187,7 +216,17 @@ static TokenType identifierType()
     case 'd':
         return checkKeyword(1, 6, "efault", TOKEN_DEFAULT);
     case 'e':
-        return checkKeyword(1, 3, "lse", TOKEN_ELSE);
+        if (scanner.current - scanner.start > 1)
+        {
+            switch (scanner.start[1])
+            {
+            case 'l':
+                return checkKeyword(2, 2, "se", TOKEN_ELSE);
+            case 'x':
+                return checkKeyword(2, 4, "port", TOKEN_EXPORT);
+            }
+        }
+        break;
     case 'i':
     {
         if (scanner.current - scanner.start > 1)
@@ -259,9 +298,15 @@ static TokenType identifierType()
                 return checkKeyword(2, 1, "r", TOKEN_FOR);
             case 'n':
                 return checkKeyword(2, 0, "", TOKEN_FUN);
+            case 'r':
+                return checkKeyword(2, 2, "om", TOKEN_FROM);
             }
         }
         break;
+    case 'm':
+        return checkKeyword(1, 5, "odule", TOKEN_MODULE);
+    case 'o':
+        return checkKeyword(1, 1, "r", TOKEN_OR);
     default:
         break;
     }
@@ -270,6 +315,30 @@ static TokenType identifierType()
 
 static Token number()
 {
+    if (scanner.start[0] == '0' && (peek() == 'x' || peek() == 'X'))
+    {
+        advance();
+        while (isHexDigit(peek()))
+            advance();
+        return makeToken(TOKEN_NUMBER);
+    }
+
+    if (scanner.start[0] == '0' && (peek() == 'b' || peek() == 'B'))
+    {
+        advance();
+        while (peek() == '0' || peek() == '1')
+            advance();
+        return makeToken(TOKEN_NUMBER);
+    }
+
+    if (scanner.start[0] == '0' && (peek() == 'y' || peek() == 'Y'))
+    {
+        advance();
+        while (isDigit(peek()))
+            advance();
+        return makeToken(TOKEN_NUMBER);
+    }
+
     while (isDigit(peek()))
         advance();
     if (peek() == '.' && isDigit(peekNext()))
@@ -479,6 +548,36 @@ Token scanToken()
         scanner.start = scanner.current - 1;
         return interpolateString();
     }
+
+    if ((c == 'b' || c == 'B') && peek() == '"')
+    {
+        advance();
+        scanner.start = scanner.current - 1;
+        Token tok = templateString();
+        tok.type = TOKEN_BYTE_STRING;
+        return tok;
+    }
+
+    if ((c == 'x' || c == 'X') && peek() == '"')
+    {
+        advance();
+        scanner.start = scanner.current - 1;
+        Token tok = templateString();
+        tok.type = TOKEN_HEX_STRING;
+        return tok;
+    }
+
+    if ((c == 'b' || c == 'B') && peek() == 'i' && peekN(1) == 'n' && peekN(2) == '"')
+    {
+        advance();
+        advance();
+        advance();
+        scanner.start = scanner.current - 1;
+        Token tok = templateString();
+        tok.type = TOKEN_BINARY_STRING;
+        return tok;
+    }
+
     if (isAlpha(c))
         return identifier();
     if (isDigit(c))

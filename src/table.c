@@ -34,7 +34,10 @@ static Entry *findEntry(Entry *entries, int capacity, ObjString *key)
             else if (tombstone == NULL)
                 tombstone = entry;
         }
-        else if (entry->key == key)
+        else if (entry->key == key ||
+                 (entry->key->len == key->len &&
+                  entry->key->hash == key->hash &&
+                  memcmp(entry->key->chars, key->chars, key->len) == 0))
             return entry;
 
         index = (index + 1) & (capacity - 1);

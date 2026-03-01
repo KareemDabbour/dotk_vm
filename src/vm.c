@@ -1,9 +1,11 @@
 #define TB_IMPL
 #include "include/vm.h"
+#include "include/builtin_module.h"
 #include "include/compiler.h"
 #include "include/debug.h"
 #include "include/io.h"
 #include "include/memory.h"
+#include "include/native_api.h"
 #include "include/object.h"
 #include "include/termbox2.h"
 #include <ctype.h>
@@ -11,6 +13,7 @@
 #include <math.h>
 #include <regex.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -20,9 +23,53 @@ FILE *file;
 bool printBytecodeGlobal = false;
 bool printExecStackGlobaL = false;
 
+typedef enum
+{
+    DBG_BP_LINE,
+    DBG_BP_OFFSET,
+} DebugBreakpointType;
+
+typedef struct
+{
+    DebugBreakpointType type;
+    int value;
+    char file[256];
+} DebugBreakpoint;
+
+typedef struct
+{
+    char expr[128];
+} DebugWatch;
+
+#define DBG_MAX_BREAKPOINTS 256
+#define DBG_MAX_WATCHES 128
+static bool gDebuggerEnabled = false;
+static bool gDebuggerStepMode = false;
+static bool gDebuggerPauseNext = false;
+static DebugBreakpoint gDebugBreakpoints[DBG_MAX_BREAKPOINTS];
+static int gDebugBreakpointCount = 0;
+static DebugWatch gDebugWatches[DBG_MAX_WATCHES];
+static int gDebugWatchCount = 0;
+static const char *gDebugScript = NULL;
+static int gDebugScriptPos = 0;
+
 static bool invoke(ObjString *name, int argc);
+static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
 static InterpretResult run(bool isRepl, int runUntilFrame);
 static char *valueToString(Value val, char *buff, int *len);
+static char *valueToStringSized(Value val, char *buff, size_t cap, int *len);
+static ObjString *valueToObjStringDynamic(Value val);
+static uint32_t hashValueDeep(Value value);
+static ObjString *getFunctionParamName(ObjFunction *function, int index);
+static ObjString *getFunctionLocalName(ObjFunction *function, int index);
+static bool gStringifyTruncated = false;
+
+static inline uint32_t hashNumberBits(double number)
+{
+    uint64_t bits = 0;
+    memcpy(&bits, &number, sizeof(double));
+    return (uint32_t)(bits ^ (bits >> 32));
+}
 
 static char *trim(char *str)
 {
@@ -38,6 +85,50 @@ static char *trim(char *str)
     return str;
 }
 
+static void debuggerInitScriptCommands(void)
+{
+    gDebugScript = getenv("DOTK_DEBUG_CMDS");
+    gDebugScriptPos = 0;
+}
+
+static bool debuggerNextScriptCommand(char *out, size_t outCap)
+{
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = '\0';
+
+    if (gDebugScript == NULL || gDebugScript[0] == '\0')
+        return false;
+
+    int i = gDebugScriptPos;
+    while (gDebugScript[i] == ';' || isspace((unsigned char)gDebugScript[i]))
+        i++;
+
+    if (gDebugScript[i] == '\0')
+    {
+        gDebugScriptPos = i;
+        return false;
+    }
+
+    int j = 0;
+    while (gDebugScript[i] != '\0' && gDebugScript[i] != ';')
+    {
+        if (j + 1 < (int)outCap)
+            out[j++] = gDebugScript[i];
+        i++;
+    }
+    out[j] = '\0';
+
+    if (gDebugScript[i] == ';')
+        i++;
+    gDebugScriptPos = i;
+
+    char *t = trim(out);
+    if (t != out)
+        memmove(out, t, strlen(t) + 1);
+    return out[0] != '\0';
+}
+
 static void resetStack()
 {
     vm.stackTop = vm.stack;
@@ -45,9 +136,723 @@ static void resetStack()
     vm.openUpvalues = NULL;
 }
 
+static int debuggerCurrentOffset(CallFrame *frame)
+{
+    return (int)(frame->ip - frame->closure->function->chunk.code);
+}
+
+static bool debuggerFileMatches(const char *bpFile, const char *currentFile)
+{
+    if (bpFile == NULL || bpFile[0] == '\0')
+        return true;
+    if (currentFile == NULL)
+        return false;
+    if (strcmp(bpFile, currentFile) == 0)
+        return true;
+
+    const char *bpBase = strrchr(bpFile, '/');
+    bpBase = bpBase ? bpBase + 1 : bpFile;
+    const char *curBase = strrchr(currentFile, '/');
+    curBase = curBase ? curBase + 1 : currentFile;
+    return strcmp(bpBase, curBase) == 0;
+}
+
+static void debuggerListBreakpoints(void)
+{
+    if (gDebugBreakpointCount == 0)
+    {
+        fprintf(stderr, "No breakpoints set.\n");
+        return;
+    }
+
+    fprintf(stderr, "Breakpoints:\n");
+    for (int i = 0; i < gDebugBreakpointCount; i++)
+    {
+        DebugBreakpoint *bp = &gDebugBreakpoints[i];
+        if (bp->type == DBG_BP_LINE)
+        {
+            if (bp->file[0] != '\0')
+                fprintf(stderr, "  [%d] line %s:%d\n", i, bp->file, bp->value);
+            else
+                fprintf(stderr, "  [%d] line %d\n", i, bp->value);
+        }
+        else
+            fprintf(stderr, "  [%d] offset %d\n", i, bp->value);
+    }
+}
+
+static bool debuggerAddBreakpoint(DebugBreakpointType type, int value, const char *file)
+{
+    if (gDebugBreakpointCount >= DBG_MAX_BREAKPOINTS)
+    {
+        fprintf(stderr, "Cannot add more breakpoints (max=%d).\n", DBG_MAX_BREAKPOINTS);
+        return false;
+    }
+
+    for (int i = 0; i < gDebugBreakpointCount; i++)
+    {
+        if (gDebugBreakpoints[i].type == type &&
+            gDebugBreakpoints[i].value == value &&
+            ((file == NULL && gDebugBreakpoints[i].file[0] == '\0') ||
+             (file != NULL && strcmp(file, gDebugBreakpoints[i].file) == 0)))
+        {
+            fprintf(stderr, "Breakpoint already exists.\n");
+            return true;
+        }
+    }
+
+    gDebugBreakpoints[gDebugBreakpointCount].type = type;
+    gDebugBreakpoints[gDebugBreakpointCount].value = value;
+    if (file != NULL)
+        snprintf(gDebugBreakpoints[gDebugBreakpointCount].file, sizeof(gDebugBreakpoints[gDebugBreakpointCount].file), "%s", file);
+    else
+        gDebugBreakpoints[gDebugBreakpointCount].file[0] = '\0';
+    gDebugBreakpointCount++;
+    return true;
+}
+
+static bool debuggerDeleteBreakpoint(int index)
+{
+    if (index < 0 || index >= gDebugBreakpointCount)
+        return false;
+
+    for (int i = index + 1; i < gDebugBreakpointCount; i++)
+        gDebugBreakpoints[i - 1] = gDebugBreakpoints[i];
+    gDebugBreakpointCount--;
+    return true;
+}
+
+static bool debuggerAddWatch(const char *expr)
+{
+    if (expr == NULL || *expr == '\0')
+        return false;
+
+    if (gDebugWatchCount >= DBG_MAX_WATCHES)
+    {
+        fprintf(stderr, "Cannot add more watches (max=%d).\n", DBG_MAX_WATCHES);
+        return false;
+    }
+
+    for (int i = 0; i < gDebugWatchCount; i++)
+    {
+        if (strcmp(gDebugWatches[i].expr, expr) == 0)
+        {
+            fprintf(stderr, "Watch already exists.\n");
+            return true;
+        }
+    }
+
+    snprintf(gDebugWatches[gDebugWatchCount].expr, sizeof(gDebugWatches[gDebugWatchCount].expr), "%s", expr);
+    gDebugWatchCount++;
+    return true;
+}
+
+static bool debuggerDeleteWatch(const char *arg)
+{
+    if (arg == NULL || *arg == '\0')
+        return false;
+
+    int idx = -1;
+    char *end = NULL;
+    long parsed = strtol(arg, &end, 10);
+    if (end != arg && *end == '\0')
+    {
+        if (parsed < 0 || parsed >= gDebugWatchCount)
+            return false;
+        idx = (int)parsed;
+    }
+    else
+    {
+        for (int i = 0; i < gDebugWatchCount; i++)
+        {
+            if (strcmp(gDebugWatches[i].expr, arg) == 0)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0)
+            return false;
+    }
+
+    for (int i = idx + 1; i < gDebugWatchCount; i++)
+        gDebugWatches[i - 1] = gDebugWatches[i];
+    gDebugWatchCount--;
+    return true;
+}
+
+static void debuggerListWatches(void)
+{
+    if (gDebugWatchCount == 0)
+    {
+        fprintf(stderr, "No watches set.\n");
+        return;
+    }
+
+    fprintf(stderr, "Watches:\n");
+    for (int i = 0; i < gDebugWatchCount; i++)
+        fprintf(stderr, "  [%d] %s\n", i, gDebugWatches[i].expr);
+}
+
+static void debuggerFormatValue(Value v, char *buf, size_t cap)
+{
+    if (cap == 0)
+        return;
+    buf[0] = '\0';
+
+    switch (VALUE_TYPE(v))
+    {
+    case VAL_NIL:
+        snprintf(buf, cap, "null");
+        return;
+    case VAL_BOOL:
+        snprintf(buf, cap, "%s", AS_BOOL(v) ? "true" : "false");
+        return;
+    case VAL_NUMBER:
+        snprintf(buf, cap, "%.15g", AS_NUM(v));
+        return;
+    case VAL_OBJ:
+        break;
+    }
+
+    switch (AS_OBJ(v)->type)
+    {
+    case OBJ_STRING:
+        snprintf(buf, cap, "\"%s\"", AS_STR(v)->chars);
+        break;
+    case OBJ_LIST:
+        snprintf(buf, cap, "list(len=%d)@%p", AS_LIST(v)->count, (void *)AS_LIST(v));
+        break;
+    case OBJ_MAP:
+        snprintf(buf, cap, "map(size=%d)@%p", AS_MAP(v)->map.count, (void *)AS_MAP(v));
+        break;
+    case OBJ_CLASS:
+        snprintf(buf, cap, "%s class", AS_CLASS(v)->name->chars);
+        break;
+    case OBJ_INSTANCE:
+        snprintf(buf, cap, "%s@%p", AS_INSTANCE(v)->klass->name->chars, (void *)AS_INSTANCE(v));
+        break;
+    case OBJ_FUNCTION:
+    {
+        ObjFunction *f = AS_FUN(v);
+        snprintf(buf, cap, "<fn %s>", f->name == NULL ? "script" : f->name->chars);
+        break;
+    }
+    case OBJ_CLOSURE:
+    {
+        ObjFunction *f = AS_CLOSURE(v)->function;
+        snprintf(buf, cap, "<closure %s>", f->name == NULL ? "script" : f->name->chars);
+        break;
+    }
+    case OBJ_NATIVE:
+        snprintf(buf, cap, "<native fn>");
+        break;
+    case OBJ_BOUND_METHOD:
+    {
+        ObjFunction *f = AS_BOUND_METHOD(v)->method->function;
+        snprintf(buf, cap, "<bound method %s>", f->name == NULL ? "script" : f->name->chars);
+        break;
+    }
+    case OBJ_BOUND_BUILTIN:
+        snprintf(buf, cap, "<bound native method>");
+        break;
+    case OBJ_UPVALUE:
+        snprintf(buf, cap, "upvalue");
+        break;
+    case OBJ_SLICE:
+        snprintf(buf, cap, "slice(%d:%d:%d)", AS_SLICE(v)->start, AS_SLICE(v)->end, AS_SLICE(v)->step);
+        break;
+    case OBJ_FOREIGN:
+    {
+        ObjForeign *o = AS_FOREIGN(v);
+        snprintf(buf, cap, "%s f<%p>", FOREIGN_TYPES[o->type], o->ptr);
+        break;
+    }
+    default:
+        snprintf(buf, cap, "<obj@%p>", (void *)AS_OBJ(v));
+        break;
+    }
+}
+
+static void debuggerPrintSourceLine(Position pos)
+{
+    if (pos.lineStart == NULL)
+    {
+        fprintf(stderr, "(source unavailable)\n");
+        return;
+    }
+
+    int lineLen = 0;
+    while (pos.lineStart[lineLen] != '\n' && pos.lineStart[lineLen] != '\0')
+        lineLen++;
+
+    fprintf(stderr, "%.*s\n", lineLen, pos.lineStart);
+    for (int i = 1; i < pos.col; i++)
+        fputc('-', stderr);
+    fputc('^', stderr);
+    fputc('\n', stderr);
+}
+
+static void debuggerPrintCurrentPosition(CallFrame *frame)
+{
+    int offset = debuggerCurrentOffset(frame);
+    Position pos = getPos(&frame->closure->function->chunk, offset);
+    ObjFunction *function = frame->closure->function;
+    const char *fname = function->name == NULL ? "script" : function->name->chars;
+
+    fprintf(stderr, "%s:%d:%d in %s() offset=%d\n", pos.file, pos.line, pos.col, fname, offset);
+    debuggerPrintSourceLine(pos);
+}
+
+static void debuggerPrintStack(void)
+{
+    fprintf(stderr, "Stack by frame (frameCount=%d):\n", vm.frameCount);
+    for (int fi = 0; fi < vm.frameCount; fi++)
+    {
+        CallFrame *f = &vm.frames[fi];
+        Value *start = f->slots;
+        Value *end = (fi + 1 < vm.frameCount) ? vm.frames[fi + 1].slots : vm.stackTop;
+        int count = (int)(end - start);
+
+        ObjFunction *fn = f->closure->function;
+        const char *fname = fn->name == NULL ? "script" : fn->name->chars;
+        fprintf(stderr, "  frame #%d %s slots[%ld..%ld) count=%d%s\n",
+                fi,
+                fname,
+                (long)(start - vm.stack),
+                (long)(end - vm.stack),
+                count,
+                (fi == vm.frameCount - 1) ? " <-- current" : "");
+
+        for (Value *slot = start; slot < end; slot++)
+        {
+            char valueBuf[1024];
+            debuggerFormatValue(*slot, valueBuf, sizeof(valueBuf));
+            fprintf(stderr, "    [%ld] %s\n", (long)(slot - vm.stack), valueBuf);
+        }
+    }
+}
+
+static bool debuggerLookupLocal(CallFrame *frame, const char *query, int *localIndexOut)
+{
+    if (query == NULL || *query == '\0')
+        return false;
+
+    char *end = NULL;
+    long localIndex = strtol(query, &end, 10);
+    int localCount = (int)(vm.stackTop - frame->slots);
+    if (end != query && *end == '\0')
+    {
+        if (localIndex >= 0 && localIndex < localCount)
+        {
+            *localIndexOut = (int)localIndex;
+            return true;
+        }
+        return false;
+    }
+
+    if (strcmp(query, "this") == 0 || strcmp(query, "callee") == 0)
+    {
+        *localIndexOut = 0;
+        return true;
+    }
+
+    ObjFunction *function = frame->closure->function;
+    for (int i = 0; i < localCount; i++)
+    {
+        ObjString *localName = getFunctionLocalName(function, i);
+        if (localName != NULL && strcmp(localName->chars, query) == 0)
+        {
+            *localIndexOut = i;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void debuggerPrintOneLocal(CallFrame *frame, int index)
+{
+    ObjFunction *function = frame->closure->function;
+    Value *base = frame->slots;
+    int localCount = (int)(vm.stackTop - base);
+    if (index < 0 || index >= localCount)
+    {
+        fprintf(stderr, "Local index out of range.\n");
+        return;
+    }
+
+    long absIndex = (long)((base + index) - vm.stack);
+    char valueBuf[1024];
+    debuggerFormatValue(base[index], valueBuf, sizeof(valueBuf));
+    ObjString *localName = getFunctionLocalName(function, index);
+
+    if (index == 0)
+    {
+        if (localName != NULL)
+            fprintf(stderr, "local[%d] @stack[%ld] %s = %s\n", index, absIndex, localName->chars, valueBuf);
+        else
+            fprintf(stderr, "local[%d] @stack[%ld] this/callee = %s\n", index, absIndex, valueBuf);
+    }
+    else if (localName != NULL)
+    {
+        fprintf(stderr, "local[%d] @stack[%ld] %s = %s\n", index, absIndex, localName->chars, valueBuf);
+    }
+    else
+    {
+        fprintf(stderr, "local[%d] @stack[%ld] = %s\n", index, absIndex, valueBuf);
+    }
+}
+
+static void debuggerPrintLocals(CallFrame *frame)
+{
+    ObjFunction *function = frame->closure->function;
+    Value *base = frame->slots;
+    Value *top = vm.stackTop;
+    int localCount = (int)(top - base);
+
+    fprintf(stderr, "Locals for %s() [slot base=%ld, count=%d]\n",
+            function->name == NULL ? "script" : function->name->chars,
+            (long)(base - vm.stack),
+            localCount);
+
+    for (int i = 0; i < localCount; i++)
+    {
+        fprintf(stderr, "  ");
+        debuggerPrintOneLocal(frame, i);
+    }
+}
+
+static void debuggerPrintWatchValues(CallFrame *frame)
+{
+    if (gDebugWatchCount == 0)
+        return;
+
+    fprintf(stderr, "Watched values:\n");
+    for (int i = 0; i < gDebugWatchCount; i++)
+    {
+        const char *expr = gDebugWatches[i].expr;
+        int localIndex = -1;
+        if (!debuggerLookupLocal(frame, expr, &localIndex))
+        {
+            fprintf(stderr, "  [%d] %s = <unavailable in current frame>\n", i, expr);
+            continue;
+        }
+
+        Value *base = frame->slots;
+        char valueBuf[1024];
+        debuggerFormatValue(base[localIndex], valueBuf, sizeof(valueBuf));
+        fprintf(stderr, "  [%d] %s = %s\n", i, expr, valueBuf);
+    }
+}
+
+static void debuggerPrintBacktrace(void)
+{
+    fprintf(stderr, "Backtrace (most recent frame last):\n");
+    for (int i = 0; i < vm.frameCount; i++)
+    {
+        CallFrame *f = &vm.frames[i];
+        ObjFunction *function = f->closure->function;
+        int inst = (int)(f->ip - function->chunk.code);
+        if (inst > 0)
+            inst -= 1;
+        Position pos = getPos(&function->chunk, inst);
+
+        const char *fname = function->name == NULL ? "script" : function->name->chars;
+        fprintf(stderr, "  #%d %s at %s:%d:%d (offset=%d)\n", i, fname, pos.file, pos.line, pos.col, inst);
+    }
+}
+
+static bool debuggerMatchBreakpoint(CallFrame *frame, int *matchedIndex)
+{
+    int offset = debuggerCurrentOffset(frame);
+    Position pos = getPos(&frame->closure->function->chunk, offset);
+
+    for (int i = 0; i < gDebugBreakpointCount; i++)
+    {
+        DebugBreakpoint *bp = &gDebugBreakpoints[i];
+        if (bp->type == DBG_BP_OFFSET && bp->value == offset)
+        {
+            if (matchedIndex)
+                *matchedIndex = i;
+            return true;
+        }
+        if (bp->type == DBG_BP_LINE && bp->value == pos.line)
+        {
+            if (!debuggerFileMatches(bp->file, pos.file))
+                continue;
+            if (matchedIndex)
+                *matchedIndex = i;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void debuggerPrintHelp(void)
+{
+    fprintf(stderr,
+            "Debugger commands:\n"
+            "  c | continue          Continue execution\n"
+            "  s | step              Step one instruction\n"
+            "  n | next              Alias for step\n"
+            "  b <line>              Add line breakpoint (any file)\n"
+            "  b <file>:<line>       Add line breakpoint in specific file\n"
+            "  bo <offset>           Add offset breakpoint\n"
+            "  bl | breaks           List breakpoints\n"
+            "  del <id>              Delete breakpoint by id\n"
+            "  clear                 Clear all breakpoints\n"
+            "  p | pos               Print current position\n"
+            "  l | line              Print current source line\n"
+            "  dis [n]               Disassemble current instruction(s)\n"
+            "  stack                 Print stack grouped by frame\n"
+            "  locals [name|index]   Print locals or one specific local\n"
+            "  v <name|index>        Alias for specific local value\n"
+            "  watch [name|index]    List watches or add local watch\n"
+            "  unwatch <id|expr>     Remove watch by id or expression\n"
+            "  clearwatch            Clear all watches\n"
+            "  bt                    Print backtrace\n"
+            "  q | quit              Stop execution\n"
+            "  h | help              Show this help\n");
+}
+
+static bool debuggerPrompt(CallFrame *frame, bool breakpointHit, int breakpointIndex)
+{
+    int offset = debuggerCurrentOffset(frame);
+    Position pos = getPos(&frame->closure->function->chunk, offset);
+
+    ObjFunction *function = frame->closure->function;
+    const char *fname = function->name == NULL ? "script" : function->name->chars;
+
+    fprintf(stderr, "\n[debug] paused at %s:%d:%d in %s() offset=%d", pos.file, pos.line, pos.col, fname, offset);
+    if (breakpointHit)
+        fprintf(stderr, " [breakpoint %d]", breakpointIndex);
+    fprintf(stderr, "\n");
+
+    debuggerPrintSourceLine(pos);
+    disassembleInst(&frame->closure->function->chunk, offset);
+    debuggerPrintWatchValues(frame);
+
+    char line[256];
+    for (;;)
+    {
+        bool usedScript = debuggerNextScriptCommand(line, sizeof(line));
+        if (usedScript)
+        {
+            fprintf(stderr, "(dbg:auto) %s\n", line);
+        }
+        else
+        {
+            fprintf(stderr, "(dbg) ");
+            fflush(stderr);
+
+            if (fgets(line, sizeof(line), stdin) == NULL)
+            {
+                runtimeError("Debugger input ended.");
+                return false;
+            }
+        }
+
+        char *cmd = trim(line);
+        if (*cmd == '\0')
+            continue;
+
+        if (strcmp(cmd, "c") == 0 || strcmp(cmd, "continue") == 0)
+        {
+            gDebuggerStepMode = false;
+            gDebuggerPauseNext = false;
+            return true;
+        }
+        if (strcmp(cmd, "s") == 0 || strcmp(cmd, "step") == 0 || strcmp(cmd, "n") == 0 || strcmp(cmd, "next") == 0)
+        {
+            gDebuggerStepMode = true;
+            gDebuggerPauseNext = false;
+            return true;
+        }
+        if (strcmp(cmd, "p") == 0 || strcmp(cmd, "pos") == 0)
+        {
+            debuggerPrintCurrentPosition(frame);
+            continue;
+        }
+        if (strcmp(cmd, "l") == 0 || strcmp(cmd, "line") == 0)
+        {
+            debuggerPrintSourceLine(pos);
+            continue;
+        }
+        if (strcmp(cmd, "stack") == 0)
+        {
+            debuggerPrintStack();
+            continue;
+        }
+        if (strcmp(cmd, "locals") == 0 || strcmp(cmd, "loc") == 0)
+        {
+            debuggerPrintLocals(frame);
+            continue;
+        }
+        if (strncmp(cmd, "locals ", 7) == 0 || strncmp(cmd, "loc ", 4) == 0 || strncmp(cmd, "v ", 2) == 0 || strncmp(cmd, "inspect ", 8) == 0 || strncmp(cmd, "i ", 2) == 0)
+        {
+            char *arg = cmd;
+            if (strncmp(cmd, "locals ", 7) == 0)
+                arg = cmd + 7;
+            else if (strncmp(cmd, "loc ", 4) == 0)
+                arg = cmd + 4;
+            else if (strncmp(cmd, "inspect ", 8) == 0)
+                arg = cmd + 8;
+            else if (strncmp(cmd, "i ", 2) == 0)
+                arg = cmd + 2;
+            else
+                arg = cmd + 2;
+
+            int localIndex = -1;
+            if (!debuggerLookupLocal(frame, arg, &localIndex))
+                fprintf(stderr, "Unknown local '%s'. Use 'locals' to list available locals.\n", arg);
+            else
+                debuggerPrintOneLocal(frame, localIndex);
+            continue;
+        }
+        if (strcmp(cmd, "bt") == 0)
+        {
+            debuggerPrintBacktrace();
+            continue;
+        }
+        if (strcmp(cmd, "bl") == 0 || strcmp(cmd, "breaks") == 0)
+        {
+            debuggerListBreakpoints();
+            continue;
+        }
+        if (strcmp(cmd, "clear") == 0)
+        {
+            gDebugBreakpointCount = 0;
+            fprintf(stderr, "Cleared all breakpoints.\n");
+            continue;
+        }
+        if (strcmp(cmd, "watch") == 0 || strcmp(cmd, "w") == 0)
+        {
+            debuggerListWatches();
+            debuggerPrintWatchValues(frame);
+            continue;
+        }
+        if (strncmp(cmd, "watch ", 6) == 0 || strncmp(cmd, "w ", 2) == 0)
+        {
+            char *arg = (strncmp(cmd, "watch ", 6) == 0) ? (cmd + 6) : (cmd + 2);
+            if (debuggerAddWatch(arg))
+            {
+                fprintf(stderr, "Added watch '%s'.\n", arg);
+                debuggerPrintWatchValues(frame);
+            }
+            else
+                fprintf(stderr, "Usage: watch <name|index>\n");
+            continue;
+        }
+        if (strncmp(cmd, "unwatch ", 8) == 0)
+        {
+            char *arg = cmd + 8;
+            if (debuggerDeleteWatch(arg))
+                fprintf(stderr, "Removed watch '%s'.\n", arg);
+            else
+                fprintf(stderr, "Unknown watch '%s'.\n", arg);
+            continue;
+        }
+        if (strcmp(cmd, "clearwatch") == 0)
+        {
+            gDebugWatchCount = 0;
+            fprintf(stderr, "Cleared all watches.\n");
+            continue;
+        }
+        if (strncmp(cmd, "del ", 4) == 0)
+        {
+            char *arg = cmd + 4;
+            char *end = NULL;
+            long id = strtol(arg, &end, 10);
+            if (end == arg || *end != '\0' || !debuggerDeleteBreakpoint((int)id))
+                fprintf(stderr, "Invalid breakpoint id.\n");
+            else
+                fprintf(stderr, "Deleted breakpoint %ld.\n", id);
+            continue;
+        }
+        if (strncmp(cmd, "b ", 2) == 0)
+        {
+            char *arg = cmd + 2;
+            char *colon = strrchr(arg, ':');
+            if (colon != NULL)
+            {
+                char filePart[256] = {0};
+                size_t fileLen = (size_t)(colon - arg);
+                if (fileLen == 0 || fileLen >= sizeof(filePart))
+                {
+                    fprintf(stderr, "Usage: b <file>:<line>\n");
+                    continue;
+                }
+                memcpy(filePart, arg, fileLen);
+                filePart[fileLen] = '\0';
+
+                char *lineText = colon + 1;
+                char *end = NULL;
+                long lineNum = strtol(lineText, &end, 10);
+                if (end == lineText || *end != '\0' || lineNum <= 0)
+                    fprintf(stderr, "Usage: b <file>:<line>\n");
+                else if (debuggerAddBreakpoint(DBG_BP_LINE, (int)lineNum, filePart))
+                    fprintf(stderr, "Added line breakpoint at %s:%ld.\n", filePart, lineNum);
+            }
+            else
+            {
+                char *end = NULL;
+                long lineNum = strtol(arg, &end, 10);
+                if (end == arg || *end != '\0' || lineNum <= 0)
+                    fprintf(stderr, "Usage: b <line>\n");
+                else if (debuggerAddBreakpoint(DBG_BP_LINE, (int)lineNum, NULL))
+                    fprintf(stderr, "Added line breakpoint at %ld.\n", lineNum);
+            }
+            continue;
+        }
+        if (strncmp(cmd, "bo ", 3) == 0)
+        {
+            char *arg = cmd + 3;
+            char *end = NULL;
+            long off = strtol(arg, &end, 10);
+            if (end == arg || *end != '\0' || off < 0)
+                fprintf(stderr, "Usage: bo <offset>\n");
+            else if (debuggerAddBreakpoint(DBG_BP_OFFSET, (int)off, NULL))
+                fprintf(stderr, "Added offset breakpoint at %ld.\n", off);
+            continue;
+        }
+        if (strncmp(cmd, "dis", 3) == 0)
+        {
+            int count = 1;
+            if (cmd[3] == ' ')
+            {
+                char *arg = cmd + 4;
+                char *end = NULL;
+                long n = strtol(arg, &end, 10);
+                if (end != arg && *end == '\0' && n > 0)
+                    count = (int)n;
+            }
+
+            int off = offset;
+            for (int i = 0; i < count && off < frame->closure->function->chunk.size; i++)
+                off = disassembleInst(&frame->closure->function->chunk, off);
+            continue;
+        }
+        if (strcmp(cmd, "q") == 0 || strcmp(cmd, "quit") == 0)
+        {
+            runtimeError("Execution aborted by debugger.");
+            return false;
+        }
+        if (strcmp(cmd, "h") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0)
+        {
+            debuggerPrintHelp();
+            continue;
+        }
+
+        fprintf(stderr, "Unknown debugger command: '%s'\n", cmd);
+        debuggerPrintHelp();
+    }
+}
+
 static bool isFalsey(Value value)
 {
-    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0) || (IS_MAP(value) && AS_MAP(value)->count == 0);
+    return IS_NIL(value) || (IS_BOOL(value) && !(AS_BOOL(value))) || (IS_NUM(value) && AS_NUM(value) == 0) || (IS_STR(value) && AS_STR(value)->len == 0) || (IS_LIST(value) && AS_LIST(value)->count == 0) || (IS_MAP(value) && AS_MAP(value)->map.count == 0);
 }
 
 Value peek(int dist)
@@ -134,7 +939,7 @@ ObjClass *getVmClass(Value val)
 
 bool checkIfValuesEqual(Value a, Value b)
 {
-    if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
+    if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
     {
         int frameCount = vm.frameCount;
         push(a);
@@ -155,12 +960,12 @@ bool checkIfValuesEqual(Value a, Value b)
 
 static uint32_t hashValueShallow(Value value)
 {
-    switch (value.type)
+    switch (VALUE_TYPE(value))
     {
     case VAL_NUMBER:
-        return value.as.number;
+        return hashNumberBits(AS_NUM(value));
     case VAL_BOOL:
-        return value.as.boolean;
+        return AS_BOOL(value) ? 2u : 1u;
     case VAL_NIL:
         return 0;
     case VAL_OBJ:
@@ -195,7 +1000,7 @@ static uint32_t hashValueShallow(Value value)
             // hash the pointer
             return (uint32_t)(uintptr_t)AS_BOUND_BUILTIN(value);
         case OBJ_UPVALUE:
-            return (uint32_t)(uintptr_t)value.as.obj;
+            return (uint32_t)(uintptr_t)AS_OBJ(value);
         case OBJ_MAP:
         {
             uint32_t hash = 0;
@@ -220,13 +1025,33 @@ static uint32_t hashValueShallow(Value value)
     }
 }
 
+static uint32_t hashValueForMapKey(Value value)
+{
+    if (IS_NUM(value))
+    {
+        uint64_t bits = 0;
+        double number = AS_NUM(value);
+        memcpy(&bits, &number, sizeof(double));
+        return (uint32_t)(bits ^ (bits >> 32));
+    }
+    if (IS_BOOL(value))
+        return AS_BOOL(value) ? 2u : 1u;
+    if (IS_NIL(value))
+        return 0;
+    if (IS_STR(value))
+        return AS_STR(value)->hash;
+
+    if (VALUE_TYPE(value) == VAL_OBJ && IS_INSTANCE(value) && !IS_NIL(AS_INSTANCE(value)->klass->hashFn))
+        return hashValueDeep(value);
+
+    return hashValueShallow(value);
+}
+
 static uint32_t hashValueDeep(Value value)
 {
-    if (value.type == VAL_OBJ && IS_INSTANCE(value) && !IS_NIL(AS_INSTANCE(value)->klass->hashFn))
+    if (VALUE_TYPE(value) == VAL_OBJ && IS_INSTANCE(value) && !IS_NIL(AS_INSTANCE(value)->klass->hashFn))
     {
-        Value *stop = vm.stackTop;
         int frameCount = vm.frameCount;
-        ObjUpvalue *upvalues = vm.openUpvalues;
         push(value);
         if (!invoke(vm.hashStr, 0))
             return 0;
@@ -243,16 +1068,23 @@ static uint32_t hashValueDeep(Value value)
         return hashValueShallow(value);
 }
 
-MapEntry *findMapEntry(MapEntry *entries, int capacity, Value key)
+MapEntry *findMapEntry(MapEntry *entries, int capacity, Value key, uint32_t keyHash)
 {
-    uint32_t index = hashValueDeep(key) & (capacity - 1);
+    uint32_t index = keyHash & (capacity - 1);
+    MapEntry *tombstone = NULL;
     for (;;)
     {
         MapEntry *entry = &entries[index];
         if (!entry->isUsed)
+        {
+            if (!entry->isTombstone)
+                return tombstone != NULL ? tombstone : entry;
+            if (tombstone == NULL)
+                tombstone = entry;
+        }
+        else if (entry->keyHash == keyHash && checkIfValuesEqual(entry->key, key))
             return entry;
-        else if (checkIfValuesEqual(entry->key, key))
-            return entry;
+
         index = (index + 1) & (capacity - 1);
     }
 }
@@ -261,7 +1093,8 @@ bool mapGet(Map *map, Value key, Value *valueOut)
 {
     if (map->count == 0)
         return false;
-    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    uint32_t keyHash = hashValueForMapKey(key);
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key, keyHash);
     if (!entry->isUsed)
         return false;
     *valueOut = entry->value;
@@ -275,7 +1108,9 @@ static void adjustMapCapacity(Map *map, int capacity)
     {
         entries[i].key = NIL_VAL;
         entries[i].value = NIL_VAL;
+        entries[i].keyHash = 0;
         entries[i].isUsed = false;
+        entries[i].isTombstone = false;
     }
     map->count = 0;
     for (int i = 0; i < map->capacity; i++)
@@ -284,15 +1119,33 @@ static void adjustMapCapacity(Map *map, int capacity)
         if (!entry->isUsed)
             continue;
 
-        MapEntry *dest = findMapEntry(entries, capacity, entry->key);
+        MapEntry *dest = findMapEntry(entries, capacity, entry->key, entry->keyHash);
         dest->key = entry->key;
         dest->value = entry->value;
+        dest->keyHash = entry->keyHash;
         dest->isUsed = true;
+        dest->isTombstone = false;
         map->count++;
     }
     FREE_ARRAY(MapEntry, map->entries, map->capacity);
     map->entries = entries;
     map->capacity = capacity;
+}
+
+static inline void maybeShrinkMap(Map *map)
+{
+    if (map->capacity <= 8)
+        return;
+
+    if ((map->count * 4) >= map->capacity)
+        return;
+
+    int newCapacity = map->capacity / 2;
+    if (newCapacity < 8)
+        newCapacity = 8;
+
+    if (newCapacity != map->capacity)
+        adjustMapCapacity(map, newCapacity);
 }
 
 bool mapSet(Map *map, Value key, Value value)
@@ -303,13 +1156,16 @@ bool mapSet(Map *map, Value key, Value value)
         adjustMapCapacity(map, newCap);
     }
 
-    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    uint32_t keyHash = hashValueForMapKey(key);
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key, keyHash);
     bool isNewKey = !entry->isUsed;
     if (isNewKey)
         map->count++;
     entry->key = key;
     entry->value = value;
+    entry->keyHash = keyHash;
     entry->isUsed = true;
+    entry->isTombstone = false;
     return isNewKey;
 }
 
@@ -317,13 +1173,17 @@ bool mapDelete(Map *map, Value key)
 {
     if (map->count == 0)
         return false;
-    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    uint32_t keyHash = hashValueForMapKey(key);
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key, keyHash);
     if (!entry->isUsed)
         return false;
     map->count--;
     entry->key = NIL_VAL;
     entry->value = BOOL_VAL(true);
+    entry->keyHash = 0;
     entry->isUsed = false;
+    entry->isTombstone = true;
+    maybeShrinkMap(map);
     return true;
 }
 
@@ -331,7 +1191,8 @@ bool mapContainsKey(Map *map, Value key)
 {
     if (map->count == 0)
         return false;
-    MapEntry *entry = findMapEntry(map->entries, map->capacity, key);
+    uint32_t keyHash = hashValueForMapKey(key);
+    MapEntry *entry = findMapEntry(map->entries, map->capacity, key, keyHash);
     return entry->isUsed;
 }
 
@@ -340,11 +1201,18 @@ void mapRemoveWhite(Map *map)
     for (int i = 0; i < map->capacity; i++)
     {
         MapEntry *entry = &map->entries[i];
-        if (entry->isUsed && !entry->key.as.obj->isMarked)
+        if (entry->isUsed && IS_OBJ(entry->key) && !AS_OBJ(entry->key)->isMarked)
         {
-            mapDelete(map, entry->key);
+            map->count--;
+            entry->key = NIL_VAL;
+            entry->value = BOOL_VAL(true);
+            entry->keyHash = 0;
+            entry->isUsed = false;
+            entry->isTombstone = true;
         }
     }
+
+    maybeShrinkMap(map);
 }
 
 void printMap(Map *map)
@@ -363,10 +1231,118 @@ void printMap(Map *map)
     }
 }
 
-static char *mapToString(Map *map, char *buff, int *len)
+static void snapshotGlobals(Table *snapshot)
 {
-    int index = 0;
-    buff[index++] = '{';
+    initTable(snapshot);
+    tableAddAll(&vm.globals, snapshot);
+}
+
+static ObjMap *collectGlobalDiff(Table *before)
+{
+    ObjMap *exports = newMap();
+    push(OBJ_VAL(exports));
+
+    for (int i = 0; i < vm.globals.capacity; i++)
+    {
+        Entry *entry = &vm.globals.entries[i];
+        if (entry->key == NULL)
+            continue;
+
+        Value oldValue;
+        if (!tableGet(before, entry->key, &oldValue) || !valuesEqual(oldValue, entry->value))
+            mapSet(&exports->map, OBJ_VAL(entry->key), entry->value);
+    }
+
+    pop();
+    return exports;
+}
+
+static size_t appendChar(char *buff, size_t cap, size_t index, char ch)
+{
+    if (cap == 0)
+    {
+        gStringifyTruncated = true;
+        return 0;
+    }
+    if (index < cap - 1)
+    {
+        buff[index++] = ch;
+        buff[index] = '\0';
+    }
+    else
+    {
+        gStringifyTruncated = true;
+    }
+    return index;
+}
+
+static size_t appendLiteral(char *buff, size_t cap, size_t index, const char *literal)
+{
+    if (cap == 0)
+    {
+        gStringifyTruncated = true;
+        return 0;
+    }
+
+    size_t remaining = index < cap ? cap - index : 0;
+    if (remaining <= 1)
+    {
+        gStringifyTruncated = true;
+        return index;
+    }
+
+    int written = snprintf(buff + index, remaining, "%s", literal);
+    if (written < 0)
+        return index;
+
+    size_t advanced = (size_t)written;
+    if (advanced >= remaining)
+    {
+        gStringifyTruncated = true;
+        return cap - 1;
+    }
+    return index + advanced;
+}
+
+static size_t appendFormat(char *buff, size_t cap, size_t index, const char *fmt, ...)
+{
+    if (cap == 0)
+    {
+        gStringifyTruncated = true;
+        return 0;
+    }
+
+    size_t remaining = index < cap ? cap - index : 0;
+    if (remaining <= 1)
+    {
+        gStringifyTruncated = true;
+        return index;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buff + index, remaining, fmt, args);
+    va_end(args);
+
+    if (written < 0)
+        return index;
+
+    size_t advanced = (size_t)written;
+    if (advanced >= remaining)
+    {
+        gStringifyTruncated = true;
+        return cap - 1;
+    }
+    return index + advanced;
+}
+
+static char *mapToString(Map *map, char *buff, size_t cap, int *len)
+{
+    size_t index = 0;
+    if (cap > 0)
+        buff[0] = '\0';
+
+    index = appendChar(buff, cap, index, '{');
     for (int i = 0; i < map->capacity; i++)
     {
         MapEntry *entry = &map->entries[i];
@@ -376,41 +1352,50 @@ static char *mapToString(Map *map, char *buff, int *len)
         char *key;
         if (IS_MAP(entry->key) && &(AS_MAP(entry->key)->map) == map)
         {
-
-            buff[index++] = '{';
-            buff[index++] = '.';
-            buff[index++] = '.';
-            buff[index++] = '.';
-            buff[index++] = '}';
+            index = appendLiteral(buff, cap, index, "{...}");
         }
         else
         {
-            key = valueToString(entry->key, buff + index, len);
+            size_t remaining = index < cap ? cap - index : 0;
+            key = valueToStringSized(entry->key, buff + index, remaining, len);
             index += *len;
+            if (cap > 0 && index >= cap)
+                index = cap - 1;
         }
-        buff[index++] = ':';
+        index = appendChar(buff, cap, index, ':');
         char *value;
         if (IS_MAP(entry->value) && &(AS_MAP(entry->value)->map) == map)
         {
-            buff[index++] = '{';
-            buff[index++] = '.';
-            buff[index++] = '.';
-            buff[index++] = '.';
-            buff[index++] = '}';
+            index = appendLiteral(buff, cap, index, "{...}");
         }
         else
         {
-            value = valueToString(entry->value, buff + index, len);
+            size_t remaining = index < cap ? cap - index : 0;
+            value = valueToStringSized(entry->value, buff + index, remaining, len);
             index += *len;
+            if (cap > 0 && index >= cap)
+                index = cap - 1;
         }
-        buff[index++] = ',';
+        index = appendChar(buff, cap, index, ',');
     }
-    if (map->count > 0)
-        buff[--index] = '}';
+    if (map->count > 0 && index > 0)
+    {
+        index--;
+        if (cap > 0 && index < cap)
+            buff[index] = '}';
+        index++;
+    }
     else
-        buff[index] = '}';
-    buff[++index] = '\0';
-    *len = index;
+        index = appendChar(buff, cap, index, '}');
+
+    if (cap > 0)
+    {
+        if (index >= cap)
+            index = cap - 1;
+        buff[index] = '\0';
+    }
+
+    *len = (int)index;
     return buff;
 }
 
@@ -429,12 +1414,15 @@ static Value fOpenNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(argv[0]) || !IS_STR(argv[1]))
     {
-        runtimeError("'fopen()' expects 2 strings as arguments but got '%s' and '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type]);
+        runtimeError("'fopen()' expects 2 strings as arguments but got '%s' and '%s'", valueTypeName(argv[0]), valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
     char *mode = AS_CSTR(argv[1]);
-    if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 && strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0)
+    if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 &&
+        strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0 &&
+        strcmp(mode, "rb") != 0 && strcmp(mode, "wb") != 0 && strcmp(mode, "ab") != 0 &&
+        strcmp(mode, "rb+") != 0 && strcmp(mode, "wb+") != 0 && strcmp(mode, "ab+") != 0)
     {
         runtimeError("Invalid mode '%s' for 'fopen()'", mode);
         *hasError = true;
@@ -462,7 +1450,7 @@ static Value fCloseNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_FOREIGN_TYPE(argv[0], TYPE_FILE))
     {
-        runtimeError("'fclose()' expects a file pointer as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'fclose()' expects a file pointer as argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -494,7 +1482,6 @@ static Value offsetNative(int argc, Value *argv, bool *hasError, bool *pushedVal
 NATIVE_FN(testRinitNative)
 {
     int ret = tb_init();
-    printf("WOP\n");
     return NUM_VAL(ret);
     // POINTER_VAL(vm.stackTop);
 }
@@ -513,6 +1500,7 @@ NATIVE_FN(testRpresentNative)
 
 NATIVE_FN(testRcloseNative)
 {
+    // tb_reset();
     int ret = tb_shutdown();
 
     return NUM_VAL(ret);
@@ -553,7 +1541,7 @@ NATIVE_FN(testRprintNative)
 
     if (!IS_NUM(argv[0]) || !IS_NUM(argv[1]) || !IS_NUM(argv[2]) || !IS_NUM(argv[3]) || !IS_STR(argv[4]))
     {
-        runtimeError("'print()' expects 5 numbers and a string as arguments but got '%s', '%s', '%s', '%s', '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type], VALUE_TYPES[argv[2].type], VALUE_TYPES[argv[3].type], VALUE_TYPES[argv[4].type]);
+        runtimeError("'print()' expects 5 numbers and a string as arguments but got '%s', '%s', '%s', '%s', '%s'", valueTypeName(argv[0]), valueTypeName(argv[1]), valueTypeName(argv[2]), valueTypeName(argv[3]), valueTypeName(argv[4]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -579,7 +1567,7 @@ NATIVE_FN(testRsetCellNative)
 
     if (!IS_NUM(argv[0]) || !IS_NUM(argv[1]) || !IS_NUM(argv[2]) || !IS_NUM(argv[3]) || !IS_NUM(argv[4]))
     {
-        runtimeError("'setCell()' expects 5 numbers as arguments but got '%s', '%s', '%s', '%s', '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type], VALUE_TYPES[argv[2].type], VALUE_TYPES[argv[3].type], VALUE_TYPES[argv[4].type]);
+        runtimeError("'setCell()' expects 5 numbers as arguments but got '%s', '%s', '%s', '%s', '%s'", valueTypeName(argv[0]), valueTypeName(argv[1]), valueTypeName(argv[2]), valueTypeName(argv[3]), valueTypeName(argv[4]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -629,7 +1617,7 @@ NATIVE_FN(fileExistsNative)
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for fileExists(path)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for fileExists(path)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -648,7 +1636,7 @@ NATIVE_FN(fileSizeNative)
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for fileSize(path)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for fileSize(path)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -673,7 +1661,7 @@ NATIVE_FN(fileClassExistsNative)
     }
     if (!IS_CLASS(peek(argc)))
     {
-        runtimeError("Expected a File to be caller but got '%s' for File.exists()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a File to be caller but got '%s' for File.exists()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -687,7 +1675,7 @@ NATIVE_FN(fileFSizeNative)
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.size()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.size()' expects a file pointer as argument but got '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -702,7 +1690,7 @@ NATIVE_FN(fileFSizeNative)
     FILE *fp = f->ptr;
     if (fseek(fp, 0, SEEK_END) < 0)
     {
-        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", valueTypeName(peek(argc)));
         tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(true));
         fclose(fp);
         *hasError = true;
@@ -719,7 +1707,7 @@ NATIVE_FN(fileCloseNative)
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.close()' expects a file pointer as argument but got '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -748,7 +1736,7 @@ NATIVE_FN(fileResetCursorNative)
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.resetCursor()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.resetCursor()' expects a file pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -784,7 +1772,7 @@ NATIVE_FN(fileCursorPosition)
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.cursorPosition()' expects a file pointer to be its caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.cursorPosition()' expects a file pointer to be its caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -820,7 +1808,7 @@ static Value fileWriteNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.write()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.write()' expects a file pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -836,7 +1824,8 @@ static Value fileWriteNative(int argc, Value *argv, bool *hasError, bool *pushed
         *hasError = true;
         return NIL_VAL;
     }
-    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'r')
+    const char *modeStr = AS_CSTR(mode);
+    if (strchr(modeStr, '+') == NULL && modeStr[0] == 'r')
     {
         runtimeError("Trying to write to a file opened in read only mode (You might want to open the file with a mode of 'r+', 'w', 'w+', 'a' or 'a+' instead)");
         *hasError = true;
@@ -873,9 +1862,22 @@ static Value fileWriteNative(int argc, Value *argv, bool *hasError, bool *pushed
 static Value fileReadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
 
+    if (argc != 0 && argc != 1)
+    {
+        runtimeError("'File.read(<optional: int> size)' expects 0 or 1 arguments but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (argc == 1 && !IS_NUM(argv[0]))
+    {
+        runtimeError("'File.read(<optional: int> size)' expects a number as its first argument but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.read()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.read()' expects a file pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -890,7 +1892,8 @@ static Value fileReadNative(int argc, Value *argv, bool *hasError, bool *pushedV
         *hasError = true;
         return NIL_VAL;
     }
-    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    const char *modeStr = AS_CSTR(mode);
+    if (strchr(modeStr, '+') == NULL && modeStr[0] == 'w')
     {
         runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
         *hasError = true;
@@ -904,14 +1907,60 @@ static Value fileReadNative(int argc, Value *argv, bool *hasError, bool *pushedV
         *hasError = true;
         return NIL_VAL;
     }
-    fseek(fp, 0, SEEK_END);
-    long f_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    char *buff = ALLOCATE(char, f_size + 1);
-    size_t read = fread(buff, sizeof(char), f_size, fp);
+
+    long current = ftell(fp);
+    if (current < 0)
+    {
+        runtimeError("Failed to read cursor position for file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        runtimeError("Failed to seek to end of file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    long fileSize = ftell(fp);
+    if (fileSize < 0)
+    {
+        runtimeError("Failed to read file size for '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (fseek(fp, current, SEEK_SET) != 0)
+    {
+        runtimeError("Failed to restore cursor for file '%s'", AS_CSTR(name));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    long remaining = fileSize - current;
+    if (remaining <= 0)
+    {
+        return OBJ_VAL(copyString("", 0));
+    }
+
+    long bytesToRead = remaining;
+    if (argc == 1)
+    {
+        long requested = (long)AS_NUM(argv[0]);
+        if (requested < 0)
+        {
+            runtimeError("'File.read(size)' expects a non-negative size but got %ld", requested);
+            *hasError = true;
+            return NIL_VAL;
+        }
+        if (requested < bytesToRead)
+            bytesToRead = requested;
+    }
+
+    char *buff = ALLOCATE(char, (size_t)bytesToRead + 1);
+    size_t read = fread(buff, sizeof(char), (size_t)bytesToRead, fp);
     buff[read] = '\0';
-    Value str = OBJ_VAL(copyString(buff, (int)read));
-    FREE_ARRAY(char, buff, f_size + 1);
+
+    Value str = OBJ_VAL(copyStringUninterned(buff, (int)read));
+    FREE_ARRAY(char, buff, (size_t)bytesToRead + 1);
     return str;
 }
 
@@ -919,7 +1968,7 @@ static Value fileReadLineNative(int argc, Value *argv, bool *hasError, bool *pus
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.readLine()' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.readLine()' expects a file pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -934,7 +1983,8 @@ static Value fileReadLineNative(int argc, Value *argv, bool *hasError, bool *pus
         *hasError = true;
         return NIL_VAL;
     }
-    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    const char *modeStr = AS_CSTR(mode);
+    if (strchr(modeStr, '+') == NULL && modeStr[0] == 'w')
     {
         runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
         *hasError = true;
@@ -965,7 +2015,7 @@ static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pu
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_FILE))
     {
-        runtimeError("'File.readLines(<optional: false> includeEmptyLines)' expects a file pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'File.readLines(<optional: false> includeEmptyLines)' expects a file pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -975,7 +2025,7 @@ static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pu
     {
         if (!IS_BOOL(argv[0]))
         {
-            runtimeError("'File.readLines(optional<includeEmptyLines: false>)' expects a boolean an argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+            runtimeError("'File.readLines(optional<includeEmptyLines: false>)' expects a boolean an argument but got '%s'", valueTypeName(peek(argc)));
             *hasError = true;
             return NIL_VAL;
         }
@@ -992,7 +2042,8 @@ static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pu
         *hasError = true;
         return NIL_VAL;
     }
-    if (AS_CSTR(mode)[1] != '+' && AS_CSTR(mode)[0] == 'w')
+    const char *modeStr = AS_CSTR(mode);
+    if (strchr(modeStr, '+') == NULL && modeStr[0] == 'w')
     {
         runtimeError("Trying to read from a file opened in write only mode (You might want to open the file with a mode of 'w+', 'r', 'r+', 'a' or 'a+' instead)");
         *hasError = true;
@@ -1035,7 +2086,7 @@ NATIVE_FN(fileInitNative)
 
     if (!IS_STR(argv[0]) || (argc == 2 && !IS_STR(argv[1])))
     {
-        runtimeError("'File(<file>, optional<mode>)' expects 2 strings as arguments but got '%s' and '%s'", VALUE_TYPES[argv[0].type], VALUE_TYPES[argv[1].type]);
+        runtimeError("'File(<file>, optional<mode>)' expects 2 strings as arguments but got '%s' and '%s'", valueTypeName(argv[0]), valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1043,7 +2094,11 @@ NATIVE_FN(fileInitNative)
     if (argc == 2)
     {
         mode = AS_CSTR(argv[1]);
-        if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 && strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0 && strcmp(mode, "rw") != 0 && strcmp(mode, "rw+") != 0)
+        if (strcmp(mode, "r") != 0 && strcmp(mode, "w") != 0 && strcmp(mode, "a") != 0 &&
+            strcmp(mode, "r+") != 0 && strcmp(mode, "w+") != 0 && strcmp(mode, "a+") != 0 &&
+            strcmp(mode, "rw") != 0 && strcmp(mode, "rw+") != 0 &&
+            strcmp(mode, "rb") != 0 && strcmp(mode, "wb") != 0 && strcmp(mode, "ab") != 0 &&
+            strcmp(mode, "rb+") != 0 && strcmp(mode, "wb+") != 0 && strcmp(mode, "ab+") != 0)
         {
             runtimeError("Invalid mode '%s' for 'File(<file>, optional<mode>)'\nNOTE: Valid options are: 'r', 'w' and 'a'. You can add a '+' proceeding any mode to make create a file if it's non-exsistant.", mode);
             *hasError = true;
@@ -1084,13 +2139,13 @@ NATIVE_FN(sqlExecNative)
     }
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
     {
-        runtimeError("'SQL.exec(<query>)' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'SQL.exec(<query>)' expects a database pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("'SQL.exec(<query>)' expects a string as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'SQL.exec(<query>)' expects a string as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1114,7 +2169,7 @@ NATIVE_FN(sqlCloseNative)
 {
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
     {
-        runtimeError("'SQL.close()' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'SQL.close()' expects a database pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1150,13 +2205,13 @@ NATIVE_FN(sqlQueryNative)
     }
     if (!IS_FOREIGN_TYPE(peek(argc), TYPE_SQLITE))
     {
-        runtimeError("'SQL.query(<query>)' expects a database pointer to be it's caller but got called by: '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'SQL.query(<query>)' expects a database pointer to be it's caller but got called by: '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("'SQL.query(<query>)' expects a string as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'SQL.query(<query>)' expects a string as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1193,29 +2248,40 @@ NATIVE_FN(sqlQueryNative)
         {
             switch (sqlite3_column_type(stmt, i))
             {
-                case SQLITE_INTEGER:
-                appendToList(row, NUM_VAL(sqlite3_column_int(stmt, i)));
+            case SQLITE_INTEGER:
+            {
+                push(NUM_VAL(sqlite3_column_int(stmt, i)));
+                // appendToList(row, NUM_VAL(sqlite3_column_int(stmt, i)));
                 break;
-                case SQLITE_FLOAT:
-                appendToList(row, NUM_VAL(sqlite3_column_double(stmt, i)));
-                break;
-                case SQLITE_TEXT:
-                appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_text(stmt, i), (int)strlen((char *)sqlite3_column_text(stmt, i)))));
-                break;
-                case SQLITE_BLOB:
-                appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i))));
-                break;
-                case SQLITE_NULL:
-                appendToList(row, NIL_VAL);
-                break;
-                default:
-                appendToList(row, OBJ_VAL(copyString("UNKNOWN", 7)));
             }
+            case SQLITE_FLOAT:
+            {
+                push(NUM_VAL(sqlite3_column_double(stmt, i)));
+                // appendToList(row, NUM_VAL(sqlite3_column_double(stmt, i)));
+                break;
+            }
+            case SQLITE_TEXT:
+                push(OBJ_VAL(copyString((char *)sqlite3_column_text(stmt, i), (int)strlen((char *)sqlite3_column_text(stmt, i)))));
+                // appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_text(stmt, i), (int)strlen((char *)sqlite3_column_text(stmt, i)))));
+                break;
+            case SQLITE_BLOB:
+                push(OBJ_VAL(copyString((char *)sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i))));
+                // appendToList(row, OBJ_VAL(copyString((char *)sqlite3_column_blob(stmt, i), sqlite3_column_bytes(stmt, i))));
+                break;
+            case SQLITE_NULL:
+                push(NIL_VAL);
+                // appendToList(row, NIL_VAL);
+                break;
+            default:
+                push(OBJ_VAL(copyString("UNKNOWN", 7)));
+                // appendToList(row, OBJ_VAL(copyString("UNKNOWN", 7)));
+            }
+            appendToList(row, pop());
         }
         appendToList(rows, OBJ_VAL(row));
         pop();
     }
-    
+
     sqlite3_finalize(stmt);
     tableSet(&ret->fields, copyString("rows", 4), OBJ_VAL(rows));
     pop();
@@ -1232,7 +2298,7 @@ NATIVE_FN(sqlInitNative)
 
     if (!IS_STR(argv[0]))
     {
-        runtimeError("'SQL(<file>)' expects a string as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'SQL(<file>)' expects a string as argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1351,7 +2417,7 @@ static Value instanceOf(int argc, Value *argv, bool *hasError, bool *pushedValue
     ObjClass *builtinClass = NULL;
     if (!IS_CLASS(argv[1]))
     {
-        runtimeError("'instanceof' expects a class as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
+        runtimeError("'instanceof' expects a class as second argument but got '%s'", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1392,10 +2458,10 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     Value val = argc == 0 ? NIL_VAL : argv[0];
     char *type;
-    switch (val.type)
+    switch (VALUE_TYPE(val))
     {
     case VAL_NUMBER:
-        type = val.as.number == round(val.as.number) ? "int" : "float";
+        type = AS_NUM(val) == round(AS_NUM(val)) ? "int" : "float";
         break;
     case VAL_BOOL:
         type = "bool";
@@ -1472,7 +2538,7 @@ static Value sinNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("'sin()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'sin()' expects a number as argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1489,7 +2555,7 @@ static Value cosNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("'cos()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'cos()' expects a number as argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1522,7 +2588,7 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
         *pushedValue = true;
         return NIL_VAL;
     }
-    runtimeError("'len()' expects a string or list as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+    runtimeError("'len()' expects a string or list as argument but got '%s'", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -1546,7 +2612,7 @@ static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("'sleep()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'sleep()' expects a number as argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1577,71 +2643,90 @@ static Value clearNative(int argc, Value *argv, bool *hasError, bool *pushedValu
 
 char *valueToString(Value val, char *buff, int *len)
 {
-    switch (val.type)
+    return valueToStringSized(val, buff, STR_BUFF, len);
+}
+
+static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
+{
+    size_t index = 0;
+    if (cap > 0)
+        buff[0] = '\0';
+
+    switch (VALUE_TYPE(val))
     {
     case VAL_NUMBER:
-        sprintf(buff, "%.15g", AS_NUM(val));
-        *len = (int)strlen(buff);
+        index = appendFormat(buff, cap, 0, "%.15g", AS_NUM(val));
+        *len = (int)index;
         return buff;
     case VAL_BOOL:
-        sprintf(buff, "%s", AS_BOOL(val) ? "true" : "false");
-        *len = (int)strlen(buff);
+        index = appendLiteral(buff, cap, 0, AS_BOOL(val) ? "true" : "false");
+        *len = (int)index;
         return buff;
     case VAL_NIL:
-        sprintf(buff, "%s", "null");
-        *len = (int)strlen(buff);
+        index = appendLiteral(buff, cap, 0, "null");
+        *len = (int)index;
         return buff;
     case VAL_OBJ:
         switch (AS_OBJ(val)->type)
         {
         case OBJ_STRING:
-            sprintf(buff, "%s", AS_STR(val)->chars);
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, AS_STR(val)->chars);
+            *len = (int)index;
             return buff;
         case OBJ_LIST:
         {
             ObjList *list = AS_LIST(val);
-            long index = 0;
-            buff[index++] = '[';
+            index = appendChar(buff, cap, 0, '[');
             for (int i = 0; i < list->count; i++)
             {
                 if (IS_LIST(list->items[i]) && AS_LIST(list->items[i]) == list)
                 {
-                    buff[index++] = '[';
-                    buff[index++] = '.';
-                    buff[index++] = '.';
-                    buff[index++] = '.';
-                    buff[index++] = ']';
-                    buff[index++] = ',';
+                    index = appendLiteral(buff, cap, index, "[...]");
+                    index = appendChar(buff, cap, index, ',');
                     continue;
                 }
-                valueToString(list->items[i], buff + index, len);
+                size_t remaining = index < cap ? cap - index : 0;
+                valueToStringSized(list->items[i], buff + index, remaining, len);
                 index += *len;
-                buff[index++] = ',';
+                if (cap > 0 && index >= cap)
+                    index = cap - 1;
+                index = appendChar(buff, cap, index, ',');
             }
             if (list->count > 0)
-                buff[--index] = ']';
+            {
+                if (index > 0)
+                    index--;
+                if (cap > 0 && index < cap)
+                    buff[index] = ']';
+                index++;
+            }
             else
-                buff[index] = ']';
-            buff[++index] = '\0';
-            *len = index;
+                index = appendChar(buff, cap, index, ']');
+
+            if (cap > 0)
+            {
+                if (index >= cap)
+                    index = cap - 1;
+                buff[index] = '\0';
+            }
+            *len = (int)index;
             return buff;
         }
         case OBJ_MAP:
         {
             ObjMap *map = AS_MAP(val);
-            return mapToString(&map->map, buff, len);
+            return mapToString(&map->map, buff, cap, len);
         }
         case OBJ_FOREIGN:
         {
             ObjForeign *obj = AS_FOREIGN(val);
-            sprintf(buff, "%s f<%p>", FOREIGN_TYPES[obj->type], obj->ptr);
-            *len = (int)strlen(buff);
+            index = appendFormat(buff, cap, 0, "%s f<%p>", FOREIGN_TYPES[obj->type], obj->ptr);
+            *len = (int)index;
             return buff;
         }
         case OBJ_CLASS:
-            sprintf(buff, "%s", AS_CLASS(val)->name->chars);
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, AS_CLASS(val)->name->chars);
+            *len = (int)index;
             return buff;
         case OBJ_INSTANCE:
             // Use toStr if available?
@@ -1649,7 +2734,7 @@ char *valueToString(Value val, char *buff, int *len)
             {
                 // Make sure that the val is on the stack
                 Value stackTop = peek(0);
-                if (stackTop.type != VAL_OBJ || stackTop.as.obj != val.as.obj)
+                if (VALUE_TYPE(stackTop) != VAL_OBJ || AS_OBJ(stackTop) != AS_OBJ(val))
                     push(val);
 
                 int frameCount = vm.frameCount;
@@ -1671,49 +2756,74 @@ char *valueToString(Value val, char *buff, int *len)
                     *len = 0;
                     return buff;
                 }
-                sprintf(buff, "%s", AS_STR(str)->chars);
-                *len = AS_STR(str)->len;
+                index = appendLiteral(buff, cap, 0, AS_STR(str)->chars);
+                *len = (int)index;
                 return buff;
             }
-            sprintf(buff, "%s<%p>", AS_INSTANCE(val)->klass->name->chars, (void *)AS_INSTANCE(val));
-            *len = (int)strlen(buff);
+            index = appendFormat(buff, cap, 0, "%s<%p>", AS_INSTANCE(val)->klass->name->chars, (void *)AS_INSTANCE(val));
+            *len = (int)index;
             return buff;
         case OBJ_FUNCTION:
-            sprintf(buff, "%s", AS_FUN(val)->name == NULL ? "<script>" : AS_FUN(val)->name->chars);
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, AS_FUN(val)->name == NULL ? "<script>" : AS_FUN(val)->name->chars);
+            *len = (int)index;
             return buff;
         case OBJ_NATIVE:
-            sprintf(buff, "%s", "<native>");
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, "<native>");
+            *len = (int)index;
             return buff;
         case OBJ_CLOSURE:
-            sprintf(buff, "%s", AS_CLOSURE(val)->function->name == NULL ? "<script>" : AS_CLOSURE(val)->function->name->chars);
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, AS_CLOSURE(val)->function->name == NULL ? "<script>" : AS_CLOSURE(val)->function->name->chars);
+            *len = (int)index;
             return buff;
         case OBJ_BOUND_METHOD:
-            sprintf(buff, "%s", AS_BOUND_METHOD(val)->method->function->name == NULL ? "<script>" : AS_BOUND_METHOD(val)->method->function->name->chars);
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, AS_BOUND_METHOD(val)->method->function->name == NULL ? "<script>" : AS_BOUND_METHOD(val)->method->function->name->chars);
+            *len = (int)index;
             return buff;
         case OBJ_BOUND_BUILTIN:
-            sprintf(buff, "%s", "<bound native>");
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, "<bound native>");
+            *len = (int)index;
             return buff;
         case OBJ_UPVALUE:
-            sprintf(buff, "%s", "<upvalue>");
-            *len = (int)strlen(buff);
+            index = appendLiteral(buff, cap, 0, "<upvalue>");
+            *len = (int)index;
             return buff;
         case OBJ_SLICE:
         {
             ObjSlice *slice = AS_SLICE(val);
-            sprintf(buff, "<slice[%d:%d:%d]>", slice->start, slice->end, slice->step);
-            *len = (int)strlen(buff);
+            index = appendFormat(buff, cap, 0, "<slice[%d:%d:%d]>", slice->start, slice->end, slice->step);
+            *len = (int)index;
             return buff;
         }
         }
     }
-    snprintf(buff, 10, "%s", "<unknown>");
-    *len = (int)strnlen(buff, 10);
+    index = appendLiteral(buff, cap, 0, "<unknown>");
+    *len = (int)index;
     return buff;
+}
+
+static ObjString *valueToObjStringDynamic(Value val)
+{
+    size_t cap = STR_BUFF;
+    if (cap < 64)
+        cap = 64;
+
+    while (true)
+    {
+        char *buf = ALLOCATE(char, cap);
+        int len = 0;
+        gStringifyTruncated = false;
+        valueToStringSized(val, buf, cap, &len);
+
+        if (!gStringifyTruncated)
+            return takeString(buf, len);
+
+        FREE_ARRAY(char, buf, cap);
+
+        if (cap > (SIZE_MAX / 2))
+            return copyString("<value too large>", 17);
+
+        cap *= 2;
+    }
 }
 
 static Value strCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1724,13 +2834,10 @@ static Value strCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
         return argv[0];
-    int strLen = 0;
-    char str[STR_BUFF] = {0};
-    valueToString(argv[0], str, &strLen);
 
-    return OBJ_VAL(copyString(str, (int)strlen(str)));
+    return OBJ_VAL(valueToObjStringDynamic(argv[0]));
 }
 
 static Value hashNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1777,13 +2884,13 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_LIST(argv[0]))
     {
-        runtimeError("'join()' expects a list as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'join()' expects a list as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("'join()' expects a string as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
+        runtimeError("'join()' expects a string as second argument but got '%s'", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -1824,7 +2931,7 @@ static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
     {
         char *str = AS_STR(argv[0])->chars;
         char *end;
@@ -1837,13 +2944,13 @@ static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         }
         return NUM_VAL((double)num);
     }
-    if (argv[0].type == VAL_NUMBER)
+    if (VALUE_TYPE(argv[0]) == VAL_NUMBER)
         return NUM_VAL(round(AS_NUM(argv[0])));
-    if (argv[0].type == VAL_BOOL)
+    if (VALUE_TYPE(argv[0]) == VAL_BOOL)
         return NUM_VAL(AS_BOOL(argv[0]) ? 1 : 0);
-    if (argv[0].type == VAL_NIL)
+    if (VALUE_TYPE(argv[0]) == VAL_NIL)
         return NUM_VAL(0);
-    runtimeError("Expected a string or number but got '%s' for int()", VALUE_TYPES[argv[0].type]);
+    runtimeError("Expected a string or number but got '%s' for int()", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -1856,7 +2963,7 @@ static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushed
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
     {
         char *str = AS_STR(argv[0])->chars;
         char *end;
@@ -1869,13 +2976,13 @@ static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushed
         }
         return NUM_VAL(num);
     }
-    if (argv[0].type == VAL_NUMBER)
+    if (VALUE_TYPE(argv[0]) == VAL_NUMBER)
         return argv[0];
-    if (argv[0].type == VAL_BOOL)
+    if (VALUE_TYPE(argv[0]) == VAL_BOOL)
         return NUM_VAL(AS_BOOL(argv[0]) ? 1 : 0);
-    if (argv[0].type == VAL_NIL)
+    if (VALUE_TYPE(argv[0]) == VAL_NIL)
         return NUM_VAL(0);
-    runtimeError("Expected a string or number but got '%s' for float()", VALUE_TYPES[argv[0].type]);
+    runtimeError("Expected a string or number but got '%s' for float()", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -1888,9 +2995,10 @@ NATIVE_FN(boolCastNative)
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ)
     {
-        if(AS_OBJ(argv[0])->type == OBJ_STRING){
+        if (AS_OBJ(argv[0])->type == OBJ_STRING)
+        {
             char *str = AS_STR(argv[0])->chars;
             if (strcmp(str, "true") == 0)
                 return BOOL_VAL(true);
@@ -1900,13 +3008,13 @@ NATIVE_FN(boolCastNative)
         }
         return BOOL_VAL(!isFalsey(argv[0]));
     }
-    if (argv[0].type == VAL_NUMBER)
+    if (VALUE_TYPE(argv[0]) == VAL_NUMBER)
         return BOOL_VAL(AS_NUM(argv[0]) != 0);
-    if (argv[0].type == VAL_BOOL)
+    if (VALUE_TYPE(argv[0]) == VAL_BOOL)
         return argv[0];
-    if (argv[0].type == VAL_NIL)
+    if (VALUE_TYPE(argv[0]) == VAL_NIL)
         return BOOL_VAL(false);
-    runtimeError("Expected a string or number but got '%s' for bool()", VALUE_TYPES[argv[0].type]);
+    runtimeError("Expected a string or number but got '%s' for bool()", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -1919,9 +3027,9 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
         *hasError = true;
         return NIL_VAL;
     }
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_LIST)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_LIST)
         return argv[0];
-    if (argv[0].type == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
     {
         ObjList *list = newList();
         for (int i = 0; i < AS_STR(argv[0])->len; i++)
@@ -1933,9 +3041,9 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
         }
         return OBJ_VAL(list);
     }
-    if (argv[0].type == VAL_NIL)
+    if (VALUE_TYPE(argv[0]) == VAL_NIL)
         return OBJ_VAL(newList());
-    runtimeError("Expected a string or list but got '%s' for list()", VALUE_TYPES[argv[0].type]);
+    runtimeError("Expected a string or list but got '%s' for list()", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -1950,13 +3058,13 @@ static Value randomIntNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("'randInt()' expects a number as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'randInt()' expects a number as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("'randInt()' expects a number as second argument but got '%s'", VALUE_TYPES[argv[1].type]);
+        runtimeError("'randInt()' expects a number as second argument but got '%s'", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2030,7 +3138,7 @@ static Value ordNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for ord(ch)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for ord(ch)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2066,7 +3174,7 @@ static Value closeFDNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for close(socket)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for close(socket)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2087,19 +3195,19 @@ static Value setSockOptionsNative(int argc, Value *argv, bool *hasError, bool *p
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[2]))
     {
-        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected a number but got '%s' for setSockOptions(socket, level, optname)", valueTypeName(argv[2]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2126,19 +3234,19 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for connect(socket, host, port)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for connect(socket, host, port)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for connect(socket, host, port)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for connect(socket, host, port)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[2]))
     {
-        runtimeError("Expected a number but got '%s' for connect(socket, host, port)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected a number but got '%s' for connect(socket, host, port)", valueTypeName(argv[2]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2193,13 +3301,13 @@ static Value bindSocketPortNative(int argc, Value *argv, bool *hasError, bool *p
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for bindSocketPort(socket, port)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for bindSocketPort(socket, port)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for bindSocketPort(socket, port)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for bindSocketPort(socket, port)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2230,7 +3338,7 @@ static Value listenNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for listen(socket)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for listen(socket)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2254,13 +3362,13 @@ static Value acceptNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for accept(socket, port)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for accept(socket, port)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for accept(socket, port)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for accept(socket, port)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2291,7 +3399,7 @@ static Value readNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for read(socket)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for read(socket)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2322,13 +3430,13 @@ NATIVE_FN(pollNative)
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for poll(socket, timeout)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2357,13 +3465,13 @@ static Value readSizeNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for readSize(socket, size)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for readSize(socket, size)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for readSize(socket, size)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for readSize(socket, size)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2390,19 +3498,19 @@ static Value seekNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_NUM(argv[2]))
     {
-        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected a number but got '%s' for seek(file, offset, whence)", valueTypeName(argv[2]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2428,13 +3536,13 @@ static Value writeNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for write(file, data)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for write(file, data)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for write(file, data)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for write(file, data)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2460,13 +3568,13 @@ static Value sendNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for send(socket, data)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for send(socket, data)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for send(socket, data)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for send(socket, data)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2545,13 +3653,13 @@ static Value sendFileWithFileDescriptorNative(int argc, Value *argv, bool *hasEr
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for sendFileWithFileDescriptor(socket, path)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for sendFileWithFileDescriptor(socket, path)", valueTypeName(argv[0]));
         *hasError = true;
         return BOOL_VAL(false);
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for sendFileWithFileDescriptor(socket, path)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for sendFileWithFileDescriptor(socket, path)", valueTypeName(argv[1]));
         *hasError = true;
         return BOOL_VAL(false);
     }
@@ -2625,19 +3733,19 @@ static Value openFileNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for openFile(path, flags, mode)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for openFile(path, flags, mode)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_NUM(argv[1]))
     {
-        runtimeError("Expected an int but got '%s' for openFile(path, flags, mode)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected an int but got '%s' for openFile(path, flags, mode)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
     if (argc == 3 && !IS_NUM(argv[2]))
     {
-        runtimeError("Expected an int but got '%s' for openFile(path, flags, mode)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected an int but got '%s' for openFile(path, flags, mode)", valueTypeName(argv[2]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -2665,6 +3773,178 @@ static void defineNative(const char *name, NativeFn function)
     pop();
 }
 
+void vmDefineNative(const char *name, NativeFn function)
+{
+    defineNative(name, function);
+}
+
+void vmDefineGlobalValue(const char *name, Value value)
+{
+    push(OBJ_VAL(copyString(name, (int)strlen(name))));
+    push(value);
+    tableSet(&vm.globals, AS_STR(peek(1)), peek(0));
+    pop();
+    pop();
+}
+
+ObjClass *vmGetClassByName(const char *name)
+{
+    if (name == NULL)
+        return NULL;
+
+    Value value;
+    ObjString *key = copyString(name, (int)strlen(name));
+    if (!tableGet(&vm.globals, key, &value) || !IS_CLASS(value))
+        return NULL;
+    return AS_CLASS(value);
+}
+
+void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function)
+{
+    if (clazz == NULL || name == NULL || function == NULL)
+        return;
+
+    ObjString *methodName = copyString(name, (int)strlen(name));
+    Value method = OBJ_VAL(newNative(function));
+    tableSet(&clazz->methods, methodName, method);
+
+    ObjString *canonical = methodName;
+    if (strcmp(name, "__str__") == 0)
+        canonical = vm.toStr;
+    else if (strcmp(name, "__eq__") == 0)
+        canonical = vm.eqStr;
+    else if (strcmp(name, "__lt__") == 0)
+        canonical = vm.ltStr;
+    else if (strcmp(name, "__gt__") == 0)
+        canonical = vm.gtStr;
+    else if (strcmp(name, "__getitem__") == 0)
+        canonical = vm.indexStr;
+    else if (strcmp(name, "__setitem__") == 0)
+        canonical = vm.setStr;
+    else if (strcmp(name, "__len__") == 0)
+        canonical = vm.sizeStr;
+    else if (strcmp(name, "__hash__") == 0)
+        canonical = vm.hashStr;
+
+    if (canonical != methodName)
+        tableSet(&clazz->methods, canonical, method);
+
+    if (canonical == vm.initStr || strcmp(name, "init") == 0)
+        clazz->initializer = method;
+    else if (canonical == vm.toStr || strcmp(name, "toStr") == 0)
+        clazz->toStr = method;
+    else if (canonical == vm.eqStr || strcmp(name, "_eq_") == 0)
+        clazz->equals = method;
+    else if (canonical == vm.ltStr || strcmp(name, "_lt_") == 0)
+        clazz->lessThan = method;
+    else if (canonical == vm.gtStr || strcmp(name, "_gt_") == 0)
+        clazz->greaterThan = method;
+    else if (canonical == vm.indexStr || strcmp(name, "_get_") == 0)
+        clazz->indexFn = method;
+    else if (canonical == vm.setStr || strcmp(name, "_set_") == 0)
+        clazz->setFn = method;
+    else if (canonical == vm.sizeStr || strcmp(name, "_size_") == 0)
+        clazz->sizeFn = method;
+    else if (canonical == vm.hashStr || strcmp(name, "_hash_") == 0)
+        clazz->hashFn = method;
+}
+
+void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn function)
+{
+    if (clazz == NULL || name == NULL || function == NULL)
+        return;
+    tableSet(&clazz->staticVars, copyString(name, (int)strlen(name)), OBJ_VAL(newNative(function)));
+}
+
+static Value vmApiMakeString(const char *chars, int len, bool interned)
+{
+    if (chars == NULL)
+        return OBJ_VAL(copyString("", 0));
+    if (len < 0)
+        len = (int)strlen(chars);
+    return interned ? OBJ_VAL(copyString(chars, len)) : OBJ_VAL(copyStringUninterned(chars, len));
+}
+
+static Value vmApiMakeList(void)
+{
+    return OBJ_VAL(newList());
+}
+
+static bool vmApiListAppend(Value list, Value item)
+{
+    if (!IS_LIST(list))
+        return false;
+    appendToList(AS_LIST(list), item);
+    return true;
+}
+
+static Value vmApiMakeMap(void)
+{
+    return OBJ_VAL(newMap());
+}
+
+static bool vmApiMapSet(Value map, Value key, Value value)
+{
+    if (!IS_MAP(map))
+        return false;
+    mapSet(&AS_MAP(map)->map, key, value);
+    return true;
+}
+
+static bool loadDynamicModulePath(const char *path, bool reportError)
+{
+    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle)
+    {
+        if (reportError)
+            runtimeError("Failed to load library: %s", dlerror());
+        return false;
+    }
+
+    bool ret = false;
+    DotKInitModuleFn initModule = (DotKInitModuleFn)dlsym(handle, "dotk_init_module");
+    if (initModule != NULL)
+    {
+        static DotKNativeApi api = {
+            .version = DOTK_NATIVE_API_VERSION,
+            .defineNative = vmDefineNative,
+            .defineClass = vmDefineClass,
+            .defineGlobalValue = vmDefineGlobalValue,
+            .getClassByName = vmGetClassByName,
+            .defineClassMethod = vmDefineClassMethod,
+            .defineClassStaticMethod = vmDefineClassStaticMethod,
+            .makeString = vmApiMakeString,
+            .makeList = vmApiMakeList,
+            .listAppend = vmApiListAppend,
+            .makeMap = vmApiMakeMap,
+            .mapSet = vmApiMapSet,
+            .pushValue = push,
+            .popValue = pop,
+            .raiseError = runtimeError,
+        };
+
+        ret = initModule(&api);
+        if (!ret && reportError)
+            runtimeError("Failed to initialize module '%s' via dotk_init_module()", path);
+    }
+    else
+    {
+        // Legacy API fallback: void init(DefineNativeFn, DefineNativeClassFn)
+        void (*init)(DefineNativeFn, DefineNativeClassFn);
+        init = (void (*)(DefineNativeFn, DefineNativeClassFn))dlsym(handle, "init");
+        if (init != NULL)
+        {
+            init(vmDefineNative, (DefineNativeClassFn)vmDefineClass);
+            ret = true;
+        }
+    }
+
+    if (!ret && reportError)
+        runtimeError("No valid module init symbol found in '%s'. Expected 'dotk_init_module' or legacy 'init'", path);
+
+    return ret;
+}
+
 static bool call(ObjClosure *closure, int argC)
 {
     if (argC != closure->function->arity)
@@ -2686,6 +3966,223 @@ static bool call(ObjClosure *closure, int argC)
     return true;
 }
 
+static ObjString *getFunctionParamName(ObjFunction *function, int index)
+{
+    if (index < 0 || index >= function->paramCount)
+        return NULL;
+    Value name = function->chunk.constants.values[function->paramNameConsts[index]];
+    if (!IS_STR(name))
+        return NULL;
+    return AS_STR(name);
+}
+
+static ObjString *getFunctionLocalName(ObjFunction *function, int index)
+{
+    if (index < 0 || index >= function->localNameCount)
+        return NULL;
+    uint16_t nameIdx = function->localNameConsts[index];
+    if (nameIdx == UINT16_MAX)
+        return NULL;
+    Value name = function->chunk.constants.values[nameIdx];
+    if (!IS_STR(name))
+        return NULL;
+    return AS_STR(name);
+}
+
+static int findFunctionParamIndex(ObjFunction *function, ObjString *name)
+{
+    for (int i = 0; i < function->paramCount; i++)
+    {
+        ObjString *param = getFunctionParamName(function, i);
+        if (param == NULL)
+            continue;
+        if (param == name || (param->len == name->len && memcmp(param->chars, name->chars, name->len) == 0))
+            return i;
+    }
+    return -1;
+}
+
+static bool normalizeClosureArgsOnStack(ObjClosure *closure, int positionalCount, int keywordCount, int *normalizedArgCount)
+{
+    ObjFunction *function = closure->function;
+    int rawArgCount = positionalCount + (keywordCount * 2);
+    Value *base = vm.stackTop - rawArgCount - 1;
+    Value *rawPositional = base + 1;
+    Value *rawKeywords = rawPositional + positionalCount;
+
+    int required = function->minArity;
+    int formalCount = function->arity;
+    if (!function->isVariadic && positionalCount > formalCount)
+    {
+        runtimeError("Expected %d argument(s) but got %d for %s", formalCount, positionalCount + keywordCount, function->name == NULL ? "<script>" : function->name->chars);
+        return false;
+    }
+
+    int allocCount = formalCount > 0 ? formalCount : 1;
+    Value *finalArgs = ALLOCATE(Value, allocCount);
+    bool *assigned = ALLOCATE(bool, allocCount);
+    for (int i = 0; i < allocCount; i++)
+        assigned[i] = false;
+
+    ObjList *rest = NULL;
+    if (function->isVariadic)
+        rest = newList();
+
+    for (int i = 0; i < keywordCount; i++)
+    {
+        Value key = rawKeywords[i * 2];
+        Value value = rawKeywords[(i * 2) + 1];
+        if (!IS_STR(key))
+        {
+            runtimeError("Keyword argument name must be a string.");
+            FREE_ARRAY(bool, assigned, allocCount);
+            FREE_ARRAY(Value, finalArgs, allocCount);
+            return false;
+        }
+
+        ObjString *keyStr = AS_STR(key);
+        int paramIndex = findFunctionParamIndex(function, keyStr);
+        if (paramIndex < 0)
+        {
+            runtimeError("Unexpected keyword argument '%s' for %s", keyStr->chars, function->name == NULL ? "<script>" : function->name->chars);
+            FREE_ARRAY(bool, assigned, allocCount);
+            FREE_ARRAY(Value, finalArgs, allocCount);
+            return false;
+        }
+
+        if (function->isVariadic && paramIndex == formalCount - 1)
+        {
+            runtimeError("Variadic parameter '%s' cannot be passed as a keyword argument.", keyStr->chars);
+            FREE_ARRAY(bool, assigned, allocCount);
+            FREE_ARRAY(Value, finalArgs, allocCount);
+            return false;
+        }
+
+        if (assigned[paramIndex])
+        {
+            runtimeError("Multiple values for parameter '%s' in call to %s", keyStr->chars, function->name == NULL ? "<script>" : function->name->chars);
+            FREE_ARRAY(bool, assigned, allocCount);
+            FREE_ARRAY(Value, finalArgs, allocCount);
+            return false;
+        }
+
+        finalArgs[paramIndex] = value;
+        assigned[paramIndex] = true;
+    }
+
+    int fixedParamCount = function->isVariadic ? (formalCount - 1) : formalCount;
+    for (int i = 0; i < positionalCount; i++)
+    {
+        Value value = rawPositional[i];
+        int targetIndex = -1;
+        for (int j = 0; j < fixedParamCount; j++)
+        {
+            if (!assigned[j])
+            {
+                targetIndex = j;
+                break;
+            }
+        }
+
+        if (targetIndex != -1)
+        {
+            finalArgs[targetIndex] = value;
+            assigned[targetIndex] = true;
+            continue;
+        }
+
+        if (function->isVariadic)
+        {
+            appendToList(rest, value);
+            continue;
+        }
+
+        runtimeError("Expected %d argument(s) but got %d for %s", formalCount, positionalCount + keywordCount, function->name == NULL ? "<script>" : function->name->chars);
+        FREE_ARRAY(bool, assigned, allocCount);
+        FREE_ARRAY(Value, finalArgs, allocCount);
+        return false;
+    }
+
+    for (int i = 0; i < required; i++)
+    {
+        if (!assigned[i])
+        {
+            ObjString *missing = getFunctionParamName(function, i);
+            runtimeError("Missing argument '%s' for %s", missing == NULL ? "<unknown>" : missing->chars, function->name == NULL ? "<script>" : function->name->chars);
+            FREE_ARRAY(bool, assigned, allocCount);
+            FREE_ARRAY(Value, finalArgs, allocCount);
+            return false;
+        }
+    }
+
+    if (function->isVariadic)
+    {
+        finalArgs[formalCount - 1] = OBJ_VAL(rest);
+        assigned[formalCount - 1] = true;
+    }
+
+    vm.stackTop = base + 1;
+    for (int i = 0; i < formalCount; i++)
+        push(finalArgs[i]);
+
+    *normalizedArgCount = formalCount;
+    FREE_ARRAY(bool, assigned, allocCount);
+    FREE_ARRAY(Value, finalArgs, allocCount);
+    return true;
+}
+
+static bool normalizeKeywordArgsToMapOnStack(int positionalCount, int keywordCount, int *normalizedArgCount)
+{
+    if (keywordCount == 0)
+    {
+        *normalizedArgCount = positionalCount;
+        return true;
+    }
+
+    int rawArgCount = positionalCount + (keywordCount * 2);
+    Value *base = vm.stackTop - rawArgCount - 1;
+    Value *rawPositional = base + 1;
+    Value *rawKeywords = rawPositional + positionalCount;
+
+    ObjMap *kwargs = newMap();
+    push(OBJ_VAL(kwargs));
+
+    for (int i = 0; i < keywordCount; i++)
+    {
+        Value key = rawKeywords[i * 2];
+        Value value = rawKeywords[(i * 2) + 1];
+        if (!IS_STR(key))
+        {
+            runtimeError("Keyword argument name must be a string.");
+            pop();
+            return false;
+        }
+        if (mapContainsKey(&kwargs->map, key))
+        {
+            runtimeError("Duplicate keyword argument '%s'", AS_STR(key)->chars);
+            pop();
+            return false;
+        }
+        mapSet(&kwargs->map, key, value);
+    }
+
+    Value kwargsValue = pop();
+    vm.stackTop = base + 1;
+    for (int i = 0; i < positionalCount; i++)
+        push(rawPositional[i]);
+    push(kwargsValue);
+    *normalizedArgCount = positionalCount + 1;
+    return true;
+}
+
+static bool callClosureWithArgs(ObjClosure *closure, int positionalCount, int keywordCount)
+{
+    int normalizedArgCount = 0;
+    if (!normalizeClosureArgsOnStack(closure, positionalCount, keywordCount, &normalizedArgCount))
+        return false;
+    return call(closure, normalizedArgCount);
+}
+
 static bool callValue(Value callee, int argC)
 {
     if (IS_OBJ(callee))
@@ -2696,7 +4193,7 @@ static bool callValue(Value callee, int argC)
         {
             ObjBoundMethod *bound = AS_BOUND_METHOD(callee);
             vm.stackTop[-argC - 1] = bound->receiver;
-            return call(bound->method, argC);
+            return callClosureWithArgs(bound->method, argC, 0);
         }
         case OBJ_BOUND_BUILTIN:
         {
@@ -2757,12 +4254,107 @@ static bool callValue(Value callee, int argC)
             return call(AS_CLOSURE(initMethod), argC);
         }
         case OBJ_CLOSURE:
-            return call(AS_CLOSURE(callee), argC);
+            return callClosureWithArgs(AS_CLOSURE(callee), argC, 0);
         default:
             break;
         }
     }
-    runtimeError("Can only call functions and classes -- not '%s'", VALUE_TYPES[callee.type]);
+    runtimeError("Can only call functions and classes -- not '%s'", valueTypeName(callee));
+    return false;
+}
+
+static bool callValueKw(Value callee, int positionalCount, int keywordCount)
+{
+    if (IS_OBJ(callee))
+    {
+        switch (OBJ_TYPE(callee))
+        {
+        case OBJ_BOUND_METHOD:
+        {
+            ObjBoundMethod *bound = AS_BOUND_METHOD(callee);
+            int rawArgCount = positionalCount + (keywordCount * 2);
+            vm.stackTop[-rawArgCount - 1] = bound->receiver;
+            return callClosureWithArgs(bound->method, positionalCount, keywordCount);
+        }
+        case OBJ_BOUND_BUILTIN:
+        {
+            ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(callee);
+            int rawArgCount = positionalCount + (keywordCount * 2);
+            vm.stackTop[-rawArgCount - 1] = bound->receiver;
+
+            int nativeArgCount = positionalCount;
+            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
+                return false;
+
+            bool hasError = false;
+            bool pushedValue = false;
+            Value result = bound->native->function(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
+            if (hasError)
+                return false;
+            if (!pushedValue)
+            {
+                vm.stackTop -= nativeArgCount + 1;
+                push(result);
+            }
+            return true;
+        }
+        case OBJ_CLASS:
+        {
+            ObjClass *klass = AS_CLASS(callee);
+            int rawArgCount = positionalCount + (keywordCount * 2);
+            vm.stackTop[-rawArgCount - 1] = OBJ_VAL(newInstance(klass));
+            if (!IS_NIL(klass->initializer))
+                return callValueKw(klass->initializer, positionalCount, keywordCount);
+
+            if (positionalCount != 0 || keywordCount != 0)
+            {
+                runtimeError("Expected 0 arguments for init of class '%s' but got %d", klass->name->chars, positionalCount + keywordCount);
+                return false;
+            }
+            return true;
+        }
+        case OBJ_NATIVE:
+        {
+            int nativeArgCount = positionalCount;
+            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
+                return false;
+
+            NativeFn native = AS_NATIVE(callee);
+            bool hasError = false;
+            bool pushedValue = false;
+            Value result = native(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
+            if (hasError)
+                return false;
+            if (!pushedValue)
+            {
+                vm.stackTop -= nativeArgCount + 1;
+                push(result);
+            }
+            return true;
+        }
+        case OBJ_FOREIGN:
+        {
+            int foreignArgCount = positionalCount;
+            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &foreignArgCount))
+                return false;
+
+            ObjForeign *foreign = AS_FOREIGN(callee);
+            Value initMethod;
+            if (!tableGet(&foreign->methods, vm.initStr, &initMethod))
+            {
+                runtimeError("This foreign object %s does not have an init method", FOREIGN_TYPES[foreign->type]);
+                return false;
+            }
+            vm.stackTop[-foreignArgCount - 1] = callee;
+            return call(AS_CLOSURE(initMethod), foreignArgCount);
+        }
+        case OBJ_CLOSURE:
+            return callClosureWithArgs(AS_CLOSURE(callee), positionalCount, keywordCount);
+        default:
+            break;
+        }
+    }
+    runtimeError("Can only call functions and classes -- not '%s'", valueTypeName(callee));
     return false;
 }
 
@@ -2772,12 +4364,26 @@ static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
         return false;
 
     Value method;
-    if (!tableGet(&klass->methods, name, &method))
+    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
     {
         runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
         return false;
     }
     return callValue(method, argc);
+}
+
+static bool invokeFromClassKw(ObjClass *klass, ObjString *name, int positionalCount, int keywordCount)
+{
+    if (klass == NULL)
+        return false;
+
+    Value method;
+    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
+    {
+        runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
+        return false;
+    }
+    return callValueKw(method, positionalCount, keywordCount);
 }
 
 bool invoke(ObjString *name, int argc)
@@ -2804,7 +4410,7 @@ bool invoke(ObjString *name, int argc)
         if (isBuiltinClass(receiver))
             return invokeFromClass(getVmClass(receiver), name, argc);
 
-        runtimeError("Only Classes and their instances have methods. -- not '%s'", VALUE_TYPES[receiver.type]);
+        runtimeError("Only Classes and their instances have methods. -- not '%s'", valueTypeName(receiver));
         return false;
     }
 
@@ -2821,6 +4427,47 @@ bool invoke(ObjString *name, int argc)
         return callValue(value, argc);
     }
     return invokeFromClass(instance->klass, name, argc);
+}
+
+static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
+{
+    int rawArgCount = positionalCount + (keywordCount * 2);
+    Value receiver = peek(rawArgCount);
+
+    if (IS_FOREIGN(receiver))
+    {
+        ObjForeign *foreign = AS_FOREIGN(receiver);
+        Value method;
+        if (!tableGet(&foreign->methods, name, &method))
+        {
+            runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
+            return false;
+        }
+        return callValueKw(method, positionalCount, keywordCount);
+    }
+
+    bool isInstance = IS_INSTANCE(receiver);
+    bool isClass = IS_CLASS(receiver);
+    if (!isInstance && !isClass)
+    {
+        if (isBuiltinClass(receiver))
+            return invokeFromClassKw(getVmClass(receiver), name, positionalCount, keywordCount);
+
+        runtimeError("Only Classes and their instances have methods. -- not '%s'", valueTypeName(receiver));
+        return false;
+    }
+
+    if (isClass)
+        return invokeFromClassKw(AS_CLASS(receiver), name, positionalCount, keywordCount);
+
+    ObjInstance *instance = AS_INSTANCE(receiver);
+    Value value;
+    if (tableGet(&instance->fields, name, &value))
+    {
+        vm.stackTop[-rawArgCount - 1] = value;
+        return callValueKw(value, positionalCount, keywordCount);
+    }
+    return invokeFromClassKw(instance->klass, name, positionalCount, keywordCount);
 }
 
 static bool bindMethod(ObjClass *klass, ObjString *name)
@@ -2886,69 +4533,91 @@ static bool defineMethod(ObjString *name)
     Value method = peek(0);
     ObjClass *klass = AS_CLASS(peek(1));
     tableSet(&klass->methods, name, method);
-    if (name == vm.initStr)
+
+    ObjString *canonical = name;
+    if (name == vm.strDunderStr || strcmp(name->chars, "__str__") == 0)
+        canonical = vm.toStr;
+    else if (name == vm.eqDunderStr || strcmp(name->chars, "__eq__") == 0)
+        canonical = vm.eqStr;
+    else if (name == vm.ltDunderStr || strcmp(name->chars, "__lt__") == 0)
+        canonical = vm.ltStr;
+    else if (name == vm.gtDunderStr || strcmp(name->chars, "__gt__") == 0)
+        canonical = vm.gtStr;
+    else if (name == vm.getitemDunderStr || strcmp(name->chars, "__getitem__") == 0)
+        canonical = vm.indexStr;
+    else if (name == vm.setitemDunderStr || strcmp(name->chars, "__setitem__") == 0)
+        canonical = vm.setStr;
+    else if (name == vm.lenDunderStr || strcmp(name->chars, "__len__") == 0)
+        canonical = vm.sizeStr;
+    else if (name == vm.hashDunderStr || strcmp(name->chars, "__hash__") == 0)
+        canonical = vm.hashStr;
+
+    if (canonical != name)
+        tableSet(&klass->methods, canonical, method);
+
+    if (canonical == vm.initStr)
         klass->initializer = method;
-    else if (name == vm.toStr)
+    else if (canonical == vm.toStr)
         klass->toStr = method;
-    else if (name == vm.eqStr)
+    else if (canonical == vm.eqStr)
     {
         if (AS_CLOSURE(method)->function->arity != 1)
         {
-            runtimeError("<_eq_> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_eq_>/<__eq__> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->equals = method;
     }
-    else if (name == vm.ltStr)
+    else if (canonical == vm.ltStr)
     {
         if (AS_CLOSURE(method)->function->arity != 1)
         {
-            runtimeError("<_lt_> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_lt_>/<__lt__> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->lessThan = method;
     }
-    else if (name == vm.gtStr)
+    else if (canonical == vm.gtStr)
     {
         if (AS_CLOSURE(method)->function->arity != 1)
         {
-            runtimeError("<_gt_> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_gt_>/<__gt__> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->greaterThan = method;
     }
-    else if (name == vm.indexStr)
+    else if (canonical == vm.indexStr)
     {
         if (AS_CLOSURE(method)->function->arity != 1)
         {
-            runtimeError("<_get_> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_get_>/<__getitem__> method override needs to have 1 argument only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->indexFn = method;
     }
-    else if (name == vm.setStr)
+    else if (canonical == vm.setStr)
     {
         if (AS_CLOSURE(method)->function->arity != 2)
         {
-            runtimeError("<_set_> method override needs to have 2 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_set_>/<__setitem__> method override needs to have 2 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->setFn = method;
     }
-    else if (name == vm.sizeStr)
+    else if (canonical == vm.sizeStr)
     {
         if (AS_CLOSURE(method)->function->arity != 0)
         {
-            runtimeError("<_size_> method override needs to have 0 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_size_>/<__len__> method override needs to have 0 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->sizeFn = method;
     }
-    else if (name == vm.hashStr)
+    else if (canonical == vm.hashStr)
     {
         if (AS_CLOSURE(method)->function->arity != 0)
         {
-            runtimeError("<_hash_> method override needs to have 0 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
+            runtimeError("<_hash_>/<__hash__> method override needs to have 0 arguments only. Was defined with %d ", AS_CLOSURE(method)->function->arity);
             return false;
         }
         klass->hashFn = method;
@@ -3009,6 +4678,11 @@ ObjClass *primativeClass(char *name)
     ObjClass *clazz = newClass(copyString(name, (int)strlen(name)));
     tableSet(&vm.globals, clazz->name, OBJ_VAL(clazz));
     return clazz;
+}
+
+ObjClass *vmDefineClass(const char *name)
+{
+    return primativeClass((char *)name);
 }
 
 static void *runCallableInNewThread(void *arg)
@@ -3125,13 +4799,13 @@ static Value splitNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for split(str, sep)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for split(str, sep)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (argc == 2 && !IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for split(str, sep)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for split(str, sep)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3208,19 +4882,19 @@ static Value replaceNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for replace(str, old, new)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for replace(str, old, new)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for replace(str, old, new)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for replace(str, old, new)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[2]))
     {
-        runtimeError("Expected a string but got '%s' for replace(str, old, new)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected a string but got '%s' for replace(str, old, new)", valueTypeName(argv[2]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3241,7 +4915,7 @@ static Value splitByWhitespaceNative(int argc, Value *argv, bool *hasError, bool
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for splitByWhitespace(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for splitByWhitespace(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3272,7 +4946,7 @@ static Value trimNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for trim(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for trim(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3296,13 +4970,13 @@ static Value findNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for find(str, sub)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for find(str, sub)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for find(str, sub)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for find(str, sub)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3330,7 +5004,7 @@ static Value lowerNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for lower(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for lower(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3359,7 +5033,7 @@ static Value upperNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for upper(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for upper(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3381,7 +5055,7 @@ static Value trimLeftNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for trimLeft(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for trimLeft(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3402,7 +5076,7 @@ static Value trimRightNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for trimRight(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for trimRight(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3425,7 +5099,7 @@ static Value isWhitespaceNative(int argc, Value *argv, bool *hasError, bool *pus
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for isWhitespace(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for isWhitespace(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3447,13 +5121,13 @@ static Value containsNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for contains(str, sub)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for contains(str, sub)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for contains(str, sub)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for contains(str, sub)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3474,7 +5148,7 @@ static Value evalNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for eval(str)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for eval(str)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3535,13 +5209,13 @@ NATIVE_FN(regexMatchStrNative)
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string but got '%s' for str.match(pattern)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string but got '%s' for str.match(pattern)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for str.match(pattern)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for str.match(pattern)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3604,13 +5278,13 @@ NATIVE_FN(regexFindAllNative)
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string but got '%s' for str.findall(pattern)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string but got '%s' for str.findall(pattern)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for str.findall(pattern)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for str.findall(pattern)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3675,13 +5349,13 @@ static Value split2Native(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string but got '%s' for split(sep)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string but got '%s' for split(sep)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (argc == 1 && !IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for split(str, sep)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for split(str, sep)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3718,19 +5392,19 @@ static Value replace2Native(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string as caller but got '%s' for replace(old, new)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string as caller but got '%s' for replace(old, new)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for replace(old, new)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a string but got '%s' for replace(old, new)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[1]))
     {
-        runtimeError("Expected a string but got '%s' for replace(old, new)", VALUE_TYPES[argv[2].type]);
+        runtimeError("Expected a string but got '%s' for replace(old, new)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3751,7 +5425,7 @@ static Value splitByWhitespace2Native(int argc, Value *argv, bool *hasError, boo
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for splitByWhitespace()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for splitByWhitespace()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3782,7 +5456,7 @@ static Value trim2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for trim()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for trim()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3806,13 +5480,13 @@ static Value find2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for find(sub)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for find(sub)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for find(sub)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for find(sub)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3834,7 +5508,7 @@ static Value lower2Native(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for lower()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for lower()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3856,7 +5530,7 @@ static Value upper2Native(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for upper()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for upper()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3878,7 +5552,7 @@ static Value titleNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for title()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for title()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3911,7 +5585,7 @@ static Value trimLeft2Native(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for trimLeft()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for trimLeft()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3919,7 +5593,7 @@ static Value trimLeft2Native(int argc, Value *argv, bool *hasError, bool *pushed
     {
         if (!IS_STR(argv[0]))
         {
-            runtimeError("Expected a string but got '%s' for trimLeft(str)", VALUE_TYPES[argv[0].type]);
+            runtimeError("Expected a string but got '%s' for trimLeft(str)", valueTypeName(argv[0]));
             *hasError = true;
             return NIL_VAL;
         }
@@ -3949,7 +5623,7 @@ static Value trimRight2Native(int argc, Value *argv, bool *hasError, bool *pushe
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for trimRight()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for trimRight()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3972,7 +5646,7 @@ static Value isWhitespace2Native(int argc, Value *argv, bool *hasError, bool *pu
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for isWhitespace()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for isWhitespace()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -3994,13 +5668,13 @@ static Value contains2Native(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for contains(sub)", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for contains(sub)", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(argv[0]))
     {
-        runtimeError("Expected a string but got '%s' for contains(sub)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a string but got '%s' for contains(sub)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4021,7 +5695,7 @@ static Value isDigitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for isDigit()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for isDigit()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4043,13 +5717,13 @@ static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_LIST(argv[0]))
     {
-        runtimeError("'join(list)' expects a list as first argument but got '%s'", VALUE_TYPES[argv[0].type]);
+        runtimeError("'join(list)' expects a list as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("'join(list)' expects a string as second argument but got '%s'", VALUE_TYPES[peek(argc).type]);
+        runtimeError("'join(list)' expects a string as second argument but got '%s'", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4097,7 +5771,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for format()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for format()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4174,7 +5848,7 @@ static Value strHashNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_STR(peek(argc)))
     {
-        runtimeError("Expected a string to be caller but got '%s' for hash()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a string to be caller but got '%s' for hash()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4253,7 +5927,7 @@ NATIVE_FN(appendListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for append()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for append()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4272,13 +5946,13 @@ NATIVE_FN(insertListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for insert()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for insert()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number as the second argument but got '%s' for insert()", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a number as the second argument but got '%s' for insert()", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4315,13 +5989,13 @@ NATIVE_FN(extendListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for extend()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for extend()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_LIST(argv[0]))
     {
-        runtimeError("Expected a list but got '%s' for extend(list)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a list but got '%s' for extend(list)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4357,7 +6031,7 @@ NATIVE_FN(prependListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for prepend()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for prepend()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4376,7 +6050,7 @@ NATIVE_FN(containsListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for contains()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for contains()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4397,7 +6071,7 @@ NATIVE_FN(indexOfListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for contains()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for contains()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4418,13 +6092,13 @@ NATIVE_FN(popListNative)
     }
     if (argc && !IS_NUM(argv[0]))
     {
-        runtimeError("Expected a number but got '%s' for pop(index)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a number but got '%s' for pop(index)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for pop()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for pop()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4470,7 +6144,7 @@ NATIVE_FN(foreachNative)
     // }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for foreach()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for foreach()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4525,13 +6199,13 @@ NATIVE_FN(removeIfNative)
     }
     if (!IS_CLOSURE(argv[0]))
     {
-        runtimeError("Expected a closure but got '%s' for removeIf(closure)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a closure but got '%s' for removeIf(closure)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for removeIf()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for removeIf()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4595,7 +6269,7 @@ NATIVE_FN(mapNative)
     // }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list to be caller but got '%s' for map()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list to be caller but got '%s' for map()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4654,22 +6328,22 @@ static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.init()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.init()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     ObjMap *map = newMap();
-    map->map.capacity = 64;
-    map->capacity = 64;
+    map->map.capacity = GROW_CAPACITY(0);
     map->map.count = 0;
-    map->count = 0;
-    map->map.entries = ALLOCATE(MapEntry, map->capacity);
+    map->map.entries = ALLOCATE(MapEntry, map->map.capacity);
     for (int i = 0; i < map->map.capacity; i++)
     {
         map->map.entries[i].key = NIL_VAL;
         map->map.entries[i].value = NIL_VAL;
+        map->map.entries[i].keyHash = 0;
         map->map.entries[i].isUsed = false;
+        map->map.entries[i].isTombstone = false;
     }
     // tableSet(&instance->fields, copyString("entries", 8), OBJ_VAL(map));
     return OBJ_VAL(map);
@@ -4685,18 +6359,19 @@ static Value mapClearNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.clear()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.clear()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjMap *map = AS_MAP(peek(argc));
-    map->count = 0;
     map->map.count = 0;
     for (int i = 0; i < map->map.capacity; i++)
     {
         map->map.entries[i].key = NIL_VAL;
         map->map.entries[i].value = NIL_VAL;
+        map->map.entries[i].keyHash = 0;
         map->map.entries[i].isUsed = false;
+        map->map.entries[i].isTombstone = false;
     }
     return NIL_VAL;
 }
@@ -4705,7 +6380,7 @@ static Value mapKeysNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 {
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.keys()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.keys()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4725,7 +6400,7 @@ static Value mapValuesNative(int argc, Value *argv, bool *hasError, bool *pushed
 {
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.keys()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.keys()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4745,7 +6420,7 @@ static Value mapEntriesNative(int argc, Value *argv, bool *hasError, bool *pushe
 {
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.entries()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.entries()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4781,7 +6456,7 @@ static Value mapGetNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.get()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.get()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4804,14 +6479,14 @@ static Value mapToStrNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.toStr()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.toStr()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjMap *map = AS_MAP(peek(argc));
     char *str = ALLOCATE(char, STR_BUFF);
     int len = 0;
-    mapToString(&map->map, str, &len);
+    mapToString(&map->map, str, STR_BUFF, &len);
     return OBJ_VAL(takeString(str, len));
 }
 
@@ -4825,13 +6500,12 @@ static Value mapSetNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.set()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.set()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjMap *map = AS_MAP(peek(argc));
     mapSet(&map->map, argv[0], argv[1]);
-    map->capacity = map->map.capacity;
     return argv[1];
 }
 
@@ -4845,12 +6519,12 @@ static Value mapSizeNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.size()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.size()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjMap *map = AS_MAP(peek(argc));
-    return NUM_VAL(map->count);
+    return NUM_VAL(map->map.count);
 }
 
 static Value mapRemoveNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -4863,14 +6537,13 @@ static Value mapRemoveNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.remove()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.remove()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjMap *map = AS_MAP(peek(argc));
     if (!mapDelete(&map->map, argv[0]))
         return BOOL_VAL(false);
-    map->count--;
     return BOOL_VAL(true);
 }
 
@@ -4884,7 +6557,7 @@ static Value mapContainsKeyNative(int argc, Value *argv, bool *hasError, bool *p
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.containsKey()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.containsKey()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4902,13 +6575,13 @@ static Value mapComputeNative(int argc, Value *argv, bool *hasError, bool *pushe
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.compute()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.compute()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_CLOSURE(argv[1]))
     {
-        runtimeError("Expected a closure but got '%s' for map.compute(key, closure)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a closure but got '%s' for map.compute(key, closure)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4947,13 +6620,13 @@ static Value mapComputeIfAbsentNative(int argc, Value *argv, bool *hasError, boo
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.computeIfAbsent()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.computeIfAbsent()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_CLOSURE(argv[1]))
     {
-        runtimeError("Expected a closure but got '%s' for map.computeIfAbsent(key, closure)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a closure but got '%s' for map.computeIfAbsent(key, closure)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -4976,7 +6649,6 @@ static Value mapComputeIfAbsentNative(int argc, Value *argv, bool *hasError, boo
             return NIL_VAL;
         val = pop();
         mapSet(&map->map, argv[0], val);
-        map->capacity = map->map.capacity;
     }
 
     return OBJ_VAL(map);
@@ -4992,13 +6664,13 @@ static Value mapComputeIfPresentNative(int argc, Value *argv, bool *hasError, bo
     }
     if (!IS_MAP(peek(argc)))
     {
-        runtimeError("Expected a map to be caller but got '%s' for map.computeIfPresent()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a map to be caller but got '%s' for map.computeIfPresent()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
     if (!IS_CLOSURE(argv[1]))
     {
-        runtimeError("Expected a closure but got '%s' for map.computeIfPresent(key, closure)", VALUE_TYPES[argv[1].type]);
+        runtimeError("Expected a closure but got '%s' for map.computeIfPresent(key, closure)", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5025,7 +6697,6 @@ static Value mapComputeIfPresentNative(int argc, Value *argv, bool *hasError, bo
         }
         val = pop();
         mapSet(&map->map, argv[0], val);
-        map->capacity = map->map.capacity;
     }
 
     return OBJ_VAL(map);
@@ -5042,7 +6713,7 @@ static Value sbInitNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.init()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.init()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5065,7 +6736,7 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.append()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.append()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5089,7 +6760,7 @@ static Value sbAppendNative(int argc, Value *argv, bool *hasError, bool *pushedV
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected StringBuilder to have a list but got '%s' for SB.append(str)", VALUE_TYPES[value.type]);
+        runtimeError("Expected StringBuilder to have a list but got '%s' for SB.append(str)", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5108,7 +6779,7 @@ static Value sbSizeNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.size()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.size()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5123,7 +6794,7 @@ static Value sbSizeNative(int argc, Value *argv, bool *hasError, bool *pushedVal
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.size()", VALUE_TYPES[value.type]);
+        runtimeError("Expected a list but got '%s' for SB.size()", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5141,7 +6812,7 @@ static Value sbToStringNative(int argc, Value *argv, bool *hasError, bool *pushe
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.toStr()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.toStr()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5156,7 +6827,7 @@ static Value sbToStringNative(int argc, Value *argv, bool *hasError, bool *pushe
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.toStr()", VALUE_TYPES[value.type]);
+        runtimeError("Expected a list but got '%s' for SB.toStr()", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5186,7 +6857,7 @@ static Value sbClearNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.clear()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.clear()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5201,7 +6872,7 @@ static Value sbClearNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.clear()", VALUE_TYPES[value.type]);
+        runtimeError("Expected a list but got '%s' for SB.clear()", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5220,7 +6891,7 @@ static Value sbPopNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.pop()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.pop()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5235,7 +6906,7 @@ static Value sbPopNative(int argc, Value *argv, bool *hasError, bool *pushedValu
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.pop()", VALUE_TYPES[value.type]);
+        runtimeError("Expected a list but got '%s' for SB.pop()", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5259,7 +6930,7 @@ static Value sbToArrayNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected a SB to be caller but got '%s' for SB.toArray()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a SB to be caller but got '%s' for SB.toArray()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5274,7 +6945,7 @@ static Value sbToArrayNative(int argc, Value *argv, bool *hasError, bool *pushed
 
     if (!IS_LIST(value))
     {
-        runtimeError("Expected a list but got '%s' for SB.toArray()", VALUE_TYPES[value.type]);
+        runtimeError("Expected a list but got '%s' for SB.toArray()", valueTypeName(value));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5339,7 +7010,7 @@ static Value errorInitNative(int argc, Value *argv, bool *hasError, bool *pushed
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected an Error to be caller but got '%s' for Error())", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected an Error to be caller but got '%s' for Error())", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5359,7 +7030,7 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
     }
     if (!IS_INSTANCE(peek(argc)))
     {
-        runtimeError("Expected an Error to be caller but got '%s' for Error.toStr()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected an Error to be caller but got '%s' for Error.toStr()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5419,7 +7090,7 @@ NATIVE_FN(baseToStrNative)
     {
         if (IS_STR(peek(argc)))
             return peek(argc);
-        runtimeError("Expected an Object to be caller but got '%s' for Object.toStr()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected an Object to be caller but got '%s' for Object.toStr()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5469,23 +7140,14 @@ NATIVE_FN(loadLibNative)
         *hasError = true;
         return NIL_VAL;
     }
-    void *handle = dlopen(AS_CSTR(argv[0]), RTLD_NOW | RTLD_GLOBAL);
-    if (!handle)
+
+    bool ret = loadDynamicModulePath(AS_CSTR(argv[0]), true);
+    if (!ret)
     {
-        runtimeError("Failed to load library: %s", dlerror());
         *hasError = true;
         return NIL_VAL;
     }
-    void (*init)(DefineNativeFn, DefineNativeClassFn);
-    init = dlsym(handle, "init");
-    bool ret = false;
-    if (init)
-    {
-        init(defineNative, primativeClass);
-        ret = true;
-    }
-    // dlclose(handle);
-    return BOOL_VAL(ret);
+    return BOOL_VAL(true);
 }
 
 NATIVE_FN(dirNative)
@@ -5511,7 +7173,7 @@ NATIVE_FN(dirNative)
         table = AS_FOREIGN(val)->methods;
     else
     {
-        runtimeError("Expected a class or instance but got '%s' for __dir__(clazz/instance)", VALUE_TYPES[peek(0).type]);
+        runtimeError("Expected a class or instance but got '%s' for __dir__(clazz/instance)", valueTypeName(peek(0)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5541,24 +7203,42 @@ NATIVE_FN(varsNative)
     }
 
     Value val = peek(0);
-    ObjInstance *instance = NULL;
+    // ObjInstance *instance = NULL;
+    Table *fields = NULL;
 
     if (IS_INSTANCE(val))
-        instance = AS_INSTANCE(val);
+    {
+        ObjInstance *instance = AS_INSTANCE(val);
+        fields = &instance->fields;
+    }
+    else if (IS_FOREIGN(val))
+    {
+        ObjForeign *foreign = AS_FOREIGN(val);
+        fields = &foreign->fields;
+    }
+    else if (IS_CLASS(val)) // class
+    {
+        ObjClass *clazz = AS_CLASS(val);
+        fields = &clazz->staticVars;
+    }
+    else if (IS_BUILTIN(val))
+    {
+        fields = &getVmClass(val)->staticVars;
+    }
     else
     {
-        runtimeError("Expected an instance but got '%s' for __vars__(instance)", VALUE_TYPES[peek(0).type]);
+        runtimeError("Expected an instance but got '%s' for __vars__(instance)", valueTypeName(peek(0)));
         *hasError = true;
         return NIL_VAL;
     }
 
     ObjList *list = newList();
     // push(OBJ_VAL(list));
-    for (int i = 0; i < instance->fields.capacity; i++)
+    for (int i = 0; i < fields->capacity; i++)
     {
-        if (instance->fields.entries[i].key != NULL)
+        if (fields->entries[i].key != NULL)
         {
-            appendToList(list, OBJ_VAL(instance->fields.entries[i].key));
+            appendToList(list, OBJ_VAL(fields->entries[i].key));
         }
     }
 
@@ -5575,11 +7255,19 @@ NATIVE_FN(deleteVarNative)
     }
     if (!IS_STR(peek(0)))
     {
-        runtimeError("Expected a string but got '%s' for __del__(var)", VALUE_TYPES[peek(0).type]);
+        runtimeError("Expected a string but got '%s' for __del__(var)", valueTypeName(peek(0)));
         *hasError = true;
         return NIL_VAL;
     }
     ObjString *name = AS_STR(peek(0));
+    Value _isConst;
+    if (tableGet(&vm.constGlobals, name, &_isConst))
+    {
+        runtimeError("Cannot delete constant '%s'", name->chars);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
     if (!tableDelete(&vm.globals, name))
     {
         runtimeError("Variable '%s' not found", name->chars);
@@ -5663,7 +7351,7 @@ static int customCompareValues(const void *a, const void *b)
 {
     if (!IS_CLOSURE(peek(0)))
     {
-        runtimeError("Expected a closure but got '%s' for List::sort(cmpFn)", VALUE_TYPES[peek(0).type]);
+        runtimeError("Expected a closure but got '%s' for List::sort(cmpFn)", valueTypeName(peek(0)));
         return 0;
     }
     ObjClosure *cmpFn = AS_CLOSURE(peek(0));
@@ -5685,7 +7373,7 @@ static int customCompareValues(const void *a, const void *b)
     Value result = pop();
     if (!IS_NUM(result))
     {
-        runtimeError("Expected a number but got '%s' for List::sort(cmpFn)", VALUE_TYPES[result.type]);
+        runtimeError("Expected a number but got '%s' for List::sort(cmpFn)", valueTypeName(result));
         return 0;
     }
     push(OBJ_VAL(cmpFn));
@@ -5694,7 +7382,6 @@ static int customCompareValues(const void *a, const void *b)
 
 NATIVE_FN(sortListNative)
 {
-    // How would I be able to provide a custom compare function
     if (argc != 0 && argc != 1)
     {
         runtimeError("'list::sort(<optional> cmpFn | <optional> descending)', expects 0 or 1 arguments %d were passed in", argc);
@@ -5703,7 +7390,7 @@ NATIVE_FN(sortListNative)
     }
     if (!IS_LIST(peek(argc)))
     {
-        runtimeError("Expected a list but got '%s' for list::sort()", VALUE_TYPES[peek(argc).type]);
+        runtimeError("Expected a list but got '%s' for list::sort()", valueTypeName(peek(argc)));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5725,7 +7412,7 @@ NATIVE_FN(sortListNative)
     }
     else if (argc == 1)
     {
-        runtimeError("Expected a closure or boolean but got '%s' for List::sort(cmpFn|descending)", VALUE_TYPES[argv[0].type]);
+        runtimeError("Expected a closure or boolean but got '%s' for List::sort(cmpFn|descending)", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
@@ -5790,6 +7477,170 @@ NATIVE_FN(waitNative)
     return NUM_VAL(status);
 }
 
+NATIVE_FN(getPidNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'getpid()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return NUM_VAL((double)getpid());
+}
+
+NATIVE_FN(getParentPidNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'getppid()', expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return NUM_VAL((double)getppid());
+}
+
+NATIVE_FN(spawnNative)
+{
+    if (argc < 1)
+    {
+        runtimeError("'spawn(command | callable, ...args)', expects at least 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        runtimeError("Failed to spawn process");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (pid == 0)
+    {
+        if (IS_STR(argv[0]))
+        {
+            if (argc != 1)
+            {
+                _exit(64);
+            }
+            execl("/bin/sh", "sh", "-c", AS_CSTR(argv[0]), (char *)NULL);
+            _exit(127);
+        }
+
+        Value callable = argv[0];
+        int callArgc = argc - 1;
+        int startFrameCount = vm.frameCount;
+
+        push(callable);
+        for (int i = 1; i < argc; i++)
+            push(argv[i]);
+
+        if (!callValue(callable, callArgc))
+            _exit(70);
+
+        if (vm.frameCount > startFrameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+            _exit(70);
+
+        Value result = pop();
+        if (IS_NUM(result))
+            _exit(((int)AS_NUM(result)) & 0xFF);
+        if (IS_BOOL(result))
+            _exit(AS_BOOL(result) ? 0 : 1);
+        _exit(0);
+    }
+
+    return NUM_VAL((double)pid);
+}
+
+NATIVE_FN(waitPidNative)
+{
+    if (argc != 1 && argc != 2)
+    {
+        runtimeError("'waitPid(pid, <optional> noHang)', expects 1 or 2 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("'waitPid(pid, <optional> noHang)', expects pid as number but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    bool noHang = false;
+    if (argc == 2)
+    {
+        if (!IS_BOOL(argv[1]))
+        {
+            runtimeError("'waitPid(pid, <optional> noHang)', expects noHang as bool but got '%s'", valueTypeName(argv[1]));
+            *hasError = true;
+            return NIL_VAL;
+        }
+        noHang = AS_BOOL(argv[1]);
+    }
+
+    int status = 0;
+    pid_t waited = waitpid((pid_t)AS_NUM(argv[0]), &status, noHang ? WNOHANG : 0);
+    if (waited < 0)
+    {
+        runtimeError("Failed to wait for pid %d", (int)AS_NUM(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (waited == 0)
+        return NIL_VAL;
+
+    ObjInstance *result = newInstance(vm.baseObj);
+    push(OBJ_VAL(result));
+    tableSet(&result->fields, copyString("pid", 3), NUM_VAL((double)waited));
+    tableSet(&result->fields, copyString("rawStatus", 9), NUM_VAL((double)status));
+    tableSet(&result->fields, copyString("exited", 6), BOOL_VAL(WIFEXITED(status)));
+    tableSet(&result->fields, copyString("signaled", 8), BOOL_VAL(WIFSIGNALED(status)));
+    tableSet(&result->fields, copyString("stopped", 7), BOOL_VAL(WIFSTOPPED(status)));
+    tableSet(&result->fields, copyString("exitCode", 8), NUM_VAL(WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    tableSet(&result->fields, copyString("signal", 6), NUM_VAL(WIFSIGNALED(status) ? WTERMSIG(status) : -1));
+
+    return pop();
+}
+
+NATIVE_FN(killNative)
+{
+    if (argc != 1 && argc != 2)
+    {
+        runtimeError("'kill(pid, <optional> signal)', expects 1 or 2 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("'kill(pid, <optional> signal)', expects pid as number but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int sig = SIGTERM;
+    if (argc == 2)
+    {
+        if (!IS_NUM(argv[1]))
+        {
+            runtimeError("'kill(pid, <optional> signal)', expects signal as number but got '%s'", valueTypeName(argv[1]));
+            *hasError = true;
+            return NIL_VAL;
+        }
+        sig = (int)AS_NUM(argv[1]);
+    }
+
+    int rc = kill((pid_t)AS_NUM(argv[0]), sig);
+    if (rc != 0)
+    {
+        runtimeError("Failed to send signal %d to pid %d", sig, (int)AS_NUM(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return BOOL_VAL(true);
+}
+
 NATIVE_FN(pipeNative)
 {
     if (argc != 0)
@@ -5813,83 +7664,116 @@ NATIVE_FN(pipeNative)
     return pop();
 }
 
-////////////////////////////////////////////////////////////////////////////
-
-void initVM(bool printBytecode, bool printExecStack)
+static void initCoreModule()
 {
-    if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
-    {
-        fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
-    }
-    // if (signal(SIGSEGV, sigSegvHandler) == SIG_ERR)
-    // {
-    //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
-    // }
-    acquireGVL();
-    printBytecodeGlobal = printBytecode;
-    printExecStackGlobaL = printExecStack;
-    srand(time(NULL));
-    resetStack();
-    vm.objects = NULL;
-    vm.bytesAllocated = 0;
-    vm.nextGC = 1024L * 1024L * 1024L;
+    defineNative("tI", testRinitNative);
+    defineNative("tC", testRcloseNative);
+    defineNative("tPres", testRPresentNative);
+    defineNative("tP", testRprintNative);
+    defineNative("tPoll", testRpollNative);
+    defineNative("tClear", testRClearNative);
+    defineNative("tSetCell", testRsetCellNative);
 
-    vm.grayCount = 0;
-    vm.grayCapacity = 0;
-    vm.grayStack = NULL;
+    defineNative("offset", offsetNative);
 
-    vm.importCount = 0;
-    vm.importSources = NULL;
+    defineNative("clock", clockNative);
+    defineNative("input", inputNative);
+    defineNative("getc", getcNative);
+    defineNative("kbhit", kbhitNative);
+    defineNative("chr", chrNative);
+    defineNative("exit", exitNative);
+    defineNative("eval", evalNative);
+    defineNative("print_error", printErrNative);
+    defineNative("sleep", sleepNative);
+    defineNative("clear", clearNative);
+    defineNative("randInt", randomIntNative);
+    defineNative("rand", randNative);
+    defineNative("str", strCastNative);
+    defineNative("hash", hashNative);
+    defineNative("join", joinNative);
+    defineNative("int", intCastNative);
+    defineNative("float", floatCastNative);
+    defineNative("bool", boolCastNative);
+    defineNative("list", listCastNative);
+    defineNative("type", typeOf);
+    defineNative("len", lenNative);
+    defineNative("instanceof", instanceOf);
+    defineNative("ord", ordNative);
 
-    vm.nextWideOp = -1;
+    defineNative("fork", forkNative);
+    defineNative("wait", waitNative);
+    defineNative("waitPid", waitPidNative);
+    defineNative("spawn", spawnNative);
+    defineNative("getpid", getPidNative);
+    defineNative("getppid", getParentPidNative);
+    defineNative("kill", killNative);
+    defineNative("pipe", pipeNative);
 
-    initTable(&vm.globals);
-    initTable(&vm.strings);
-    initTable(&vm.imports);
-    initTable(&vm.importFuncs);
-    vm.initStr = NULL;
-    vm.initStr = copyString("init", 4);
+    vmDefineGlobalValue("WNOHANG", NUM_VAL((double)WNOHANG));
+    vmDefineGlobalValue("SIGTERM", NUM_VAL((double)SIGTERM));
+    vmDefineGlobalValue("SIGKILL", NUM_VAL((double)SIGKILL));
 
-    vm.toStr = NULL;
-    vm.toStr = copyString("toStr", 5);
+    // Strings
+    defineNative("split", splitNative);
+    defineNative("splitOnWs", splitByWhitespaceNative);
+    defineNative("replace", replaceNative);
+    defineNative("find", findNative);
+    defineNative("contains", containsNative);
+    defineNative("lower", lowerNative);
+    defineNative("upper", upperNative);
+    defineNative("trim", trimNative);
+    defineNative("trimLeft", trimLeftNative);
+    defineNative("trimRight", trimRightNative);
+    defineNative("isWhitespace", isWhitespaceNative);
 
-    vm.eqStr = NULL;
-    vm.eqStr = copyString("_eq_", 4);
+    // Sockets
+    defineNative("socket", socketNative);
+    defineNative("close", closeFDNative);
+    defineNative("connect", connectNative);
+    defineNative("bind", bindSocketPortNative);
+    defineNative("setSockOpt", setSockOptionsNative);
+    defineNative("listen", listenNative);
+    defineNative("accept", acceptNative);
+    defineNative("read", readNative);
+    defineNative("poll", pollNative);
+    defineNative("send", sendNative);
+    defineNative("sendFile", sendFileWithFileDescriptorNative);
 
-    vm.ltStr = NULL;
-    vm.ltStr = copyString("_lt_", 4);
+    // File
+    defineNative("open", openFileNative);
+    defineNative("readN", readSizeNative);
+    defineNative("seek", seekNative);
+    defineNative("write", writeNative);
+    defineNative("fileExists", fileExistsNative);
+    defineNative("fileSize", fileSizeNative);
 
-    vm.gtStr = NULL;
-    vm.gtStr = copyString("_gt_", 4);
+    // Math
+    defineNative("sin", sinNative);
+    defineNative("cos", cosNative);
 
-    vm.indexStr = NULL;
-    vm.indexStr = copyString("_get_", 5);
+    // GC
+    defineNative("gc", gcNative);
+    defineNative("vmStats", vmStatsNative);
 
-    vm.setStr = NULL;
-    vm.setStr = copyString("_set_", 5);
+    defineNative("__dir__", dirNative);
+    defineNative("__vars__", varsNative);
+    defineNative("__del__", deleteVarNative);
 
-    vm.sizeStr = NULL;
-    vm.sizeStr = copyString("_size_", 6);
+    // Threads // SOON TO BE A BUILT-IN CLASS
+    // defineNative("newThread", newThreadNative);
+    // defineNative("joinThread", joinThreadNative);
+    defineNative("loadLib", loadLibNative);
+}
 
-    vm.hashStr = NULL;
-    vm.hashStr = copyString("_hash_", 6);
-
-    vm.clazzStr = NULL;
-    vm.clazzStr = copyString("clazz", 5);
-
-    vm.lastError = NULL;
-    vm.isInTryCatch = false;
-    vm.isRepl = false;
-
+static void initPrimitiveClassesModule()
+{
     // Base Object
     vm.baseObj = NULL;
     ObjClass *baseObj = primativeClass("Object");
     vm.baseObj = baseObj;
-    // baseObj->initializer = OBJ_VAL(newNative(initObjectNative));
     baseObj->toStr = OBJ_VAL(newNative(baseToStrNative));
     tableSet(&baseObj->methods, copyString("toStr", 5), baseObj->toStr);
 
-    // newClass
     vm.errorClass = NULL;
     ObjClass *errorClass = primativeClass("Error");
     vm.errorClass = errorClass;
@@ -5935,9 +7819,6 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
     tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
     tableSet(&listClass->methods, copyString("sort", 4), OBJ_VAL(newNative(sortListNative)));
-
-    // tableSet(&listClass->methods, copyString("remove", 6), OBJ_VAL(newNative(removeListNative)));
-    // tableSet(&listClass->methods, copyString("clear", 5), OBJ_VAL(newNative(clearListNative)));
     tableSet(&listClass->methods, copyString("indexOf", 7), OBJ_VAL(newNative(indexOfListNative)));
     tableSet(&listClass->methods, copyString("insert", 6), OBJ_VAL(newNative(insertListNative)));
     tableSet(&listClass->methods, copyString("pop", 3), OBJ_VAL(newNative(popListNative)));
@@ -5983,114 +7864,179 @@ void initVM(bool printBytecode, bool printExecStack)
     tableSet(&sb->methods, copyString("clear", 5), OBJ_VAL(newNative(sbClearNative)));
     tableSet(&sb->methods, copyString("pop", 3), OBJ_VAL(newNative(sbPopNative)));
     tableSet(&sb->methods, copyString("toArray", 7), OBJ_VAL(newNative(sbToArrayNative)));
+}
 
+void registerBuiltinPrimitiveClassesModule()
+{
+    registerBuiltinModule("primitives", initPrimitiveClassesModule);
+}
+
+static void initFileClassModule()
+{
     ObjClass *file = primativeClass("File");
     file->initializer = OBJ_VAL(newNative(fileInitNative));
     tableSet(&file->methods, copyString("exists", 6), OBJ_VAL(newNative(fileClassExistsNative)));
+}
 
+void registerBuiltinFileClassModule()
+{
+    registerBuiltinModule("file", initFileClassModule);
+}
+
+static void initSQLClassModule()
+{
     ObjClass *sql = primativeClass("SQL");
     sql->initializer = OBJ_VAL(newNative(sqlInitNative));
     tableSet(&sql->methods, copyString("close", 5), OBJ_VAL(newNative(sqlCloseNative)));
     tableSet(&sql->methods, copyString("exec", 4), OBJ_VAL(newNative(sqlExecNative)));
     tableSet(&sql->methods, copyString("query", 5), OBJ_VAL(newNative(sqlQueryNative)));
+}
 
-    defineNative("tI", testRinitNative);
-    defineNative("tC", testRcloseNative);
-    defineNative("tPres", testRPresentNative);
-    defineNative("tP", testRprintNative);
-    defineNative("tPoll", testRpollNative);
-    defineNative("tClear", testRClearNative);
-    defineNative("tSetCell", testRsetCellNative);
+void registerBuiltinSQLClassModule()
+{
+    registerBuiltinModule("sql", initSQLClassModule);
+}
 
-    defineNative("offset", offsetNative);
+void registerBuiltinCoreModule()
+{
+    registerBuiltinModule("core", initCoreModule);
+}
 
-    defineNative("clock", clockNative);
-    defineNative("input", inputNative);
-    defineNative("getc", getcNative);
-    defineNative("kbhit", kbhitNative);
-    defineNative("chr", chrNative);
-    defineNative("exit", exitNative);
-    defineNative("eval", evalNative);
-    defineNative("print_error", printErrNative);
-    defineNative("sleep", sleepNative);
-    defineNative("clear", clearNative);
-    defineNative("randInt", randomIntNative);
-    defineNative("rand", randNative);
-    defineNative("str", strCastNative);
-    defineNative("hash", hashNative);
-    defineNative("join", joinNative);
-    defineNative("int", intCastNative);
-    defineNative("float", floatCastNative);
-    defineNative("bool", boolCastNative);
-    defineNative("list", listCastNative);
-    defineNative("type", typeOf);
-    defineNative("len", lenNative);
-    defineNative("instanceof", instanceOf);
-    defineNative("ord", ordNative);
+////////////////////////////////////////////////////////////////////////////
 
-    defineNative("fork", forkNative);
-    defineNative("wait", waitNative);
-    defineNative("pipe", pipeNative);
+void initVM(bool printBytecode, bool printExecStack)
+{
+    if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
+    {
+        fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
+    }
+    // if (signal(SIGSEGV, sigSegvHandler) == SIG_ERR)
+    // {
+    //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
+    // }
+    acquireGVL();
+    printBytecodeGlobal = printBytecode;
+    printExecStackGlobaL = printExecStack;
+    srand(time(NULL));
+    resetStack();
+    vm.objects = NULL;
+    vm.bytesAllocated = 0;
+    vm.nextGC = 1024L * 1024L;
+    vm.maxHeapSize = 1024L * 1024L * 1024L * 4; // 4GB
+    vm.grayCount = 0;
+    vm.grayCapacity = 0;
+    vm.grayStack = NULL;
 
-    // Strings
-    defineNative("split", splitNative);
-    defineNative("splitOnWs", splitByWhitespaceNative);
-    defineNative("replace", replaceNative);
-    defineNative("find", findNative);
-    defineNative("contains", containsNative);
-    defineNative("lower", lowerNative);
-    defineNative("upper", upperNative);
-    defineNative("trim", trimNative);
-    defineNative("trimLeft", trimLeftNative);
-    defineNative("trimRight", trimRightNative);
-    defineNative("isWhitespace", isWhitespaceNative);
+    vm.importCount = 0;
+    vm.importSources = NULL;
 
-    // Sockets
-    defineNative("socket", socketNative);
-    defineNative("close", closeFDNative);
-    defineNative("connect", connectNative);
-    defineNative("bind", bindSocketPortNative);
-    defineNative("setSockOpt", setSockOptionsNative);
-    defineNative("listen", listenNative);
-    defineNative("accept", acceptNative);
-    defineNative("read", readNative);
-    defineNative("poll", pollNative);
-    defineNative("send", sendNative);
-    defineNative("sendFile", sendFileWithFileDescriptorNative);
-    // File
-    defineNative("open", openFileNative);
-    defineNative("readN", readSizeNative);
-    defineNative("seek", seekNative);
-    defineNative("write", writeNative);
-    // defineNative("appendFile", appendFileNative);
-    defineNative("fileExists", fileExistsNative);
-    defineNative("fileSize", fileSizeNative);
+    vm.nextWideOp = -1;
 
-    // Math
-    defineNative("sin", sinNative);
-    defineNative("cos", cosNative);
-    // defineNative("min", minNative);
-    // defineNative("max", maxNative);
+    initTable(&vm.globals);
+    initTable(&vm.constGlobals);
+    initTable(&vm.strings);
+    initTable(&vm.imports);
+    initTable(&vm.importFuncs);
+    vm.currentModuleExports = NULL;
+    vm.currentModuleHasExplicitExports = false;
+    gDebuggerEnabled = false;
+    gDebuggerStepMode = false;
+    gDebuggerPauseNext = false;
+    gDebugBreakpointCount = 0;
+    gDebugWatchCount = 0;
+    initBuiltinModules();
+    vm.initStr = NULL;
+    vm.initStr = copyString("init", 4);
 
-    // GC
-    defineNative("gc", gcNative);
-    defineNative("vmStats", vmStatsNative);
+    vm.toStr = NULL;
+    vm.toStr = copyString("toStr", 5);
 
-    defineNative("__dir__", dirNative);
-    defineNative("__vars__", varsNative);
-    defineNative("__del__", deleteVarNative);
+    vm.strDunderStr = NULL;
+    vm.strDunderStr = copyString("__str__", 7);
 
-    // Threads // SOON TO BE A BUILT-IN CLASS
-    // defineNative("newThread", newThreadNative);
-    // defineNative("joinThread", joinThreadNative);
+    vm.eqStr = NULL;
+    vm.eqStr = copyString("_eq_", 4);
 
-    // defineNative("loadLib", loadLibNative);
+    vm.eqDunderStr = NULL;
+    vm.eqDunderStr = copyString("__eq__", 6);
+
+    vm.ltStr = NULL;
+    vm.ltStr = copyString("_lt_", 4);
+
+    vm.ltDunderStr = NULL;
+    vm.ltDunderStr = copyString("__lt__", 6);
+
+    vm.gtStr = NULL;
+    vm.gtStr = copyString("_gt_", 4);
+
+    vm.gtDunderStr = NULL;
+    vm.gtDunderStr = copyString("__gt__", 6);
+
+    vm.indexStr = NULL;
+    vm.indexStr = copyString("_get_", 5);
+
+    vm.getitemDunderStr = NULL;
+    vm.getitemDunderStr = copyString("__getitem__", 11);
+
+    vm.setStr = NULL;
+    vm.setStr = copyString("_set_", 5);
+
+    vm.setitemDunderStr = NULL;
+    vm.setitemDunderStr = copyString("__setitem__", 11);
+
+    vm.sizeStr = NULL;
+    vm.sizeStr = copyString("_size_", 6);
+
+    vm.lenDunderStr = NULL;
+    vm.lenDunderStr = copyString("__len__", 7);
+
+    vm.hashStr = NULL;
+    vm.hashStr = copyString("_hash_", 6);
+
+    vm.hashDunderStr = NULL;
+    vm.hashDunderStr = copyString("__hash__", 8);
+
+    vm.clazzStr = NULL;
+    vm.clazzStr = copyString("clazz", 5);
+
+    vm.lastError = NULL;
+    vm.isInTryCatch = false;
+    vm.isRepl = false;
+
+    Table preloadBefore;
+    snapshotGlobals(&preloadBefore);
+    importBuiltinModule(copyString("primitives", 10));
+    ObjMap *primitiveExports = collectGlobalDiff(&preloadBefore);
+    freeTable(&preloadBefore);
+    tableSet(&vm.imports, copyString("primitives", 10), OBJ_VAL(primitiveExports));
+    tableSet(&vm.imports, copyString("primitives.k", 12), OBJ_VAL(primitiveExports));
+
+    snapshotGlobals(&preloadBefore);
+    importBuiltinModule(copyString("core", 4));
+    ObjMap *coreExports = collectGlobalDiff(&preloadBefore);
+    freeTable(&preloadBefore);
+    tableSet(&vm.imports, copyString("core", 4), OBJ_VAL(coreExports));
+    tableSet(&vm.imports, copyString("core.k", 6), OBJ_VAL(coreExports));
+}
+
+void vmEnableDebugger(bool enabled)
+{
+    gDebuggerEnabled = enabled;
+    gDebuggerStepMode = false;
+    gDebuggerPauseNext = enabled;
+    debuggerInitScriptCommands();
+    if (!enabled)
+    {
+        gDebugBreakpointCount = 0;
+        gDebugWatchCount = 0;
+    }
 }
 
 void freeVM()
 {
     releaseGVL();
     freeTable(&vm.globals);
+    freeTable(&vm.constGlobals);
     freeTable(&vm.strings);
     freeTable(&vm.imports);
     freeTable(&vm.importFuncs);
@@ -6099,14 +8045,22 @@ void freeVM()
     FREE_ARRAY(char, vm.importSources, vm.importCount);
     vm.initStr = NULL;
     vm.toStr = NULL;
+    vm.strDunderStr = NULL;
     vm.eqStr = NULL;
+    vm.eqDunderStr = NULL;
     vm.clazzStr = NULL;
     vm.indexStr = NULL;
+    vm.getitemDunderStr = NULL;
     vm.setStr = NULL;
+    vm.setitemDunderStr = NULL;
     vm.sizeStr = NULL;
+    vm.lenDunderStr = NULL;
     vm.hashStr = NULL;
+    vm.hashDunderStr = NULL;
     vm.ltStr = NULL;
+    vm.ltDunderStr = NULL;
     vm.gtStr = NULL;
+    vm.gtDunderStr = NULL;
     vm.errorClass = NULL;
     vm.stringClass = NULL;
     vm.listClass = NULL;
@@ -6151,13 +8105,60 @@ int getValidStringIndex(ObjString *string, int index)
 
 void indexStringBySlice(Value sliceVal, ObjString *str)
 {
-    Value *result;
     ObjSlice *slice = AS_SLICE(sliceVal);
     int start = getValidStringIndex(str, slice->start);
     int end = getValidStringIndex(str, slice->end);
     int step = slice->step;
+
+    if (step == 0)
+    {
+        runtimeError("Slice step cannot be zero");
+        return;
+    }
+
+    if (start < 0)
+        start = 0;
+    if (end < 0)
+        end = 0;
+    if (start > str->len)
+        start = str->len;
+    if (end > str->len)
+        end = str->len;
+
+    if (step == 1)
+    {
+        int len = end - start;
+        if (len <= 0)
+        {
+            push(OBJ_VAL(copyString("", 0)));
+            return;
+        }
+        push(OBJ_VAL(copyStringUninterned(str->chars + start, len)));
+        return;
+    }
+
     bool reversed = step < 0;
-    char substring[BUFFER_SIZE];
+    int count = 0;
+    if (reversed)
+    {
+        int low = start < end ? start : end;
+        int high = start < end ? end : start;
+        for (int i = high - 1; i >= low; i += step)
+            count++;
+    }
+    else
+    {
+        for (int i = start; i < end; i += step)
+            count++;
+    }
+
+    if (count <= 0)
+    {
+        push(OBJ_VAL(copyString("", 0)));
+        return;
+    }
+
+    char *substring = ALLOCATE(char, count + 1);
     int subIndex = 0;
     if (reversed)
     {
@@ -6176,12 +8177,8 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
         }
     }
     substring[subIndex] = '\0';
-    if (subIndex == 0)
-    {
-        push(OBJ_VAL(copyString("", 0)));
-        return;
-    }
-    ObjString *ret = copyString(substring, subIndex);
+    ObjString *ret = copyStringUninterned(substring, subIndex);
+    FREE_ARRAY(char, substring, count + 1);
 
     push(OBJ_VAL(ret));
 }
@@ -6253,6 +8250,26 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             disassembleInst(&frame->closure->function->chunk, (int)(frame->ip - frame->closure->function->chunk.code));
         }
         // #endif
+        if (unlikely(gDebuggerEnabled))
+        {
+            bool shouldPause = gDebuggerPauseNext || gDebuggerStepMode;
+            int bpIndex = -1;
+            bool bpHit = false;
+
+            if (!shouldPause)
+            {
+                bpHit = debuggerMatchBreakpoint(frame, &bpIndex);
+                shouldPause = bpHit;
+            }
+
+            if (shouldPause)
+            {
+                gDebuggerPauseNext = false;
+                if (!debuggerPrompt(frame, bpHit, bpIndex))
+                    return INTERPRET_RUNTIME_ERROR;
+            }
+        }
+
         uint8_t inst;
         switch (inst = READ_BYTE())
         {
@@ -6263,7 +8280,15 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(BOOL_VAL(false));
             break;
         case OP_POP:
-            pop();
+            if (vm.nextWideOp == 0 && *frame->ip == OP_POP)
+            {
+                frame->ip++;
+                popN(2);
+            }
+            else
+            {
+                pop();
+            }
             break;
         case OP_DUP:
             push(peek(0));
@@ -6333,7 +8358,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 ObjString *aS = AS_STR(a);
                 push(BOOL_VAL(strcmp(aS->chars, bS->chars) > 0));
             }
-            else if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->greaterThan))
+            else if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->greaterThan))
             {
                 push(a);
                 push(b);
@@ -6369,7 +8394,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 push(BOOL_VAL(strcmp(aS->chars, bS->chars) < 0));
                 break;
             }
-            else if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->lessThan))
+            else if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->lessThan))
             {
                 push(a);
                 push(b);
@@ -6381,7 +8406,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             else
             {
-                runtimeError("Operands must be numbers, strings or objects with a <_lt_> method. Not %s and %s", VALUE_TYPES[a.type], VALUE_TYPES[b.type]);
+                runtimeError("Operands must be numbers, strings or objects with a <_lt_> method. Not %s and %s", valueTypeName(a), valueTypeName(b));
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -6402,17 +8427,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         {
             if (!IS_NUM(peek(0)))
             {
-                runtimeError("Expected number as slice step but got '%s'", VALUE_TYPES[peek(0).type]);
+                runtimeError("Expected number as slice step but got '%s'", valueTypeName(peek(0)));
                 return INTERPRET_RUNTIME_ERROR;
             }
             if (!IS_NUM(peek(1)))
             {
-                runtimeError("Expected number as slice end but got '%s'", VALUE_TYPES[peek(1).type]);
+                runtimeError("Expected number as slice end but got '%s'", valueTypeName(peek(1)));
                 return INTERPRET_RUNTIME_ERROR;
             }
             if (!IS_NUM(peek(2)))
             {
-                runtimeError("Expected number as slice start but got '%s'", VALUE_TYPES[peek(2).type]);
+                runtimeError("Expected number as slice start but got '%s'", valueTypeName(peek(2)));
                 return INTERPRET_RUNTIME_ERROR;
             }
             int step = (int)AS_NUM(pop());
@@ -6439,8 +8464,6 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             popN(itemCount * 2);
 
             push(OBJ_VAL(map));
-            map->capacity = map->map.capacity;
-            map->count = map->map.count;
 
             break;
         }
@@ -6511,7 +8534,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 else
                 {
-                    runtimeError("Expected number or slice as string index but got '%s'", VALUE_TYPES[indexVal.type]);
+                    runtimeError("Expected number or slice as string index but got '%s'", valueTypeName(indexVal));
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 break;
@@ -6544,7 +8567,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     frame = &vm.frames[vm.frameCount - 1];
                     break;
                 }
-                runtimeError("'%s' is not subscriptable", VALUE_TYPES[listVal.type]);
+                runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
             ObjList *list = AS_LIST(listVal);
@@ -6559,7 +8582,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             else
             {
-                runtimeError("Expected number or slice as list index but got '%s'", VALUE_TYPES[indexVal.type]);
+                runtimeError("Expected number or slice as list index but got '%s'", valueTypeName(indexVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
             if (hadError)
@@ -6602,7 +8625,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     break;
                 }
 
-                runtimeError("'%s' is not subscriptable", VALUE_TYPES[listVal.type]);
+                runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -6610,7 +8633,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             if (!IS_NUM(indexVal))
             {
-                runtimeError("Expected number as list index but got '%s'", VALUE_TYPES[indexVal.type]);
+                runtimeError("Expected number as list index but got '%s'", valueTypeName(indexVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
 
@@ -6632,7 +8655,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value superclass = peek(1);
             if (!IS_CLASS(superclass))
             {
-                runtimeError("Superclass must be a class but got type: '%s''", VALUE_TYPES[superclass.type]);
+                runtimeError("Superclass must be a class but got type: '%s''", valueTypeName(superclass));
                 return INTERPRET_RUNTIME_ERROR;
             }
             ObjClass *superclazz = AS_CLASS(superclass);
@@ -6668,7 +8691,30 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_DEF_GLOBAL:
         {
-            tableSet(&vm.globals, READ_STRING(), peek(0));
+            ObjString *name = READ_STRING();
+            Value _isConst;
+            if (tableGet(&vm.constGlobals, name, &_isConst))
+            {
+                runtimeError("Cannot redefine constant '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            tableSet(&vm.globals, name, peek(0));
+            pop();
+            break;
+        }
+        case OP_DEF_CONST_GLOBAL:
+        {
+            ObjString *name = READ_STRING();
+            Value existing;
+            if (tableGet(&vm.globals, name, &existing))
+            {
+                runtimeError("Global '%s' is already defined.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            tableSet(&vm.globals, name, peek(0));
+            tableSet(&vm.constGlobals, name, BOOL_VAL(true));
             pop();
             break;
         }
@@ -6682,8 +8728,18 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_GET_LOCAL:
         {
-            uint16_t slot = isWide() ? READ_SHORT() : READ_BYTE();
+            bool wide = isWide();
+            uint16_t slot = wide ? READ_SHORT() : READ_BYTE();
             push(frame->slots[slot]);
+
+            // Superinstruction: OP_GET_LOCAL <a>; OP_GET_LOCAL <b>
+            // Fuse when both are narrow to reduce dispatch overhead.
+            if (!wide && vm.nextWideOp == 0 && *frame->ip == OP_GET_LOCAL)
+            {
+                frame->ip++;
+                uint16_t slot2 = READ_BYTE();
+                push(frame->slots[slot2]);
+            }
             break;
         }
         case OP_SET_LOCAL:
@@ -6708,12 +8764,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         case OP_SET_GLOBAL:
         {
             ObjString *name = READ_STRING();
-            if (tableSet(&vm.globals, name, peek(0)))
+            Value _isConst;
+            if (tableGet(&vm.constGlobals, name, &_isConst))
             {
-                tableDelete(&vm.globals, name);
-                runtimeError("Undefined variable '%s'.", name->chars);
+                runtimeError("Cannot assign to constant '%s'.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
             }
+
+            tableSet(&vm.globals, name, peek(0));
             break;
         }
         case OP_GET_PROPERTY:
@@ -6740,7 +8798,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                         }
                     }
                     // handle foreign objects?
-                    runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", VALUE_TYPES[peek(0).type]);
+                    runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", valueTypeName(peek(0)));
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 klass = getVmClass(peek(0));
@@ -6788,9 +8846,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_SET_PROPERTY:
         {
-            if (!IS_INSTANCE(peek(1)) && !IS_CLASS(peek(1)))
+            if (!IS_INSTANCE(peek(1)) && !IS_CLASS(peek(1)) && !IS_FOREIGN(peek(1)))
             {
-                runtimeError("%s Doesn't have any fields -- only custom Classes and their Instances can have fields.");
+                runtimeError("%s Doesn't have any fields -- only custom Classes, foreign objects and Instances can have fields.");
                 return INTERPRET_RUNTIME_ERROR;
             }
             Table *table;
@@ -6808,6 +8866,11 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     table = &instance->klass->staticVars;
                 }
             }
+            else if (IS_FOREIGN(peek(1)))
+            {
+                ObjForeign *foreign = AS_FOREIGN(peek(1));
+                table = &foreign->fields;
+            }
             else
             {
                 ObjClass *klass = AS_CLASS(peek(1));
@@ -6824,6 +8887,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         {
             uint8_t slot = READ_BYTE();
             push(*frame->closure->upvalues[slot]->location);
+
+            // Superinstruction: OP_GET_UPVALUE <a>; OP_GET_UPVALUE <b>
+            if (vm.nextWideOp == 0 && *frame->ip == OP_GET_UPVALUE)
+            {
+                frame->ip++;
+                uint8_t slot2 = READ_BYTE();
+                push(*frame->closure->upvalues[slot2]->location);
+            }
             break;
         }
         case OP_SET_UPVALUE:
@@ -6857,7 +8928,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             valueToString(pop(), str, &strLen);
             printf("%.*s", strLen, str);
             // printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
-            free(str);
+            // free(str);
+            FREE(char *, str);
             printf("\n");
             break;
         }
@@ -6889,7 +8961,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             else if (IS_STR(peek(0)))
             {
-                if (prefixStr.type != VAL_NIL)
+                if (VALUE_TYPE(prefixStr) != VAL_NIL)
                 {
                     push(prefixStr);
                     prefixStr = NIL_VAL;
@@ -7006,7 +9078,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             bool test = checkIfValuesEqual(a, b);
             push(BOOL_VAL(test));
             break;
-            if (a.type == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
+            if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
             {
                 push(a);
                 push(b);
@@ -7059,11 +9131,31 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             break;
         }
+        case OP_CALL_KW:
+        {
+            int positional = READ_BYTE();
+            int keyword = READ_BYTE();
+            int rawArgCount = positional + (keyword * 2);
+            if (!callValueKw(peek(rawArgCount), positional, keyword))
+                return INTERPRET_RUNTIME_ERROR;
+            frame = &vm.frames[vm.frameCount - 1];
+            break;
+        }
         case OP_INVOKE:
         {
             ObjString *methodName = READ_STRING();
             int argc = READ_BYTE();
             if (!invoke(methodName, argc))
+                return INTERPRET_RUNTIME_ERROR;
+            frame = &vm.frames[vm.frameCount - 1];
+            break;
+        }
+        case OP_INVOKE_KW:
+        {
+            ObjString *methodName = READ_STRING();
+            int positional = READ_BYTE();
+            int keyword = READ_BYTE();
+            if (!invokeKw(methodName, positional, keyword))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
             break;
@@ -7074,6 +9166,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             int argc = READ_BYTE();
             ObjClass *super = AS_CLASS(pop());
             if (!invokeFromClass(super, method, argc))
+                return INTERPRET_RUNTIME_ERROR;
+            frame = &vm.frames[vm.frameCount - 1];
+            break;
+        }
+        case OP_SUPER_INVOKE_KW:
+        {
+            ObjString *method = READ_STRING();
+            int positional = READ_BYTE();
+            int keyword = READ_BYTE();
+            ObjClass *super = AS_CLASS(pop());
+            if (!invokeFromClassKw(super, method, positional, keyword))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
             break;
@@ -7113,10 +9216,78 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             break;
         }
+        case OP_RETURN_NIL:
+        {
+            Value result = NIL_VAL;
+            closeUpvalues(frame->slots);
+            vm.frameCount--;
+            if (vm.frameCount == 0)
+            {
+                pop();
+                return INTERPRET_OK;
+            }
+            vm.stackTop = frame->slots;
+            push(result);
+            if (vm.frameCount < runUntilFrame)
+                return INTERPRET_OK;
+
+            frame = &vm.frames[vm.frameCount - 1];
+            break;
+        }
+        case OP_RETURN_THIS:
+        {
+            Value result = frame->slots[0];
+            closeUpvalues(frame->slots);
+            vm.frameCount--;
+            if (vm.frameCount == 0)
+            {
+                pop();
+                return INTERPRET_OK;
+            }
+            vm.stackTop = frame->slots;
+            push(result);
+            if (vm.frameCount < runUntilFrame)
+                return INTERPRET_OK;
+
+            frame = &vm.frames[vm.frameCount - 1];
+            break;
+        }
         case OP_CONSTANT:
         {
-            Value constant = READ_CONSTANT();
+            bool wide = isWide();
+            Value constant = wide
+                                 ? frame->closure->function->chunk.constants.values[READ_SHORT()]
+                                 : frame->closure->function->chunk.constants.values[READ_BYTE()];
             push(constant);
+
+            // Superinstruction: OP_CONSTANT <a>; OP_CONSTANT <b>
+            // Fuse only narrow constants.
+            if (!wide && vm.nextWideOp == 0 && *frame->ip == OP_CONSTANT)
+            {
+                frame->ip++;
+                Value constant2 = frame->closure->function->chunk.constants.values[READ_BYTE()];
+                push(constant2);
+            }
+            break;
+        }
+        case OP_EXPORT:
+        {
+            ObjString *name = READ_STRING();
+            if (vm.currentModuleExports == NULL)
+            {
+                runtimeError("'export' can only be used while loading a module.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            Value value;
+            if (!tableGet(&vm.globals, name, &value))
+            {
+                runtimeError("Cannot export undefined symbol '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            mapSet(&vm.currentModuleExports->map, OBJ_VAL(name), value);
+            vm.currentModuleHasExplicitExports = true;
             break;
         }
         case OP_IMPORT:
@@ -7124,9 +9295,105 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value file = pop();
             if (IS_STR(file))
             {
-                // How can I check a working directory?
-
                 ObjString *filePath = AS_STR(file);
+                Value importedValue;
+                if (tableGet(&vm.imports, filePath, &importedValue) && IS_MAP(importedValue))
+                {
+                    push(importedValue);
+                    break;
+                }
+
+                if (filePath->len > 2 &&
+                    filePath->chars[filePath->len - 2] == '.' &&
+                    filePath->chars[filePath->len - 1] == 'k')
+                {
+                    ObjString *trimmed = copyString(filePath->chars, filePath->len - 2);
+                    if (tableGet(&vm.imports, trimmed, &importedValue) && IS_MAP(importedValue))
+                    {
+                        tableSet(&vm.imports, filePath, importedValue);
+                        push(importedValue);
+                        break;
+                    }
+                }
+                else
+                {
+                    int withExtLen = filePath->len + 2;
+                    char *withExt = ALLOCATE(char, withExtLen + 1);
+                    memcpy(withExt, filePath->chars, filePath->len);
+                    withExt[filePath->len] = '.';
+                    withExt[filePath->len + 1] = 'k';
+                    withExt[filePath->len + 2] = '\0';
+                    ObjString *withExtKey = takeString(withExt, withExtLen);
+                    if (tableGet(&vm.imports, withExtKey, &importedValue) && IS_MAP(importedValue))
+                    {
+                        tableSet(&vm.imports, filePath, importedValue);
+                        push(importedValue);
+                        break;
+                    }
+                }
+
+                Table globalsBefore;
+                snapshotGlobals(&globalsBefore);
+
+                if (importBuiltinModule(filePath))
+                {
+                    ObjMap *builtinExports = collectGlobalDiff(&globalsBefore);
+                    tableSet(&vm.imports, filePath, OBJ_VAL(builtinExports));
+                    freeTable(&globalsBefore);
+                    push(OBJ_VAL(builtinExports));
+                    break;
+                }
+
+                freeTable(&globalsBefore);
+
+                if (tableGet(&vm.imports, filePath, &importedValue) && IS_MAP(importedValue))
+                {
+                    push(importedValue);
+                    break;
+                }
+
+                char *workingDirs[5] = {
+                    "./",
+                    "./modules/",
+                    "/usr/local/lib/dotk/",
+                    "/usr/lib/dotk/",
+                    NULL};
+
+                bool hasSoSuffix = filePath->len > 3 &&
+                                   filePath->chars[filePath->len - 3] == '.' &&
+                                   filePath->chars[filePath->len - 2] == 's' &&
+                                   filePath->chars[filePath->len - 1] == 'o';
+
+                bool loadedSo = false;
+                for (int i = 0; workingDirs[i] != NULL && !loadedSo; i++)
+                {
+                    char fullPath[PATH_MAX];
+                    if (hasSoSuffix)
+                        snprintf(fullPath, sizeof(fullPath), "%s%s", workingDirs[i], filePath->chars);
+                    else
+                        snprintf(fullPath, sizeof(fullPath), "%s%s.so", workingDirs[i], filePath->chars);
+
+                    if (access(fullPath, R_OK) == 0)
+                    {
+                        Table soGlobalsBefore;
+                        snapshotGlobals(&soGlobalsBefore);
+
+                        loadedSo = loadDynamicModulePath(fullPath, true);
+                        if (loadedSo)
+                        {
+                            ObjMap *soExports = collectGlobalDiff(&soGlobalsBefore);
+                            tableSet(&vm.imports, filePath, OBJ_VAL(soExports));
+                            push(OBJ_VAL(soExports));
+                            freeTable(&soGlobalsBefore);
+                            break;
+                        }
+                        freeTable(&soGlobalsBefore);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                }
+
+                if (loadedSo)
+                    break;
 
                 if (filePath->chars[filePath->len - 1] != 'k' || filePath->chars[filePath->len - 2] != '.')
                 {
@@ -7139,15 +9406,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
 
                 Value value;
-                if (tableGet(&vm.imports, filePath, &value))
+                if (tableGet(&vm.imports, filePath, &value) && IS_MAP(value))
+                {
+                    push(value);
                     break;
+                }
 
                 // Check known working directories
-                char *workingDirs[4] = {
-                    "./",
-                    "/usr/local/lib/dotk/",
-                    "/usr/lib/dotk/",
-                    NULL};
                 char *source = NULL;
                 for (int i = 0; workingDirs[i] != NULL; i++)
                 {
@@ -7169,10 +9434,25 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 vm.importSources = (char **)realloc(vm.importSources, sizeof(char *) * ++vm.importCount);
                 vm.importSources[vm.importCount - 1] = source;
 
+                Table scriptGlobalsBefore;
+                snapshotGlobals(&scriptGlobalsBefore);
+
+                ObjMap *previousModuleExports = vm.currentModuleExports;
+                bool previousHasExplicitExports = vm.currentModuleHasExplicitExports;
+                ObjMap *moduleExports = newMap();
+                vm.currentModuleExports = moduleExports;
+                vm.currentModuleHasExplicitExports = false;
+
                 CallFrame preImport = *frame;
                 vm.frameCount = 0;
 
                 InterpretResult res = interpret(source, filePath->chars, false, 0, NULL);
+                ObjMap *resolvedExports = vm.currentModuleHasExplicitExports ? vm.currentModuleExports : collectGlobalDiff(&scriptGlobalsBefore);
+
+                vm.currentModuleExports = previousModuleExports;
+                vm.currentModuleHasExplicitExports = previousHasExplicitExports;
+                freeTable(&scriptGlobalsBefore);
+
                 if (res == INTERPRET_RUNTIME_ERROR)
                 {
                     tableDelete(&vm.imports, filePath);
@@ -7184,9 +9464,15 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     runtimeError("Cannot import file:\"%s\" As it had the previous compiler errors.\n", filePath->chars);
                     return INTERPRET_RUNTIME_ERROR;
                 }
-                tableSet(&vm.imports, filePath, NUM_VAL(1));
+                tableSet(&vm.imports, filePath, OBJ_VAL(resolvedExports));
                 vm.frameCount = 1;
                 vm.frames[0] = preImport;
+                push(OBJ_VAL(resolvedExports));
+            }
+            else
+            {
+                runtimeError("Import path must be a string, got '%s'.", valueTypeName(file));
+                return INTERPRET_RUNTIME_ERROR;
             }
             break;
         }
@@ -7249,6 +9535,10 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_WIDE:
             vm.nextWideOp = 2;
+            break;
+        case OP_NOP:
+            if (vm.nextWideOp == 1)
+                vm.nextWideOp = 0;
             break;
         default:
             break;
