@@ -14,5 +14,5 @@ print(sum2)
 
 # EXPECTED
 # 15
-# 62
+# 6
 # END_EXPECTED

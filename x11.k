@@ -31,6 +31,10 @@ fn x11Rect(x, y, w, h, r, g, b){
   x11_draw_rect(x, y, w, h, r, g, b)
 }
 
+fn x11Line(x0, y0, x1, y1, r, g, b){
+  x11_draw_line(x0, y0, x1, y1, r, g, b)
+}
+
 fn x11Circle(cx, cy, radius, r, g, b){
   x11_draw_circle(cx, cy, radius, r, g, b)
 }
@@ -59,12 +63,24 @@ fn x11MouseClicked(button){
   return x11_mouse_clicked(button)
 }
 
+fn x11Time(){
+  return x11_time()
+}
+
 fn x11ListDotkFiles(dir){
   return x11_list_dotk_files(dir)
 }
 
 fn x11RunDotkFile(path){
   return x11_run_dotk_file(path)
+}
+
+fn x11LoadObj(path){
+  return x11_load_obj(path)
+}
+
+fn x11DrawObjWire(path, px, py, pz, scale, rx, ry, camX, camY, camZ, camRotX, camRotY, fov, r, g, b){
+  x11_draw_obj_wire(path, px, py, pz, scale, rx, ry, camX, camY, camZ, camRotX, camRotY, fov, r, g, b)
 }
 
 fn x11RunDotkDebug(path, commands){

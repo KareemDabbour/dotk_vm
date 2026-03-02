@@ -1327,7 +1327,8 @@ static void enterTryCatch()
     ////
     emitByte(OP_TRY);
     int jumpToElseBlock = emitJump(OP_JUMP_IF_FALSE);
-    // emitByte(OP_POP);
+
+    emitByte(OP_POP); // pop the successful try() condition (true)
 
     int getPastElse = emitJump(OP_JUMP);
 
@@ -1360,6 +1361,7 @@ static void enterTryCatch()
     }
 
     emitByte(OP_CATCH);
+    emitByte(OP_POP); // discard catch block return value
     // statement();
 
     patchJump(getPastElse);

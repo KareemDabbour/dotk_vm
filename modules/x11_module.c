@@ -5,12 +5,14 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -508,6 +510,510 @@ static Value x11_draw_rect_native(int argc, Value *argv, bool *hasError, bool *p
     return NIL_VAL;
 }
 
+static Value x11_draw_line_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    (void)pushedValue;
+
+    if (!expect_argc("x11_draw_line(x0, y0, x1, y1, r, g, b)", argc, 7, hasError))
+        return NIL_VAL;
+    for (int i = 0; i < 7; i++)
+    {
+        if (!expect_number(argv[i], "x11_draw_line(x0, y0, x1, y1, r, g, b)", i + 1, hasError))
+            return NIL_VAL;
+    }
+    if (!ensure_window("x11_draw_line", hasError))
+        return NIL_VAL;
+
+    XSetForeground(g_display, g_gc, rgb_to_pixel(as_int(argv[4]), as_int(argv[5]), as_int(argv[6])));
+    XDrawLine(g_display,
+              g_window,
+              g_gc,
+              as_int(argv[0]),
+              as_int(argv[1]),
+              as_int(argv[2]),
+              as_int(argv[3]));
+    return NIL_VAL;
+}
+
+typedef struct
+{
+    float x;
+    float y;
+    float z;
+} ObjVert;
+
+typedef struct
+{
+    int a;
+    int b;
+} ObjEdge;
+
+typedef struct ObjModelCache
+{
+    char *path;
+    ObjVert *verts;
+    int vertCount;
+    ObjEdge *edges;
+    int edgeCount;
+    struct ObjModelCache *next;
+} ObjModelCache;
+
+static ObjModelCache *g_objCache = NULL;
+
+static int edge_cmp(const void *lhs, const void *rhs)
+{
+    const ObjEdge *a = (const ObjEdge *)lhs;
+    const ObjEdge *b = (const ObjEdge *)rhs;
+    if (a->a != b->a)
+        return a->a < b->a ? -1 : 1;
+    if (a->b != b->b)
+        return a->b < b->b ? -1 : 1;
+    return 0;
+}
+
+static bool grow_verts(ObjVert **arr, int *cap, int minCap)
+{
+    if (*cap >= minCap)
+        return true;
+    int next = *cap == 0 ? 256 : *cap;
+    while (next < minCap)
+        next *= 2;
+    ObjVert *grown = (ObjVert *)realloc(*arr, (size_t)next * sizeof(ObjVert));
+    if (grown == NULL)
+        return false;
+    *arr = grown;
+    *cap = next;
+    return true;
+}
+
+static bool grow_edges(ObjEdge **arr, int *cap, int minCap)
+{
+    if (*cap >= minCap)
+        return true;
+    int next = *cap == 0 ? 512 : *cap;
+    while (next < minCap)
+        next *= 2;
+    ObjEdge *grown = (ObjEdge *)realloc(*arr, (size_t)next * sizeof(ObjEdge));
+    if (grown == NULL)
+        return false;
+    *arr = grown;
+    *cap = next;
+    return true;
+}
+
+static int parse_obj_index_token(const char *tok, int vertCount)
+{
+    if (tok == NULL || *tok == '\0')
+        return -1;
+
+    char *end = NULL;
+    long idx = strtol(tok, &end, 10);
+    if (end == tok)
+        return -1;
+
+    if (idx < 0)
+        idx = (long)vertCount + idx;
+    else
+        idx = idx - 1;
+
+    if (idx < 0 || idx >= vertCount)
+        return -1;
+    return (int)idx;
+}
+
+static ObjModelCache *find_obj_cache(const char *path)
+{
+    for (ObjModelCache *it = g_objCache; it != NULL; it = it->next)
+    {
+        if (strcmp(it->path, path) == 0)
+            return it;
+    }
+    return NULL;
+}
+
+static ObjModelCache *load_obj_cache(const char *path, bool *hasError)
+{
+    ObjModelCache *cached = find_obj_cache(path);
+    if (cached != NULL)
+        return cached;
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL)
+    {
+        g_api->raiseError("x11 OBJ load failed: cannot open '%s'", path);
+        *hasError = true;
+        return NULL;
+    }
+
+    ObjVert *verts = NULL;
+    ObjEdge *edges = NULL;
+    int vertCount = 0;
+    int vertCap = 0;
+    int edgeCount = 0;
+    int edgeCap = 0;
+    char line[4096];
+
+    bool oom = false;
+    while (fgets(line, sizeof(line), f) != NULL)
+    {
+        char *s = line;
+        while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')
+            s++;
+        if (*s == '\0' || *s == '#')
+            continue;
+
+        if (s[0] == 'v' && (s[1] == ' ' || s[1] == '\t'))
+        {
+            float x, y, z;
+            if (sscanf(s + 1, "%f %f %f", &x, &y, &z) == 3)
+            {
+                if (!grow_verts(&verts, &vertCap, vertCount + 1))
+                {
+                    oom = true;
+                    break;
+                }
+                verts[vertCount].x = x;
+                verts[vertCount].y = y;
+                verts[vertCount].z = z;
+                vertCount++;
+            }
+            continue;
+        }
+
+        if (s[0] == 'f' && (s[1] == ' ' || s[1] == '\t'))
+        {
+            int faceCap = 16;
+            int faceCount = 0;
+            int *face = (int *)malloc((size_t)faceCap * sizeof(int));
+            if (face == NULL)
+            {
+                oom = true;
+                break;
+            }
+
+            char *save = NULL;
+            char *tok = strtok_r(s + 1, " \t\r\n", &save);
+            while (tok != NULL)
+            {
+                char *slash = strchr(tok, '/');
+                if (slash != NULL)
+                    *slash = '\0';
+
+                int idx = parse_obj_index_token(tok, vertCount);
+                if (idx >= 0)
+                {
+                    if (faceCount >= faceCap)
+                    {
+                        faceCap *= 2;
+                        int *grown = (int *)realloc(face, (size_t)faceCap * sizeof(int));
+                        if (grown == NULL)
+                        {
+                            free(face);
+                            oom = true;
+                            face = NULL;
+                            break;
+                        }
+                        face = grown;
+                    }
+                    face[faceCount++] = idx;
+                }
+                tok = strtok_r(NULL, " \t\r\n", &save);
+            }
+
+            if (oom)
+                break;
+
+            if (faceCount >= 2)
+            {
+                for (int i = 0; i < faceCount; i++)
+                {
+                    int a = face[i];
+                    int b = face[(i + 1) % faceCount];
+                    if (a == b)
+                        continue;
+                    if (a > b)
+                    {
+                        int t = a;
+                        a = b;
+                        b = t;
+                    }
+
+                    if (!grow_edges(&edges, &edgeCap, edgeCount + 1))
+                    {
+                        free(face);
+                        oom = true;
+                        break;
+                    }
+
+                    edges[edgeCount].a = a;
+                    edges[edgeCount].b = b;
+                    edgeCount++;
+                }
+            }
+
+            if (face != NULL)
+                free(face);
+            if (oom)
+                break;
+        }
+    }
+    fclose(f);
+
+    if (oom)
+    {
+        free(verts);
+        free(edges);
+        g_api->raiseError("x11 OBJ load failed: out of memory");
+        *hasError = true;
+        return NULL;
+    }
+
+    if (vertCount <= 0 || edgeCount <= 0)
+    {
+        free(verts);
+        free(edges);
+        g_api->raiseError("x11 OBJ load failed: no usable geometry in '%s'", path);
+        *hasError = true;
+        return NULL;
+    }
+
+    qsort(edges, (size_t)edgeCount, sizeof(ObjEdge), edge_cmp);
+    int uniq = 0;
+    for (int i = 0; i < edgeCount; i++)
+    {
+        if (i == 0 || edge_cmp(&edges[i - 1], &edges[i]) != 0)
+            edges[uniq++] = edges[i];
+    }
+    edgeCount = uniq;
+
+    ObjModelCache *node = (ObjModelCache *)malloc(sizeof(ObjModelCache));
+    if (node == NULL)
+    {
+        free(verts);
+        free(edges);
+        g_api->raiseError("x11 OBJ cache failed: out of memory");
+        *hasError = true;
+        return NULL;
+    }
+
+    size_t n = strlen(path);
+    node->path = (char *)malloc(n + 1);
+    if (node->path == NULL)
+    {
+        free(node);
+        free(verts);
+        free(edges);
+        g_api->raiseError("x11 OBJ cache failed: out of memory");
+        *hasError = true;
+        return NULL;
+    }
+    memcpy(node->path, path, n + 1);
+    node->verts = verts;
+    node->vertCount = vertCount;
+    node->edges = edges;
+    node->edgeCount = edgeCount;
+    node->next = g_objCache;
+    g_objCache = node;
+    return node;
+}
+
+static int screen_out_code(double x, double y, int width, int height)
+{
+    int code = 0;
+    if (x < 0)
+        code |= 1;
+    if (x >= width)
+        code |= 2;
+    if (y < 0)
+        code |= 4;
+    if (y >= height)
+        code |= 8;
+    return code;
+}
+
+static Value x11_draw_obj_wire_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    (void)pushedValue;
+
+    if (!expect_argc("x11_draw_obj_wire(path, px, py, pz, scale, rx, ry, camX, camY, camZ, camRotX, camRotY, fov, r, g, b)", argc, 16, hasError))
+        return NIL_VAL;
+    if (!expect_string(argv[0], "x11_draw_obj_wire(path,...)", 1, hasError))
+        return NIL_VAL;
+    for (int i = 1; i < 16; i++)
+    {
+        if (!expect_number(argv[i], "x11_draw_obj_wire(path,...)", i + 1, hasError))
+            return NIL_VAL;
+    }
+    if (!ensure_window("x11_draw_obj_wire", hasError))
+        return NIL_VAL;
+
+    const char *path = AS_CSTR(argv[0]);
+    ObjModelCache *model = load_obj_cache(path, hasError);
+    if (model == NULL)
+        return NIL_VAL;
+
+    double posX = AS_NUM(argv[1]);
+    double posY = AS_NUM(argv[2]);
+    double posZ = AS_NUM(argv[3]);
+    double scale = AS_NUM(argv[4]);
+    double rotX = AS_NUM(argv[5]);
+    double rotY = AS_NUM(argv[6]);
+    double camX = AS_NUM(argv[7]);
+    double camY = AS_NUM(argv[8]);
+    double camZ = AS_NUM(argv[9]);
+    double camRotX = AS_NUM(argv[10]);
+    double camRotY = AS_NUM(argv[11]);
+    double fov = AS_NUM(argv[12]);
+    int cr = as_int(argv[13]);
+    int cg = as_int(argv[14]);
+    int cb = as_int(argv[15]);
+
+    XWindowAttributes attrs;
+    XGetWindowAttributes(g_display, g_window, &attrs);
+    int width = attrs.width;
+    int height = attrs.height;
+
+    double cy = cos(rotY);
+    double sy = sin(rotY);
+    double cx = cos(rotX);
+    double sx = sin(rotX);
+    double ccy = cos(camRotY);
+    double csy = sin(camRotY);
+    double ccx = cos(camRotX);
+    double csx = sin(camRotX);
+
+    double *sxv = (double *)malloc((size_t)model->vertCount * sizeof(double));
+    double *syv = (double *)malloc((size_t)model->vertCount * sizeof(double));
+    double *szv = (double *)malloc((size_t)model->vertCount * sizeof(double));
+    uint8_t *okv = (uint8_t *)malloc((size_t)model->vertCount);
+    if (sxv == NULL || syv == NULL || szv == NULL || okv == NULL)
+    {
+        free(sxv);
+        free(syv);
+        free(szv);
+        free(okv);
+        g_api->raiseError("x11_draw_obj_wire failed: out of memory");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    for (int i = 0; i < model->vertCount; i++)
+    {
+        ObjVert v = model->verts[i];
+        double lx = (double)v.x * scale;
+        double ly = (double)v.y * scale;
+        double lz = (double)v.z * scale;
+
+        double x1 = (lx * cy) - (lz * sy);
+        double z1 = (lx * sy) + (lz * cy);
+        double y2 = (ly * cx) - (z1 * sx);
+        double z2 = (ly * sx) + (z1 * cx);
+
+        double wx = posX + x1;
+        double wy = posY + y2;
+        double wz = posZ + z2;
+
+        double vx = wx - camX;
+        double vy = wy - camY;
+        double vz = wz - camZ;
+
+        double vx1 = (vx * ccy) + (vz * csy);
+        double vz1 = (-vx * csy) + (vz * ccy);
+        double vy2 = (vy * ccx) + (vz1 * csx);
+        double vz2 = (-vy * csx) + (vz1 * ccx);
+
+        if (vz2 <= 0.2)
+        {
+            okv[i] = 0;
+            continue;
+        }
+
+        sxv[i] = (width / 2.0) + ((vx1 * fov) / vz2);
+        syv[i] = (height / 2.0) - ((vy2 * fov) / vz2);
+        szv[i] = vz2;
+        okv[i] = 1;
+    }
+
+    XSetForeground(g_display, g_gc, rgb_to_pixel(cr, cg, cb));
+    for (int i = 0; i < model->edgeCount; i++)
+    {
+        int a = model->edges[i].a;
+        int b = model->edges[i].b;
+        if (!okv[a] || !okv[b])
+            continue;
+
+        int codeA = screen_out_code(sxv[a], syv[a], width, height);
+        int codeB = screen_out_code(sxv[b], syv[b], width, height);
+        if ((codeA & codeB) != 0)
+            continue;
+
+        XDrawLine(g_display,
+                  g_window,
+                  g_gc,
+                  (int)sxv[a],
+                  (int)syv[a],
+                  (int)sxv[b],
+                  (int)syv[b]);
+    }
+
+    free(sxv);
+    free(syv);
+    free(szv);
+    free(okv);
+    return NIL_VAL;
+}
+
+static Value x11_load_obj_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    (void)pushedValue;
+
+    if (!expect_argc("x11_load_obj(path)", argc, 1, hasError))
+        return NIL_VAL;
+    if (!expect_string(argv[0], "x11_load_obj(path)", 1, hasError))
+        return NIL_VAL;
+
+    ObjModelCache *modelData = load_obj_cache(AS_CSTR(argv[0]), hasError);
+    if (modelData == NULL)
+        return NIL_VAL;
+
+    Value vertsList = g_api->makeList();
+    g_api->pushValue(vertsList);
+    for (int i = 0; i < modelData->vertCount; i++)
+    {
+        Value triple = g_api->makeList();
+        g_api->pushValue(triple);
+        g_api->listAppend(triple, NUM_VAL((double)modelData->verts[i].x));
+        g_api->listAppend(triple, NUM_VAL((double)modelData->verts[i].y));
+        g_api->listAppend(triple, NUM_VAL((double)modelData->verts[i].z));
+        g_api->listAppend(vertsList, triple);
+        g_api->popValue();
+    }
+
+    Value edgesList = g_api->makeList();
+    g_api->pushValue(edgesList);
+    for (int i = 0; i < modelData->edgeCount; i++)
+    {
+        Value pair = g_api->makeList();
+        g_api->pushValue(pair);
+        g_api->listAppend(pair, NUM_VAL((double)modelData->edges[i].a));
+        g_api->listAppend(pair, NUM_VAL((double)modelData->edges[i].b));
+        g_api->listAppend(edgesList, pair);
+        g_api->popValue();
+    }
+
+    Value model = g_api->makeMap();
+    g_api->pushValue(model);
+    Value keyVerts = g_api->makeString("verts", 5, true);
+    Value keyEdges = g_api->makeString("edges", 5, true);
+    g_api->mapSet(model, keyVerts, vertsList);
+    g_api->mapSet(model, keyEdges, edgesList);
+
+    g_api->popValue(); // model
+    g_api->popValue(); // edgesList
+    g_api->popValue(); // vertsList
+    return model;
+}
+
 static Value x11_draw_circle_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     (void)pushedValue;
@@ -655,6 +1161,22 @@ static Value x11_mouse_clicked_native(int argc, Value *argv, bool *hasError, boo
     bool clicked = g_mouseClicked[b];
     g_mouseClicked[b] = false;
     return BOOL_VAL(clicked);
+}
+
+static Value x11_time_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    (void)argv;
+    (void)pushedValue;
+
+    if (!expect_argc("x11_time()", argc, 0, hasError))
+        return NIL_VAL;
+
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0)
+        return NUM_VAL(0);
+
+    double t = (double)tv.tv_sec + ((double)tv.tv_usec / 1000000.0);
+    return NUM_VAL(t);
 }
 
 static Value x11_list_dotk_files_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1117,6 +1639,7 @@ bool dotk_init_module(const DotKNativeApi *api)
     api->defineNative("x11_begin_frame", x11_begin_frame_native);
     api->defineNative("x11_end_frame", x11_end_frame_native);
     api->defineNative("x11_draw_rect", x11_draw_rect_native);
+    api->defineNative("x11_draw_line", x11_draw_line_native);
     api->defineNative("x11_draw_circle", x11_draw_circle_native);
     api->defineNative("x11_draw_text", x11_draw_text_native);
     api->defineNative("x11_is_key_down", x11_is_key_down_native);
@@ -1124,6 +1647,7 @@ bool dotk_init_module(const DotKNativeApi *api)
     api->defineNative("x11_mouse_y", x11_mouse_y_native);
     api->defineNative("x11_mouse_down", x11_mouse_down_native);
     api->defineNative("x11_mouse_clicked", x11_mouse_clicked_native);
+    api->defineNative("x11_time", x11_time_native);
     api->defineNative("x11_list_dotk_files", x11_list_dotk_files_native);
     api->defineNative("x11_run_dotk_file", x11_run_dotk_file_native);
     api->defineNative("x11_run_dotk_debug", x11_run_dotk_debug_native);
@@ -1137,11 +1661,19 @@ bool dotk_init_module(const DotKNativeApi *api)
     api->defineNative("x11_set_run_flags", x11_set_run_flags_native);
     api->defineNative("x11_get_run_flags", x11_get_run_flags_native);
     api->defineNative("x11_read_text_file", x11_read_text_file_native);
+    api->defineNative("x11_load_obj", x11_load_obj_native);
+    api->defineNative("x11_draw_obj_wire", x11_draw_obj_wire_native);
 
     api->defineGlobalValue("X11_KEY_LEFT", NUM_VAL((double)XK_Left));
     api->defineGlobalValue("X11_KEY_RIGHT", NUM_VAL((double)XK_Right));
     api->defineGlobalValue("X11_KEY_UP", NUM_VAL((double)XK_Up));
     api->defineGlobalValue("X11_KEY_DOWN", NUM_VAL((double)XK_Down));
+    api->defineGlobalValue("X11_KEY_W", NUM_VAL((double)XK_w));
+    api->defineGlobalValue("X11_KEY_A", NUM_VAL((double)XK_a));
+    api->defineGlobalValue("X11_KEY_S", NUM_VAL((double)XK_s));
+    api->defineGlobalValue("X11_KEY_D", NUM_VAL((double)XK_d));
+    api->defineGlobalValue("X11_KEY_Q", NUM_VAL((double)XK_q));
+    api->defineGlobalValue("X11_KEY_E", NUM_VAL((double)XK_e));
     api->defineGlobalValue("X11_KEY_ESCAPE", NUM_VAL((double)XK_Escape));
     api->defineGlobalValue("X11_KEY_SPACE", NUM_VAL((double)XK_space));
     api->defineGlobalValue("X11_MOUSE_LEFT", NUM_VAL(1));

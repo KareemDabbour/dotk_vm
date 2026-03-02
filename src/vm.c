@@ -46,6 +46,7 @@ typedef struct
 static bool gDebuggerEnabled = false;
 static bool gDebuggerStepMode = false;
 static bool gDebuggerPauseNext = false;
+static bool gDebuggerQuitRequested = false;
 static DebugBreakpoint gDebugBreakpoints[DBG_MAX_BREAKPOINTS];
 static int gDebugBreakpointCount = 0;
 static DebugWatch gDebugWatches[DBG_MAX_WATCHES];
@@ -433,6 +434,25 @@ static void debuggerPrintStack(void)
     }
 }
 
+static int debuggerFrameSlotSpan(CallFrame *frame)
+{
+    int frameIndex = (int)(frame - vm.frames);
+    Value *end = (frameIndex + 1 < vm.frameCount) ? vm.frames[frameIndex + 1].slots : vm.stackTop;
+    return (int)(end - frame->slots);
+}
+
+static int debuggerVisibleLocalCount(CallFrame *frame)
+{
+    int frameSpan = debuggerFrameSlotSpan(frame);
+    int namedSlots = frame->closure->function->localNameCount;
+
+    if (namedSlots <= 0)
+        return frameSpan > 0 ? 1 : 0;
+    if (namedSlots > frameSpan)
+        return frameSpan;
+    return namedSlots;
+}
+
 static bool debuggerLookupLocal(CallFrame *frame, const char *query, int *localIndexOut)
 {
     if (query == NULL || *query == '\0')
@@ -440,10 +460,11 @@ static bool debuggerLookupLocal(CallFrame *frame, const char *query, int *localI
 
     char *end = NULL;
     long localIndex = strtol(query, &end, 10);
-    int localCount = (int)(vm.stackTop - frame->slots);
+    int localCount = debuggerVisibleLocalCount(frame);
+    int frameSpan = debuggerFrameSlotSpan(frame);
     if (end != query && *end == '\0')
     {
-        if (localIndex >= 0 && localIndex < localCount)
+        if (localIndex >= 0 && localIndex < frameSpan)
         {
             *localIndexOut = (int)localIndex;
             return true;
@@ -475,8 +496,8 @@ static void debuggerPrintOneLocal(CallFrame *frame, int index)
 {
     ObjFunction *function = frame->closure->function;
     Value *base = frame->slots;
-    int localCount = (int)(vm.stackTop - base);
-    if (index < 0 || index >= localCount)
+    int frameSpan = debuggerFrameSlotSpan(frame);
+    if (index < 0 || index >= frameSpan)
     {
         fprintf(stderr, "Local index out of range.\n");
         return;
@@ -508,8 +529,8 @@ static void debuggerPrintLocals(CallFrame *frame)
 {
     ObjFunction *function = frame->closure->function;
     Value *base = frame->slots;
-    Value *top = vm.stackTop;
-    int localCount = (int)(top - base);
+    int frameSpan = debuggerFrameSlotSpan(frame);
+    int localCount = debuggerVisibleLocalCount(frame);
 
     fprintf(stderr, "Locals for %s() [slot base=%ld, count=%d]\n",
             function->name == NULL ? "script" : function->name->chars,
@@ -520,6 +541,17 @@ static void debuggerPrintLocals(CallFrame *frame)
     {
         fprintf(stderr, "  ");
         debuggerPrintOneLocal(frame, i);
+    }
+
+    if (frameSpan > localCount)
+    {
+        fprintf(stderr, "Transient eval stack slots:\n");
+        for (int i = localCount; i < frameSpan; i++)
+        {
+            char valueBuf[1024];
+            debuggerFormatValue(base[i], valueBuf, sizeof(valueBuf));
+            fprintf(stderr, "  stack[%ld] = %s\n", (long)((base + i) - vm.stack), valueBuf);
+        }
     }
 }
 
@@ -836,7 +868,8 @@ static bool debuggerPrompt(CallFrame *frame, bool breakpointHit, int breakpointI
         }
         if (strcmp(cmd, "q") == 0 || strcmp(cmd, "quit") == 0)
         {
-            runtimeError("Execution aborted by debugger.");
+            gDebuggerQuitRequested = true;
+            fprintf(stderr, "Execution aborted by debugger.\n");
             return false;
         }
         if (strcmp(cmd, "h") == 0 || strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0)
@@ -895,7 +928,7 @@ void runtimeError(const char *format, ...)
     vm.lastErrorTrace = takeString(trace, len);
 
     resetStack();
-    if (vm.isInTryCatch)
+    if (vm.isInTryCatch && !gDebuggerQuitRequested)
         return;
 
     fprintf(stderr, "%s", vm.lastErrorTrace->chars);
@@ -2058,6 +2091,7 @@ static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pu
         return NIL_VAL;
     }
     ObjList *lines = newList();
+    push(OBJ_VAL(lines));
 
     char *line = NULL;
     size_t len = 0;
@@ -2070,7 +2104,7 @@ static Value fileReadLinesNative(int argc, Value *argv, bool *hasError, bool *pu
 
         read = getline(&line, &len, fp);
     }
-
+    pop();
     free(line);
     return OBJ_VAL(lines);
 }
@@ -8024,6 +8058,7 @@ void vmEnableDebugger(bool enabled)
     gDebuggerEnabled = enabled;
     gDebuggerStepMode = false;
     gDebuggerPauseNext = enabled;
+    gDebuggerQuitRequested = false;
     debuggerInitScriptCommands();
     if (!enabled)
     {
@@ -9491,11 +9526,19 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.isInTryCatch = true;
             ObjClosure *tryBlock = AS_CLOSURE(peek(0));
             call(tryBlock, 0);
-            if (run(isRepl, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+            InterpretResult tryResult = run(isRepl, vm.frameCount);
+            if (tryResult == INTERPRET_RUNTIME_ERROR)
             {
                 vm.stackTop = stop;
                 vm.frameCount = frameCount;
                 vm.openUpvalues = upvalues;
+
+                if (gDebuggerQuitRequested)
+                {
+                    vm.isInTryCatch = b4;
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
                 pop();
                 push(BOOL_VAL(false));
             }
