@@ -43,6 +43,8 @@ fn handleGet(r){
     }
 
     ret = path.toStr()
+
+    print(f"GET request for: {ret}")
     return ret
 }
 

@@ -1,4 +1,4 @@
-import "json.k";
+import "json_c.k";
 import "lang.k";
 
 class Socket{
@@ -126,7 +126,7 @@ class Socket{
         return ret;
     }
     isClosed(){
-        return this.closed;
+        return this.isClosed;
     }
 }
 

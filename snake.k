@@ -237,9 +237,9 @@ fn printScoreAndField(s, f){
 
 
 print("Welcome to Snake.k!");
-var name = input("What is your name?\n");
+# var name = input("What is your name?\n");
 clear();
-# var name = "SNAKE";
+var name = "SNAKE";
 var f = Field(size);
 var s = Snake(name);
 s.setField(f);

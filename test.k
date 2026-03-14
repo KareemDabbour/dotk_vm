@@ -1,10 +1,86 @@
-from "lang" import __hierarchy__, Ansi
+# from "json" import JSON as j 
+import "json_c"
+import "lang"
 
-fn t(){
-    print(__hierarchy__(Ansi))
+var root = jsonf("./temp/invites.json")
+var res = {}
+
+root.foreach(fn(person)
+{
+    var name = person.get("Name","").trim()
+    var parts = name.split()
+    var first;
+    var last;
+    if (len(parts) > 1) {
+        first = parts[0];
+        last = " ".join(parts[1:])
+    }
+
+    var nickname = person.get("nick", "")
+
+    var feeding = person.get("Feeding em?", "").lower()
+    var inviteType = feeding == "yes" ? "full" : "reception"
+
+    res.append(.{
+        "firstName"::first,
+        "lastName"::last,
+        "nickname"::nickname,
+        "inviteType"::inviteType,
+        "plusOneAllowed"::person.get("p1"),
+        "partyId"::person.get("Party"),
+        "slug"::str(hash(name) + clock())
+    })
+})
+
+with(File("xinv.json", "w+"), fn(f) {
+     f.write(json_stringify(res))
+})
+
+
+~
+
+
+var start = clock()
+var s = jsonf("temp/test.json")
+# var f = File("temp/test.json")
+# var s = j.parse(f.read())
+
+print(f"json parse time: {clock() - start}")
+
+print(f"going to do some work on: {len(s)} items")
+
+start = clock()
+
+var ret = .{
+    "gender"::.{}
 }
 
-t()
+s.foreach(fn(i){
+    ret.compute(i["gender"], fn(k, v) => v ? v.put(k,null) : .{k::null});
+
+})
+
+print(f"work time: {clock() - start}")
+
+print(f"ret: {ret.keys()} items")
+~
+
+
+
+
+
+# start = clock()
+
+# var s = j.parse(data)
+# print(f"json parse time: {clock() - start}")
+# print(f"s: {len(s)}")
+
+
+# start = clock()
+# var g = jC.parse(data)
+# print(f"json_c parse time: {clock() - start}")
+# print(f"g: {len(g)}")
+
 
 # ~
 # class Pair {

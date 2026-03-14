@@ -123,6 +123,9 @@ save-nan-candidate: nan
 bench-nan: all save-baseline save-nan-candidate
 	python3 tools/bench_compare.py $(baseline_exec) $(nan_exec) $(workloads_file) 5
 
+bench-x11-native-vs-vm: all
+	python3 tools/bench_x11_native_vs_vm.py ./$(exec) benchmarks/x11_viewer_bench.k models/cow.obj 5 300 60
+
 clean:
 	-rm *.out
 	-rm -r out
@@ -144,4 +147,4 @@ sdl-module:
 
 x11-module:
 	mkdir -p modules
-	$(CC) -shared -fPIC -O3 -DNDEBUG -I./src/include modules/x11_module.c -o modules/x11_module.so -lX11
+	$(CC) -shared -fPIC -O3 -DNDEBUG -I./src/include modules/x11_module.c modules/x11_aot_module.c -o modules/x11_module.so -lX11 -lm

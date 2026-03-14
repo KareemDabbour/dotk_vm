@@ -11,8 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,8 +25,10 @@ static bool g_shouldClose = false;
 static int g_targetFps = 60;
 static int g_mouseX = 0;
 static int g_mouseY = 0;
-static bool g_mouseDown[8] = {false};
-static bool g_mouseClicked[8] = {false};
+#define X11_MOUSE_BUTTON_MAX 256
+static bool g_mouseDown[X11_MOUSE_BUTTON_MAX] = {false};
+static bool g_mouseClicked[X11_MOUSE_BUTTON_MAX] = {false};
+static Atom g_wmDeleteAtom = None;
 static char *g_lastRunOutput = NULL;
 static int g_lastRunExitCode = -1;
 static char g_runFlags[256] = "";
@@ -266,8 +268,13 @@ static void pump_events(void)
     {
         XEvent event;
         XNextEvent(g_display, &event);
-        if (event.type == ClientMessage || event.type == DestroyNotify)
+        if (event.type == DestroyNotify)
             g_shouldClose = true;
+        else if (event.type == ClientMessage)
+        {
+            if (g_wmDeleteAtom != None && (Atom)event.xclient.data.l[0] == g_wmDeleteAtom)
+                g_shouldClose = true;
+        }
         else if (event.type == MotionNotify)
         {
             g_mouseX = event.xmotion.x;
@@ -278,7 +285,7 @@ static void pump_events(void)
             g_mouseX = event.xbutton.x;
             g_mouseY = event.xbutton.y;
             int b = event.xbutton.button;
-            if (b >= 0 && b < 8)
+            if (b >= 0 && b < X11_MOUSE_BUTTON_MAX)
             {
                 g_mouseDown[b] = true;
                 g_mouseClicked[b] = true;
@@ -289,7 +296,7 @@ static void pump_events(void)
             g_mouseX = event.xbutton.x;
             g_mouseY = event.xbutton.y;
             int b = event.xbutton.button;
-            if (b >= 0 && b < 8)
+            if (b >= 0 && b < X11_MOUSE_BUTTON_MAX)
                 g_mouseDown[b] = false;
         }
     }
@@ -327,7 +334,7 @@ static Value x11_init_window_native(int argc, Value *argv, bool *hasError, bool 
         (unsigned int)height,
         1,
         BlackPixel(g_display, screen),
-        WhitePixel(g_display, screen));
+        BlackPixel(g_display, screen));
 
     if (g_window == 0)
     {
@@ -349,8 +356,9 @@ static Value x11_init_window_native(int argc, Value *argv, bool *hasError, bool 
                      ButtonReleaseMask |
                      PointerMotionMask);
 
-    Atom wmDelete = XInternAtom(g_display, "WM_DELETE_WINDOW", False);
-    XSetWMProtocols(g_display, g_window, &wmDelete, 1);
+    g_wmDeleteAtom = XInternAtom(g_display, "WM_DELETE_WINDOW", False);
+    if (g_wmDeleteAtom != None)
+        XSetWMProtocols(g_display, g_window, &g_wmDeleteAtom, 1);
 
     g_gc = XCreateGC(g_display, g_window, 0, NULL);
     if (g_gc == 0)
@@ -370,7 +378,7 @@ static Value x11_init_window_native(int argc, Value *argv, bool *hasError, bool 
     g_shouldClose = false;
     g_mouseX = 0;
     g_mouseY = 0;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < X11_MOUSE_BUTTON_MAX; i++)
     {
         g_mouseDown[i] = false;
         g_mouseClicked[i] = false;
@@ -400,12 +408,13 @@ static Value x11_close_window_native(int argc, Value *argv, bool *hasError, bool
         }
         XCloseDisplay(g_display);
         g_display = NULL;
+        g_wmDeleteAtom = None;
     }
 
     g_shouldClose = true;
     g_mouseX = 0;
     g_mouseY = 0;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < X11_MOUSE_BUTTON_MAX; i++)
     {
         g_mouseDown[i] = false;
         g_mouseClicked[i] = false;
@@ -1136,7 +1145,7 @@ static Value x11_mouse_down_native(int argc, Value *argv, bool *hasError, bool *
     pump_events();
 
     int b = as_int(argv[0]);
-    if (b < 0 || b >= 8)
+    if (b < 0 || b >= X11_MOUSE_BUTTON_MAX)
         return BOOL_VAL(false);
     return BOOL_VAL(g_mouseDown[b]);
 }
@@ -1155,7 +1164,7 @@ static Value x11_mouse_clicked_native(int argc, Value *argv, bool *hasError, boo
     pump_events();
 
     int b = as_int(argv[0]);
-    if (b < 0 || b >= 8)
+    if (b < 0 || b >= X11_MOUSE_BUTTON_MAX)
         return BOOL_VAL(false);
 
     bool clicked = g_mouseClicked[b];

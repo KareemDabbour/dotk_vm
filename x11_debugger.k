@@ -1,7 +1,7 @@
 import "x11.k"
 import "io"
 
-var WIDTH = 1200
+var WIDTH = 1500
 var HEIGHT = 760
 
 fn overlaps(ax, ay, aw, ah, bx, by, bw, bh){

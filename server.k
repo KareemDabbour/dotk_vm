@@ -1,5 +1,5 @@
 import "socket.k";
-# import "file.k";
+import "file.k";
 
 var sock = Socket.withDefaults();
 sock.bindToPort(8080);

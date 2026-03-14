@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "include/ast.h"
 #include "include/common.h"
 #include "include/compiler.h"
 #include "include/memory.h"
@@ -106,6 +107,7 @@ bool inTernary = false;
 int ternaryThen = -1;
 int ternaryElse = -1;
 static int gCompilerOptimizationLevel = 1;
+static int gCompilerTypeCheckMode = AST_TYPECHECK_OFF;
 
 static void expression();
 static void declareVar(bool isConst);
@@ -129,6 +131,11 @@ static uint16_t parseVariable(const char *errMsg, bool isConst);
 static int resolveLocal(Compiler *compiler, Token *name);
 static int resolveUpValue(Compiler *compiler, Token *name);
 // static void optimizeFunction(ObjFunction *fn);
+
+static void skipOptionalTypeAnnotation();
+static void skipTypeExpr();
+static void skipTypeAtom();
+static void skipClassTypeParams();
 
 static inline Chunk *currentChunk()
 {
@@ -741,6 +748,7 @@ static void function(FunctionType type)
 
             consume(TOKEN_IDENTIFIER, "Expect parameter name.");
             Token parameter = parser.prev;
+            skipOptionalTypeAnnotation();
 
             current->function->arity++;
             current->function->minArity = hasVariadicParam ? current->function->arity - 1 : current->function->arity;
@@ -749,6 +757,7 @@ static void function(FunctionType type)
             if (current->function->arity >= UINT16_MAX)
                 errorAtCurrent("Can't have more than 65535 parameters");
 
+            parser.prev = parameter;
             declareVar(false);
             addFunctionParamName(current->function, &parameter);
             defineVar(0);
@@ -761,6 +770,7 @@ static void function(FunctionType type)
     }
 
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+    skipOptionalTypeAnnotation();
 
     if (match(TOKEN_ARROW))
         returnStatement();
@@ -883,12 +893,31 @@ static void classDeclaration()
     classCompiler.hasSuperClass = false;
     currentClass = &classCompiler;
 
+    skipClassTypeParams();
+
     if (match(TOKEN_LESS))
     {
         consume(TOKEN_IDENTIFIER, "Expect superclass");
+        Token superName = parser.prev;
         variable(false);
-        if (identifierEqual(&className, &parser.prev))
+        if (identifierEqual(&className, &superName))
             error("A class can't inherit from itself");
+
+        if (match(TOKEN_LESS))
+        {
+            skipTypeExpr();
+            while (match(TOKEN_COMMA))
+                skipTypeExpr();
+            consume(TOKEN_GREATER, "Expect '>' after superclass generic arguments.");
+        }
+        else if (match(TOKEN_LEFT_BRACKET))
+        {
+            skipTypeExpr();
+            while (match(TOKEN_COMMA))
+                skipTypeExpr();
+            consume(TOKEN_RIGHT_BRACKET, "Expect ']' after superclass generic arguments.");
+        }
+
         beginScope();
         addLocal(synthToken("super"), false);
         defineVar(0);
@@ -913,6 +942,17 @@ static void classDeclaration()
 
     currentClass = currentClass->enclosing;
 }
+
+static void skipClassTypeParams()
+{
+    if (!match(TOKEN_LEFT_BRACKET))
+        return;
+
+    consume(TOKEN_IDENTIFIER, "Expect class generic parameter name.");
+    while (match(TOKEN_COMMA))
+        consume(TOKEN_IDENTIFIER, "Expect class generic parameter name.");
+    consume(TOKEN_RIGHT_BRACKET, "Expect ']' after class generic parameters.");
+}
 static void funDeclaration()
 {
     if (check(TOKEN_LEFT_PAREN))
@@ -929,6 +969,7 @@ static void funDeclaration()
 static void varDeclaration()
 {
     uint16_t global = parseVariable("Expect variable name", false);
+    skipOptionalTypeAnnotation();
 
     if (match(TOKEN_EQUAL))
     {
@@ -947,6 +988,7 @@ static void varDeclaration()
 static void constDeclaration()
 {
     uint16_t global = parseVariable("Expect constant name", true);
+    skipOptionalTypeAnnotation();
     consume(TOKEN_EQUAL, "Expect '=' after constant name");
     expression();
     // consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
@@ -955,6 +997,53 @@ static void constDeclaration()
         defineVar(global);
     else
         emitBytes(OP_DEF_CONST_GLOBAL, global);
+}
+
+static void skipOptionalTypeAnnotation()
+{
+    if (!match(TOKEN_COLON))
+        return;
+
+    skipTypeExpr();
+}
+
+static void skipTypeExpr()
+{
+    skipTypeAtom();
+    while (match(TOKEN_PIPE))
+        skipTypeAtom();
+}
+
+static void skipTypeAtom()
+{
+    if (match(TOKEN_IDENTIFIER) || match(TOKEN_NIL))
+    {
+    }
+    else
+    {
+        errorAtCurrent("Expect type name after ':'.");
+        return;
+    }
+
+    if (match(TOKEN_LESS))
+    {
+        skipTypeExpr();
+        while (match(TOKEN_COMMA))
+            skipTypeExpr();
+        consume(TOKEN_GREATER, "Expect '>' after generic type arguments.");
+    }
+    else if (match(TOKEN_LEFT_BRACKET))
+    {
+        skipTypeExpr();
+        while (match(TOKEN_COMMA))
+            skipTypeExpr();
+        consume(TOKEN_RIGHT_BRACKET, "Expect ']' after generic type arguments.");
+    }
+
+    while (match(TOKEN_DOT))
+        consume(TOKEN_IDENTIFIER, "Expect type segment after '.'.");
+
+    match(TOKEN_QUESTION);
 }
 
 static void expressionStatement()
@@ -2361,6 +2450,26 @@ static void fromImportStatement()
 
 ObjFunction *compile(const char *source, char *file, bool isRepl, bool printBytecode)
 {
+    char astErrBuf[256] = {0};
+    int typeIssues = 0;
+    if (!astRunCompilePrepass(source,
+                              file,
+                              (AstTypeCheckMode)gCompilerTypeCheckMode,
+                              stderr,
+                              &typeIssues,
+                              astErrBuf,
+                              sizeof(astErrBuf)))
+    {
+        fprintf(stderr,
+                "%s:0:0 Error: AST prepass failed: %s\n",
+                file,
+                astErrBuf[0] == '\0' ? "unknown AST prepass error" : astErrBuf);
+        return NULL;
+    }
+
+    if (gCompilerTypeCheckMode == AST_TYPECHECK_STRICT && typeIssues > 0)
+        return NULL;
+
     initScanner(source);
     Compiler compiler;
     initCompiler(&compiler, TYPE_SCRIPT, file, isRepl, printBytecode);
@@ -2390,6 +2499,20 @@ void compileSetOptimizationLevel(int level)
 int compileGetOptimizationLevel(void)
 {
     return gCompilerOptimizationLevel;
+}
+
+void compileSetTypeCheckMode(int mode)
+{
+    if (mode < AST_TYPECHECK_OFF)
+        mode = AST_TYPECHECK_OFF;
+    if (mode > AST_TYPECHECK_STRICT)
+        mode = AST_TYPECHECK_STRICT;
+    gCompilerTypeCheckMode = mode;
+}
+
+int compileGetTypeCheckMode(void)
+{
+    return gCompilerTypeCheckMode;
 }
 
 void markCompilerRoots()

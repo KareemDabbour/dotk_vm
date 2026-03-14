@@ -1,5 +1,5 @@
 import "x11.k"
-import "file"
+# import "file"
 
 var WIDTH = 1100
 var HEIGHT = 720
@@ -18,7 +18,7 @@ var ZSIZE = ZW * ZH
 var depthZ = [ZSIZE]{0.0}
 var depthStamp = [ZSIZE]{0}
 var depthFrame = 1
-var useDepthCull = false
+var useDepthCull = true
 
 fn rebuildDepthBuffers(){
   if(DEPTH_CELL < 1) DEPTH_CELL = 1
@@ -210,7 +210,7 @@ fn drawWireModel(model, posX, posY, posZ, scale, rotX, rotY, r, g, b){
   }
 }
 
-var objPath = "models/demo_ship.obj"
+var objPath = "models/cow.obj"
 if(len(ARG_V) > 0){
   objPath = ARG_V[0]
 }
@@ -252,7 +252,7 @@ var lastMouseY = 0.0
 var leftDragMoved = false
 
 while(!x11ShouldClose()){
-  fpsFrames += 1
+  fpsFrames = fpsFrames + 1
   var now = x11Time()
   if(type(now) == "float" && type(fpsLastTime) == "float"){
     var dt = now - fpsLastTime
@@ -265,17 +265,17 @@ while(!x11ShouldClose()){
     fpsLastTime = now
   }
 
-  if(x11KeyDown(X11_KEY_LEFT)) rotY -= 0.04
-  if(x11KeyDown(X11_KEY_RIGHT)) rotY += 0.04
-  if(x11KeyDown(X11_KEY_UP)) rotX -= 0.03
-  if(x11KeyDown(X11_KEY_DOWN)) rotX += 0.03
+  if(x11KeyDown(X11_KEY_LEFT)) rotY = rotY - 0.04
+  if(x11KeyDown(X11_KEY_RIGHT)) rotY = rotY + 0.04
+  if(x11KeyDown(X11_KEY_UP)) rotX = rotX - 0.03
+  if(x11KeyDown(X11_KEY_DOWN)) rotX = rotX + 0.03
 
-  if(x11KeyDown(X11_KEY_A)) camX -= camMoveSpeed
-  if(x11KeyDown(X11_KEY_D)) camX += camMoveSpeed
-  if(x11KeyDown(X11_KEY_W)) camZ += camMoveSpeed
-  if(x11KeyDown(X11_KEY_S)) camZ -= camMoveSpeed
-  if(x11KeyDown(X11_KEY_Q)) camY += camMoveSpeed
-  if(x11KeyDown(X11_KEY_E)) camY -= camMoveSpeed
+  if(x11KeyDown(X11_KEY_A)) camX = camX - camMoveSpeed
+  if(x11KeyDown(X11_KEY_D)) camX = camX + camMoveSpeed
+  if(x11KeyDown(X11_KEY_W)) camZ = camZ + camMoveSpeed
+  if(x11KeyDown(X11_KEY_S)) camZ = camZ - camMoveSpeed
+  if(x11KeyDown(X11_KEY_Q)) camY = camY + camMoveSpeed
+  if(x11KeyDown(X11_KEY_E)) camY = camY - camMoveSpeed
 
   var mx = x11MouseX()
   var my = x11MouseY()
@@ -284,8 +284,8 @@ while(!x11ShouldClose()){
 
   if(x11MouseDown(X11_MOUSE_LEFT)){
     if(absf(dx) + absf(dy) > 0.0) leftDragMoved = true
-    rotY += dx * 0.006
-    rotX += dy * 0.006
+    rotY = rotY + (dx * 0.006)
+    rotX = rotX + (dy * 0.006)
     rotX = clamp(rotX, -1.4, 1.4)
     autoSpin = false
   } else {
@@ -293,21 +293,21 @@ while(!x11ShouldClose()){
   }
 
   if(x11MouseDown(X11_MOUSE_RIGHT)){
-    camRotY -= dx * 0.006
-    camRotX += dy * 0.006
+    camRotY = camRotY - (dx * 0.006)
+    camRotX = camRotX + (dy * 0.006)
     camRotX = clamp(camRotX, -1.4, 1.4)
     autoSpin = false
   }
   lastMouseX = mx
   lastMouseY = my
 
-  if(x11MouseClicked(X11_MOUSE_WHEEL_UP)) modelScale += 0.1
-  if(x11MouseClicked(X11_MOUSE_WHEEL_DOWN)) modelScale -= 0.1
+  if(x11MouseClicked(X11_MOUSE_WHEEL_UP)) modelScale = modelScale + 0.1
+  if(x11MouseClicked(X11_MOUSE_WHEEL_DOWN)) modelScale = modelScale - 0.1
   modelScale = clamp(modelScale, 0.2, 8.0)
 
   if(x11MouseClicked(X11_MOUSE_LEFT) && !leftDragMoved) autoSpin = !autoSpin
   if(x11MouseClicked(X11_MOUSE_MIDDLE)) useDepthCull = !useDepthCull
-  if(autoSpin) rotY += 0.01
+  if(autoSpin) rotY = rotY + 0.01
 
   if(x11KeyDown(X11_KEY_SPACE)){
     rotX = 0
@@ -324,17 +324,17 @@ while(!x11ShouldClose()){
 
   x11Begin(12, 14, 22)
 
-  if(useDepthCull){
-    if(model){
-      depthFrame += 1
+  if(model){
+    if(useDepthCull){
+      depthFrame = depthFrame + 1
       if(depthFrame > 2000000000){
         depthFrame = 1
         depthStamp = [ZSIZE]{0}
       }
       drawWireModel(model, modelX, modelY, modelZ, modelScale, rotX, rotY, 180, 230, 255)
+    } else {
+      x11DrawObjWire(objPath, modelX, modelY, modelZ, modelScale, rotX, rotY, camX, camY, camZ, camRotX, camRotY, fov, 180, 230, 255)
     }
-  } else {
-    x11DrawObjWire(objPath, modelX, modelY, modelZ, modelScale, rotX, rotY, camX, camY, camZ, camRotX, camRotY, fov, 180, 230, 255)
   }
 
   x11Text("DotK OBJ Viewer", 16, 26, 200, 220, 255)
@@ -342,7 +342,9 @@ while(!x11ShouldClose()){
   x11Text("L drag rotate obj | RMB drag look (inverted) | WASD+Q/E move camera", 16, 72, 180, 190, 210)
   x11Text("wheel scale | L click spin | M click depth mode | space reset | esc quit", 16, 84, 180, 190, 210)
   x11Text("scale: " + modelScale, 16, 96, 180, 255, 180)
-  x11Text("depth: " + useDepthCull + "  mode: " + (useDepthCull ? "script-z" : "native-direct") + "  eps: " + DEPTH_EPS, 16, 108, 255, 220, 170)
+  var modeLabel = "native-direct"
+  if(useDepthCull) modeLabel = "script-z"
+  x11Text("depth: " + useDepthCull + "  mode: " + modeLabel + "  eps: " + DEPTH_EPS, 16, 108, 255, 220, 170)
   x11Text("cam: (" + camX + ", " + camY + ", " + camZ + ")", 16, 120, 220, 220, 255)
   x11Text("look: (" + camRotX + ", " + camRotY + ")", 16, 132, 220, 220, 255)
   x11Text("fps: " + fps, 16, 144, 200, 255, 200)

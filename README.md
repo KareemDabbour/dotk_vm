@@ -57,10 +57,29 @@ This installs the executable as `dotk` in `/usr/local/bin`.
 ./dotk.out                  # REPL
 ./dotk.out file.k           # run a script
 ./dotk.out -i file.k        # run script, then drop into REPL
+./dotk.out --dump-ast file.k # print bootstrap AST tree
+./dotk.out --dump-sema file.k # print typed scope/symbol summary
+./dotk.out --dump-sema-json file.k # print semantic model JSON for tools
+./dotk.out --type-check file.k # run with optional type warnings
+./dotk.out --type-check-strict file.k # fail compile if type issues are found
+./dotk.out --native file.k     # try native machine code path, fallback to VM
+./dotk.out --native-out app file.k # AOT compile to standalone native executable
+./dotk.out --native-keep-tmp --native-out app file.k # keep generated AOT C source
+./dotk.out --pnative-ir file.k # print native backend IR lowering details
 ./dotk.out --help           # show CLI options
 ```
 
 Anything after the last flag/script is passed to the DotK program as argv-style arguments.
+
+`--native` is currently experimental and compiles a limited arithmetic bytecode subset directly to machine code on Linux x86_64. Unsupported programs automatically execute through the regular bytecode VM.
+
+`--pnative-ir` prints the native backend intermediate representation for each compiled top-level unit, including whether lowering is supported.
+
+`--native-out` is the ahead-of-time path: it lowers the same currently supported subset and produces an executable binary on disk. Unsupported bytecode will fail AOT with a message.
+
+The AOT subset currently includes numeric and string constants, nil/boolean literals, arithmetic (`+ - * / // % **`), string/number concatenating `+`, comparisons (`== < >` for numbers/strings), logical-not with falsey checks (including empty strings), bitwise/shift ops (numeric), stack ops (`dup/pop`), basic global/local variable bytecode, control-flow jump opcodes (`OP_JUMP`, `OP_JUMP_IF_FALSE`, `OP_LOOP`), function calls (non-capturing closures), basic try/catch, list/map build, list/map/string indexing, list/map indexed stores, `print`, and returns.
+
+Currently unsupported in AOT lowering are closures/upvalues, class/object bytecode, imports/modules, and try/catch blocks.
 
 ## Language Guide
 
@@ -289,6 +308,107 @@ class B<A> {
 var b = B(2, 5)
 print(b.get())
 print(b.sum())
+```
+
+Class generic parameters use square brackets and are intentionally separate from inheritance syntax:
+
+```k
+class Box[T] {
+	init(v: T) {
+		this.v = v
+	}
+
+	set(v: T): T {
+		this.v = v
+		return this.v
+	}
+}
+
+class Child<Base> {
+	who() {
+		return "child"
+	}
+}
+```
+
+### Optional Type Hints
+
+The optional type checker supports inline type annotations (Go-style/typesript):
+
+```k
+var x: number = 1
+x = 2
+
+var pet: Animal = Dog()
+
+fn add(a: number, b: number): number {
+	return a + b
+}
+
+var u: number|string = 1
+u = "ok"
+
+var dyn: any = 1
+dyn = "text"
+
+var maybeDog: Dog? = null   # shorthand for Dog|nil
+
+fn join(sep: string, *parts: string): string {
+	return sep.join(parts)
+}
+
+var nums: list<number> = {1, 2, 3}
+var tags: map<string, number> = .{"a"::1, "b"::2}
+
+class Box {
+	init(v: number) {
+		this.v = v
+	}
+
+	value(): number {
+		return this.v
+	}
+}
+
+var b: Box<number> = Box(1)
+```
+
+Legacy comment directives are still supported as fallback:
+
+```k
+# @type x: number
+# @param add.a: number
+# @return add: number
+```
+
+Supported built-in hint names: `bool`, `int`, `float`, `number`, `null`, `str`, `list`, `map`, `function`.
+Aliases are accepted for compatibility: `string`, `nil`, and `fn`.
+Any other type name is treated as a custom class instance type.
+You can also use `any` and union forms like `number|string`.
+Nullable shorthand is supported: `T?` == `T|null`.
+Generic container element hints are supported as `list<T>` and `map<K,V>`.
+Typed class methods are supported with the same syntax (`name(arg:T): R { ... }`).
+Custom generic class names are accepted in annotations (`Box[number]`, `Pair[string,number]`).
+Angle-bracket annotation forms (`Box<number>`) are currently still accepted for compatibility.
+
+For class/object usage today, this means:
+- assignments across different class generic specializations are checked (`Box[number]` vs `Box[string]`)
+- constructor `init(...)` arguments are checked against class-generic substitutions (for example `Box[number] = Box("x")` warns/errors)
+- generic substitutions propagate across inheritance (for example `Child[T] < Base[T]` allows `Base[number] = Child[number]` but rejects `Child[string]`)
+- method return annotations are checked in method bodies
+- method parameter checks on object calls substitute class type params (`T`) from receiver specialization
+- typed map/list assignment checks include unknown-member mismatches against concrete expected types
+
+### Type-Check Smoke Files
+
+Type-check diagnostics are also covered with manual smoke scripts under `temp/`:
+
+```bash
+./dotk.out --type-check temp/typecheck_class_generics_smoke.k
+./dotk.out --type-check-strict temp/typecheck_class_generics_smoke.k
+
+./dotk.out --type-check temp/typecheck_collections_smoke.k
+./dotk.out --type-check-strict temp/typecheck_collections_smoke.k
 ```
 
 ### Operator Overloading
@@ -603,9 +723,18 @@ make bench
 make bench-long
 make bench-legacy
 make bench-nan
+make bench-x11-native-vs-vm
 ```
 
 Workloads are listed in [benchmarks/workloads.txt](benchmarks/workloads.txt).
+
+For X11 viewer-specific comparison (VM vs `--native` on the same fixed-frame workload):
+
+```bash
+DISPLAY=:0 make bench-x11-native-vs-vm
+```
+
+This runs both the script-side wireframe path (`mode=script`) and the native module draw path (`mode=native`) and reports median `ms` and `fps` for each runtime mode.
 
 ## Project Layout
 

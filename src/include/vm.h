@@ -121,6 +121,9 @@ ObjClass *vmGetClassByName(const char *name);
 void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function);
 void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn function);
 void vmEnableDebugger(bool enabled);
+void vmSetNativeExecution(bool enabled);
+bool vmNativeExecutionAvailable(void);
+void vmSetNativePrintIr(bool enabled);
 
 // This is so I can use the equal override in classes for the builtin Map class
 void markMap(Map *map);

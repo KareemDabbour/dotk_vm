@@ -6,6 +6,7 @@
 #include "include/io.h"
 #include "include/memory.h"
 #include "include/native_api.h"
+#include "include/native_exec.h"
 #include "include/object.h"
 #include "include/termbox2.h"
 #include <ctype.h>
@@ -22,6 +23,8 @@ Value prefixStr = NIL_VAL;
 FILE *file;
 bool printBytecodeGlobal = false;
 bool printExecStackGlobaL = false;
+static bool gNativeExecutionEnabled = false;
+static bool gNativePrintIr = false;
 
 typedef enum
 {
@@ -970,19 +973,30 @@ ObjClass *getVmClass(Value val)
     return NULL;
 }
 
+static bool finishPendingInvocationFrames(int frameCountBeforeInvoke, int frameCountAfterInvoke)
+{
+    if (frameCountAfterInvoke == frameCountBeforeInvoke)
+        return true;
+    return run(false, frameCountAfterInvoke) != INTERPRET_RUNTIME_ERROR;
+}
+
+static bool invokeAndFinish(ObjString *name, int argc)
+{
+    int frameCountBeforeInvoke = vm.frameCount;
+    if (!invoke(name, argc))
+        return false;
+    int frameCountAfterInvoke = vm.frameCount;
+    return finishPendingInvocationFrames(frameCountBeforeInvoke, frameCountAfterInvoke);
+}
+
 bool checkIfValuesEqual(Value a, Value b)
 {
     if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
     {
-        int frameCount = vm.frameCount;
         push(a);
         push(b);
-        if (!invoke(vm.eqStr, 1))
+        if (!invokeAndFinish(vm.eqStr, 1))
             return false;
-        if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
-        {
-            return false;
-        }
         Value ret = pop();
         if (!IS_BOOL(ret))
             return false;
@@ -1084,14 +1098,9 @@ static uint32_t hashValueDeep(Value value)
 {
     if (VALUE_TYPE(value) == VAL_OBJ && IS_INSTANCE(value) && !IS_NIL(AS_INSTANCE(value)->klass->hashFn))
     {
-        int frameCount = vm.frameCount;
         push(value);
-        if (!invoke(vm.hashStr, 0))
+        if (!invokeAndFinish(vm.hashStr, 0))
             return 0;
-        if (frameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
-        {
-            return 0;
-        }
         Value ret = pop();
         if (!IS_NUM(ret))
             return 0;
@@ -1992,7 +2001,7 @@ static Value fileReadNative(int argc, Value *argv, bool *hasError, bool *pushedV
     size_t read = fread(buff, sizeof(char), (size_t)bytesToRead, fp);
     buff[read] = '\0';
 
-    Value str = OBJ_VAL(copyStringUninterned(buff, (int)read));
+    Value str = OBJ_VAL(copyString(buff, (int)read));
     FREE_ARRAY(char, buff, (size_t)bytesToRead + 1);
     return str;
 }
@@ -2766,25 +2775,13 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             // Use toStr if available?
             if (!IS_NIL(AS_INSTANCE(val)->klass->toStr))
             {
-                // Make sure that the val is on the stack
-                Value stackTop = peek(0);
-                if (VALUE_TYPE(stackTop) != VAL_OBJ || AS_OBJ(stackTop) != AS_OBJ(val))
-                    push(val);
-
-                int frameCount = vm.frameCount;
-
-                if (!invoke(vm.toStr, 0))
+                push(val);
+                if (!invokeAndFinish(vm.toStr, 0))
                 {
                     *len = 0;
                     return buff;
                 }
-                bool invokedNative = frameCount == vm.frameCount;
-                if (!invokedNative && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
-                {
-                    *len = 0;
-                    return buff;
-                }
-                Value str = invokedNative ? peek(0) : pop();
+                Value str = pop();
                 if (!IS_STR(str))
                 {
                     *len = 0;
@@ -3896,7 +3893,7 @@ static Value vmApiMakeString(const char *chars, int len, bool interned)
         return OBJ_VAL(copyString("", 0));
     if (len < 0)
         len = (int)strlen(chars);
-    return interned ? OBJ_VAL(copyString(chars, len)) : OBJ_VAL(copyStringUninterned(chars, len));
+    return interned ? OBJ_VAL(copyString(chars, len)) : OBJ_VAL(copyString(chars, len));
 }
 
 static Value vmApiMakeList(void)
@@ -4217,87 +4214,28 @@ static bool callClosureWithArgs(ObjClosure *closure, int positionalCount, int ke
     return call(closure, normalizedArgCount);
 }
 
-static bool callValue(Value callee, int argC)
+static bool callNativeWithArgs(NativeFn native, int positionalCount, int keywordCount)
 {
-    if (IS_OBJ(callee))
+    int nativeArgCount = positionalCount;
+    if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
+        return false;
+
+    bool hasError = false;
+    bool pushedValue = false;
+    Value result = native(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
+    if (hasError)
+        return false;
+    if (!pushedValue)
     {
-        switch (OBJ_TYPE(callee))
-        {
-        case OBJ_BOUND_METHOD:
-        {
-            ObjBoundMethod *bound = AS_BOUND_METHOD(callee);
-            vm.stackTop[-argC - 1] = bound->receiver;
-            return callClosureWithArgs(bound->method, argC, 0);
-        }
-        case OBJ_BOUND_BUILTIN:
-        {
-            ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(callee);
-            vm.stackTop[-argC - 1] = bound->receiver;
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = bound->native->function(argC, vm.stackTop - argC, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
-            {
-                vm.stackTop -= argC + 1;
-                push(result);
-            }
-            return true;
-        }
-        case OBJ_CLASS:
-        {
-            ObjClass *klass = AS_CLASS(callee);
-            vm.stackTop[-argC - 1] = OBJ_VAL(newInstance(klass));
-            if (!IS_NIL(klass->initializer))
-            {
-                return callValue(klass->initializer, argC);
-            }
-            else if (argC != 0)
-            {
-                runtimeError("Expected 0 arguments for init of class '%s' but got %d", klass->name->chars, argC);
-                return false;
-            }
-            return true;
-        }
-        case OBJ_NATIVE:
-        {
-            NativeFn native = AS_NATIVE(callee);
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = native(argC, vm.stackTop - argC, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
-            {
-                vm.stackTop -= argC + 1;
-                push(result);
-            }
-            return true;
-        }
-        case OBJ_FOREIGN:
-        {
-            ObjForeign *foreign = AS_FOREIGN(callee);
-            Value initMethod;
-            if (!tableGet(&foreign->methods, vm.initStr, &initMethod))
-            {
-                runtimeError("This foreign object %s does not have an init method", FOREIGN_TYPES[foreign->type]);
-                return false;
-            }
-            vm.stackTop[-argC - 1] = callee;
-            return call(AS_CLOSURE(initMethod), argC);
-        }
-        case OBJ_CLOSURE:
-            return callClosureWithArgs(AS_CLOSURE(callee), argC, 0);
-        default:
-            break;
-        }
+        vm.stackTop -= nativeArgCount + 1;
+        push(result);
     }
-    runtimeError("Can only call functions and classes -- not '%s'", valueTypeName(callee));
-    return false;
+    return true;
 }
 
-static bool callValueKw(Value callee, int positionalCount, int keywordCount)
+static bool callAnyValue(Value callee, int positionalCount, int keywordCount);
+
+static bool callAnyValue(Value callee, int positionalCount, int keywordCount)
 {
     if (IS_OBJ(callee))
     {
@@ -4315,22 +4253,7 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
             ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(callee);
             int rawArgCount = positionalCount + (keywordCount * 2);
             vm.stackTop[-rawArgCount - 1] = bound->receiver;
-
-            int nativeArgCount = positionalCount;
-            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
-                return false;
-
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = bound->native->function(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
-            {
-                vm.stackTop -= nativeArgCount + 1;
-                push(result);
-            }
-            return true;
+            return callNativeWithArgs(bound->native->function, positionalCount, keywordCount);
         }
         case OBJ_CLASS:
         {
@@ -4338,7 +4261,7 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
             int rawArgCount = positionalCount + (keywordCount * 2);
             vm.stackTop[-rawArgCount - 1] = OBJ_VAL(newInstance(klass));
             if (!IS_NIL(klass->initializer))
-                return callValueKw(klass->initializer, positionalCount, keywordCount);
+                return callAnyValue(klass->initializer, positionalCount, keywordCount);
 
             if (positionalCount != 0 || keywordCount != 0)
             {
@@ -4348,24 +4271,7 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
             return true;
         }
         case OBJ_NATIVE:
-        {
-            int nativeArgCount = positionalCount;
-            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
-                return false;
-
-            NativeFn native = AS_NATIVE(callee);
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = native(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
-            {
-                vm.stackTop -= nativeArgCount + 1;
-                push(result);
-            }
-            return true;
-        }
+            return callNativeWithArgs(AS_NATIVE(callee), positionalCount, keywordCount);
         case OBJ_FOREIGN:
         {
             int foreignArgCount = positionalCount;
@@ -4380,7 +4286,7 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
                 return false;
             }
             vm.stackTop[-foreignArgCount - 1] = callee;
-            return call(AS_CLOSURE(initMethod), foreignArgCount);
+            return callAnyValue(initMethod, foreignArgCount, 0);
         }
         case OBJ_CLOSURE:
             return callClosureWithArgs(AS_CLOSURE(callee), positionalCount, keywordCount);
@@ -4392,116 +4298,142 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
     return false;
 }
 
-static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
+static bool callValue(Value callee, int argC)
+{
+    return callAnyValue(callee, argC, 0);
+}
+
+static bool callValueKw(Value callee, int positionalCount, int keywordCount)
+{
+    return callAnyValue(callee, positionalCount, keywordCount);
+}
+
+static bool isValueInvokable(Value value)
+{
+    if (!IS_OBJ(value))
+        return false;
+
+    switch (OBJ_TYPE(value))
+    {
+    case OBJ_BOUND_METHOD:
+    case OBJ_BOUND_BUILTIN:
+    case OBJ_CLASS:
+    case OBJ_NATIVE:
+    case OBJ_FOREIGN:
+    case OBJ_CLOSURE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static ObjClass *getDispatchClass(Value receiver)
+{
+    if (IS_CLASS(receiver))
+        return AS_CLASS(receiver);
+    if (IS_INSTANCE(receiver))
+        return AS_INSTANCE(receiver)->klass;
+    if (isBuiltinClass(receiver))
+        return getVmClass(receiver);
+    return NULL;
+}
+
+static bool resolveCallableFromClass(ObjClass *klass, ObjString *name, Value *callableOut)
 {
     if (klass == NULL)
         return false;
+    return tableGet(&klass->staticVars, name, callableOut) || tableGet(&klass->methods, name, callableOut);
+}
 
+static bool resolveCallableFromReceiver(Value receiver, ObjString *name, Value *callableOut)
+{
+    if (IS_FOREIGN(receiver))
+        return tableGet(&AS_FOREIGN(receiver)->methods, name, callableOut);
+
+    if (IS_INSTANCE(receiver))
+    {
+        ObjInstance *instance = AS_INSTANCE(receiver);
+        if (tableGet(&instance->fields, name, callableOut))
+            return true;
+        return resolveCallableFromClass(instance->klass, name, callableOut);
+    }
+
+    ObjClass *dispatchClass = getDispatchClass(receiver);
+    if (dispatchClass != NULL)
+        return resolveCallableFromClass(dispatchClass, name, callableOut);
+
+    return false;
+}
+
+static bool hasInvokableReceiverCallable(Value receiver, ObjString *name)
+{
+    Value callable;
+    if (!resolveCallableFromReceiver(receiver, name, &callable))
+        return false;
+    return isValueInvokable(callable);
+}
+
+static bool invokeFromClassAny(ObjClass *klass, ObjString *name, int positionalCount, int keywordCount)
+{
     Value method;
-    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
+    if (!resolveCallableFromClass(klass, name, &method))
     {
         runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
         return false;
     }
-    return callValue(method, argc);
+    return callAnyValue(method, positionalCount, keywordCount);
+}
+
+static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
+{
+    return invokeFromClassAny(klass, name, argc, 0);
 }
 
 static bool invokeFromClassKw(ObjClass *klass, ObjString *name, int positionalCount, int keywordCount)
 {
-    if (klass == NULL)
-        return false;
-
-    Value method;
-    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
-    {
-        runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
-        return false;
-    }
-    return callValueKw(method, positionalCount, keywordCount);
+    return invokeFromClassAny(klass, name, positionalCount, keywordCount);
 }
 
-bool invoke(ObjString *name, int argc)
-{
-    Value receiver = peek(argc);
-
-    if (IS_FOREIGN(receiver))
-    {
-        ObjForeign *foreign = AS_FOREIGN(receiver);
-        Value method;
-        if (!tableGet(&foreign->methods, name, &method))
-        {
-            runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
-            return false;
-        }
-        // vm.stackTop[-argc - 1] = method;
-        return callValue(method, argc);
-    }
-
-    bool isInstance = IS_INSTANCE(receiver);
-    bool isClass = IS_CLASS(receiver);
-    if (!isInstance && !isClass)
-    {
-        if (isBuiltinClass(receiver))
-            return invokeFromClass(getVmClass(receiver), name, argc);
-
-        runtimeError("Only Classes and their instances have methods. -- not '%s'", valueTypeName(receiver));
-        return false;
-    }
-
-    // Static methods call
-    if (isClass)
-        return invokeFromClass(AS_CLASS(receiver), name, argc);
-
-    ObjInstance *
-        instance = AS_INSTANCE(receiver);
-    Value value;
-    if (tableGet(&instance->fields, name, &value))
-    {
-        vm.stackTop[-argc - 1] = value;
-        return callValue(value, argc);
-    }
-    return invokeFromClass(instance->klass, name, argc);
-}
-
-static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
+static bool invokeAny(ObjString *name, int positionalCount, int keywordCount)
 {
     int rawArgCount = positionalCount + (keywordCount * 2);
     Value receiver = peek(rawArgCount);
 
-    if (IS_FOREIGN(receiver))
+    Value callable;
+    if (!resolveCallableFromReceiver(receiver, name, &callable))
     {
-        ObjForeign *foreign = AS_FOREIGN(receiver);
-        Value method;
-        if (!tableGet(&foreign->methods, name, &method))
+        if (IS_FOREIGN(receiver))
         {
+            ObjForeign *foreign = AS_FOREIGN(receiver);
             runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
             return false;
         }
-        return callValueKw(method, positionalCount, keywordCount);
-    }
 
-    bool isInstance = IS_INSTANCE(receiver);
-    bool isClass = IS_CLASS(receiver);
-    if (!isInstance && !isClass)
-    {
-        if (isBuiltinClass(receiver))
-            return invokeFromClassKw(getVmClass(receiver), name, positionalCount, keywordCount);
+        ObjClass *dispatchClass = getDispatchClass(receiver);
+        if (dispatchClass != NULL)
+        {
+            runtimeError("Undefined method '%s' for class '%s'", name->chars, dispatchClass->name->chars);
+            return false;
+        }
 
         runtimeError("Only Classes and their instances have methods. -- not '%s'", valueTypeName(receiver));
         return false;
     }
 
-    if (isClass)
-        return invokeFromClassKw(AS_CLASS(receiver), name, positionalCount, keywordCount);
+    if (IS_INSTANCE(receiver) && tableGet(&AS_INSTANCE(receiver)->fields, name, &callable))
+        vm.stackTop[-rawArgCount - 1] = callable;
 
-    ObjInstance *instance = AS_INSTANCE(receiver);
-    Value value;
-    if (tableGet(&instance->fields, name, &value))
-    {
-        vm.stackTop[-rawArgCount - 1] = value;
-        return callValueKw(value, positionalCount, keywordCount);
-    }
-    return invokeFromClassKw(instance->klass, name, positionalCount, keywordCount);
+    return callAnyValue(callable, positionalCount, keywordCount);
+}
+
+bool invoke(ObjString *name, int argc)
+{
+    return invokeAny(name, argc, 0);
+}
+
+static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
+{
+    return invokeAny(name, positionalCount, keywordCount);
 }
 
 static bool bindMethod(ObjClass *klass, ObjString *name)
@@ -8051,6 +7983,13 @@ void initVM(bool printBytecode, bool printExecStack)
     freeTable(&preloadBefore);
     tableSet(&vm.imports, copyString("core", 4), OBJ_VAL(coreExports));
     tableSet(&vm.imports, copyString("core.k", 6), OBJ_VAL(coreExports));
+
+    snapshotGlobals(&preloadBefore);
+    importBuiltinModule(copyString("file", 4));
+    ObjMap *fileExports = collectGlobalDiff(&preloadBefore);
+    freeTable(&preloadBefore);
+    tableSet(&vm.imports, copyString("file", 4), OBJ_VAL(fileExports));
+    tableSet(&vm.imports, copyString("file.k", 6), OBJ_VAL(fileExports));
 }
 
 void vmEnableDebugger(bool enabled)
@@ -8065,6 +8004,21 @@ void vmEnableDebugger(bool enabled)
         gDebugBreakpointCount = 0;
         gDebugWatchCount = 0;
     }
+}
+
+void vmSetNativeExecution(bool enabled)
+{
+    gNativeExecutionEnabled = enabled;
+}
+
+bool vmNativeExecutionAvailable(void)
+{
+    return nativeExecIsSupported();
+}
+
+void vmSetNativePrintIr(bool enabled)
+{
+    gNativePrintIr = enabled;
 }
 
 void freeVM()
@@ -8393,7 +8347,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 ObjString *aS = AS_STR(a);
                 push(BOOL_VAL(strcmp(aS->chars, bS->chars) > 0));
             }
-            else if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->greaterThan))
+            else if (hasInvokableReceiverCallable(a, vm.gtStr))
             {
                 push(a);
                 push(b);
@@ -8429,7 +8383,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 push(BOOL_VAL(strcmp(aS->chars, bS->chars) < 0));
                 break;
             }
-            else if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->lessThan))
+            else if (hasInvokableReceiverCallable(a, vm.ltStr))
             {
                 push(a);
                 push(b);
@@ -8576,9 +8530,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             if (!IS_LIST(listVal))
             {
-                if (IS_INSTANCE(listVal))
+                if (IS_INSTANCE(listVal) || isBuiltinClass(listVal))
                 {
-                    if (!IS_NIL(AS_INSTANCE(listVal)->klass->indexFn))
+                    if (hasInvokableReceiverCallable(listVal, vm.indexStr))
                     {
                         push(listVal);
                         push(indexVal);
@@ -8587,20 +8541,15 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                         frame = &vm.frames[vm.frameCount - 1];
                         break;
                     }
-                    else
+
+                    if (IS_INSTANCE(listVal))
                     {
                         runtimeError("Class '%s' is not subscriptable.\nHINT -- You would need to override the <_get_(i)> method", AS_INSTANCE(listVal)->klass->name->chars);
                         return INTERPRET_RUNTIME_ERROR;
                     }
-                }
-                else if (isBuiltinClass(listVal) && !IS_NIL(getVmClass(listVal)->indexFn))
-                {
-                    push(listVal);
-                    push(indexVal);
-                    if (!invoke(vm.indexStr, 1))
-                        return INTERPRET_RUNTIME_ERROR;
-                    frame = &vm.frames[vm.frameCount - 1];
-                    break;
+
+                    runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
+                    return INTERPRET_RUNTIME_ERROR;
                 }
                 runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
                 return INTERPRET_RUNTIME_ERROR;
@@ -8631,9 +8580,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             Value listVal = pop();
             if (!IS_LIST(listVal))
             {
-                if (IS_INSTANCE(listVal))
+                if (IS_INSTANCE(listVal) || isBuiltinClass(listVal))
                 {
-                    if (!IS_NIL(AS_INSTANCE(listVal)->klass->setFn))
+                    if (hasInvokableReceiverCallable(listVal, vm.setStr))
                     {
                         push(listVal);
                         push(indexVal);
@@ -8643,21 +8592,15 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                         frame = &vm.frames[vm.frameCount - 1];
                         break;
                     }
-                    else
+
+                    if (IS_INSTANCE(listVal))
                     {
                         runtimeError("Class '%s' is not subscriptable.\nHINT -- You would need to override the <_set_(i, v)> method", AS_INSTANCE(listVal)->klass->name->chars);
                         return INTERPRET_RUNTIME_ERROR;
                     }
-                }
-                else if (isBuiltinClass(listVal) && !IS_NIL(getVmClass(listVal)->setFn))
-                {
-                    push(listVal);
-                    push(indexVal);
-                    push(itemVal);
-                    if (!invoke(vm.setStr, 2))
-                        return INTERPRET_RUNTIME_ERROR;
-                    frame = &vm.frames[vm.frameCount - 1];
-                    break;
+
+                    runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
+                    return INTERPRET_RUNTIME_ERROR;
                 }
 
                 runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
@@ -9633,6 +9576,20 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions,
     ObjFunction *function = compile(source, file, printExpressions, printBytecodeGlobal);
     if (function == NULL)
         return INTERPRET_COMPILE_ERROR;
+
+    if (gNativePrintIr)
+        nativeDumpFunctionIr(function, stderr);
+
+    if (gNativeExecutionEnabled && nativeExecIsSupported())
+    {
+        Value nativeResult = NIL_VAL;
+        if (nativeTryExecuteFunction(function, &nativeResult))
+        {
+            vm.isRepl = b4;
+            return INTERPRET_OK;
+        }
+    }
+
     push(OBJ_VAL(function));
     ObjClosure *closure = newClosure(function);
     // tableSet(&vm.importFuncs, file_, OBJ_VAL(closure)); This may be due to some nonesense btw I am using this table to free imports after vm is closed

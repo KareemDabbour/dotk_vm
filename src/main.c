@@ -1,13 +1,16 @@
+#include "include/ast.h"
 #include "include/chunk.h"
 #include "include/common.h"
 #include "include/compiler.h"
 #include "include/debug.h"
 #include "include/io.h"
+#include "include/native_exec.h"
 #include "include/vm.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -655,6 +658,15 @@ static void printUsage()
             "   --pbytecode: Print the bytecode\n"
             "   --pexec:     Print the execution stack\n"
             "   --debug:     Start interactive VM debugger\n"
+            "   --dump-ast:  Parse file and print bootstrap AST tree\n"
+            "   --dump-sema: Parse file and print typed scope/symbol summary\n"
+            "   --dump-sema-json: Parse file and print semantic model as JSON\n"
+            "   --type-check: Enable optional AST-based type warnings\n"
+            "   --type-check-strict: Fail compile when type checker finds issues\n"
+            "   --native:    Try native machine-code execution first, fallback to VM\n"
+            "   --native-out <bin>: AOT compile file.k to standalone native executable\n"
+            "   --native-keep-tmp: Keep generated AOT C source file in /tmp\n"
+            "   --pnative-ir: Print native backend IR for each compiled unit\n"
             "   -O0/-O1/-O2: Set compiler optimization level (default: -O1)\n"
             "   --opt <n>:   Set compiler optimization level [0..2]\n"
             "   --test <file.k>: Run one test file and compare output with # EXPECTED block\n"
@@ -708,6 +720,16 @@ int main(int argc, char *argv[])
     int testFlag = -1;
     int testAllFlag = -1;
     int stopOnFailFlag = -1;
+    int dumpAstFlag = -1;
+    int dumpSemaFlag = -1;
+    int dumpSemaJsonFlag = -1;
+    int typeCheckFlag = -1;
+    int typeCheckStrictFlag = -1;
+    int nativeFlag = -1;
+    int nativeOutFlag = -1;
+    int nativeOutValueFlag = -1;
+    int nativeKeepTmpFlag = -1;
+    int printNativeIrFlag = -1;
     bool piped = ((fstat(0, &statbuf) == 0) && (S_ISFIFO(statbuf.st_mode) || S_ISREG(statbuf.st_mode)));
 
     for (int i = 1; i < argc; i++)
@@ -724,6 +746,33 @@ int main(int argc, char *argv[])
             printExecStack = i;
         else if (strncmp(argv[i], "--debug", 8) == 0)
             debugFlag = i;
+        else if (strncmp(argv[i], "--dump-ast", 11) == 0)
+            dumpAstFlag = i;
+        else if (strncmp(argv[i], "--dump-sema", 12) == 0)
+            dumpSemaFlag = i;
+        else if (strncmp(argv[i], "--dump-sema-json", 17) == 0)
+            dumpSemaJsonFlag = i;
+        else if (strncmp(argv[i], "--type-check-strict", 20) == 0)
+            typeCheckStrictFlag = i;
+        else if (strncmp(argv[i], "--type-check", 13) == 0)
+            typeCheckFlag = i;
+        else if (strncmp(argv[i], "--native-out=", 13) == 0)
+        {
+            nativeOutFlag = i;
+            nativeOutValueFlag = i;
+        }
+        else if (strncmp(argv[i], "--native-out", 13) == 0)
+        {
+            nativeOutFlag = i;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                nativeOutValueFlag = i + 1;
+        }
+        else if (strncmp(argv[i], "--native-keep-tmp", 18) == 0)
+            nativeKeepTmpFlag = i;
+        else if (strcmp(argv[i], "--native") == 0)
+            nativeFlag = i;
+        else if (strncmp(argv[i], "--pnative-ir", 13) == 0)
+            printNativeIrFlag = i;
         else if (strncmp(argv[i], "-O", 2) == 0 && strlen(argv[i]) == 3 && isdigit((unsigned char)argv[i][2]))
         {
             optimizeLevel = argv[i][2] - '0';
@@ -757,6 +806,12 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&GVL, NULL);
 
     compileSetOptimizationLevel(optimizeLevel);
+    if (typeCheckStrictFlag != -1)
+        compileSetTypeCheckMode(2);
+    else if (typeCheckFlag != -1)
+        compileSetTypeCheckMode(1);
+    else
+        compileSetTypeCheckMode(0);
 
     if (testAllFlag != -1)
     {
@@ -769,7 +824,104 @@ int main(int argc, char *argv[])
         return status;
     }
 
+    if (dumpAstFlag != -1 || dumpSemaFlag != -1 || dumpSemaJsonFlag != -1)
+    {
+        if (file == -1)
+        {
+            fprintf(stderr, "--dump-ast/--dump-sema/--dump-sema-json requires a .k file path\n");
+            pthread_mutex_destroy(&GVL);
+            return 64;
+        }
+
+        char *source = readFileAndExit(argv[file]);
+        char errBuf[256] = {0};
+        bool ok = false;
+        if (dumpSemaJsonFlag != -1)
+            ok = astDumpSemanticJsonFromSource(source, argv[file], stdout, errBuf, sizeof(errBuf));
+        else if (dumpSemaFlag != -1)
+            ok = astDumpSemanticFromSource(source, argv[file], stdout, errBuf, sizeof(errBuf));
+        else
+            ok = astDumpFromSource(source, argv[file], stdout, errBuf, sizeof(errBuf));
+        free(source);
+
+        if (!ok)
+        {
+            fprintf(stderr, "%s:0:0 Error: AST build failed: %s\n", argv[file], errBuf[0] == '\0' ? "unknown error" : errBuf);
+            pthread_mutex_destroy(&GVL);
+            return 65;
+        }
+
+        pthread_mutex_destroy(&GVL);
+        return 0;
+    }
+
     initVM(printBytecode != -1, printExecStack != -1);
+    vmSetNativeExecution(nativeFlag != -1);
+    vmSetNativePrintIr(printNativeIrFlag != -1);
+    if (nativeFlag != -1 && !vmNativeExecutionAvailable())
+        fprintf(stderr, "[dotk] --native requested but unsupported on this platform; using VM fallback.\n");
+
+    if (nativeOutFlag != -1)
+    {
+        if (file == -1)
+        {
+            fprintf(stderr, "--native-out requires a .k source file\n");
+            freeVM();
+            pthread_mutex_destroy(&GVL);
+            return 64;
+        }
+
+        const char *outPath = NULL;
+        if (nativeOutValueFlag == nativeOutFlag)
+            outPath = argv[nativeOutFlag] + 13;
+        else if (nativeOutValueFlag != -1)
+            outPath = argv[nativeOutValueFlag];
+
+        if (outPath == NULL || outPath[0] == '\0')
+        {
+            fprintf(stderr, "--native-out requires an output binary path\n");
+            freeVM();
+            pthread_mutex_destroy(&GVL);
+            return 64;
+        }
+
+        char *source = readFileAndExit(argv[file]);
+        ObjFunction *function = compile(source, argv[file], false, printBytecode != -1);
+        free(source);
+        if (function == NULL)
+        {
+            freeVM();
+            pthread_mutex_destroy(&GVL);
+            return 65;
+        }
+
+        if (printNativeIrFlag != -1)
+            nativeDumpFunctionIr(function, stderr);
+
+        char errBuf[256] = {0};
+        char keptPath[PATH_MAX] = {0};
+        if (!nativeAotWriteExecutable(function,
+                                      outPath,
+                                      nativeKeepTmpFlag != -1,
+                                      keptPath,
+                                      sizeof(keptPath),
+                                      errBuf,
+                                      sizeof(errBuf)))
+        {
+            fprintf(stderr, "[dotk] native AOT failed: %s\n", errBuf[0] == '\0' ? "unknown error" : errBuf);
+            freeVM();
+            pthread_mutex_destroy(&GVL);
+            return 70;
+        }
+
+        fprintf(stderr, "[dotk] native AOT executable written to '%s'\n", outPath);
+        if (nativeKeepTmpFlag != -1 && keptPath[0] != '\0')
+            fprintf(stderr, "[dotk] kept AOT source at '%s'\n", keptPath);
+        freeVM();
+        pthread_mutex_destroy(&GVL);
+        return 0;
+    }
+
     if (debugFlag != -1)
         vmEnableDebugger(true);
 
@@ -797,6 +949,26 @@ int main(int argc, char *argv[])
         last = printExecStack;
     if (debugFlag > last)
         last = debugFlag;
+    if (dumpAstFlag > last)
+        last = dumpAstFlag;
+    if (dumpSemaFlag > last)
+        last = dumpSemaFlag;
+    if (dumpSemaJsonFlag > last)
+        last = dumpSemaJsonFlag;
+    if (typeCheckFlag > last)
+        last = typeCheckFlag;
+    if (typeCheckStrictFlag > last)
+        last = typeCheckStrictFlag;
+    if (nativeFlag > last)
+        last = nativeFlag;
+    if (nativeOutFlag > last)
+        last = nativeOutFlag;
+    if (nativeOutValueFlag > last)
+        last = nativeOutValueFlag;
+    if (nativeKeepTmpFlag > last)
+        last = nativeKeepTmpFlag;
+    if (printNativeIrFlag > last)
+        last = printNativeIrFlag;
     if (optFlag > last)
         last = optFlag;
     if (optValueFlag > last)
