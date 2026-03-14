@@ -1,5 +1,6 @@
-#include "../src/include/native_api.h"
 
+#include "../src/include/io.h"
+#include "../src/include/native_api.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -579,6 +580,98 @@ static Value json_parse_native(int argc, Value *argv, bool *hasError, bool *push
     return out;
 }
 
+static Value json_parse_file_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    (void)pushedValue;
+    if (argc != 1 || (!IS_STR(argv[0]) && !IS_FOREIGN(argv[0]) && !IS_FOREIGN_TYPE(argv[0], TYPE_FILE)))
+    {
+        g_api->raiseError("JSON.parsef(string | file) expects a single string or file argument");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (IS_FOREIGN(argv[0]) && IS_FOREIGN_TYPE(argv[0], TYPE_FILE))
+    {
+        FILE *f = (FILE *)AS_FOREIGN_PTR(argv[0]);
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char *buf = (char *)malloc((size_t)len + 1);
+        if (fread(buf, 1, (size_t)len, f) != (size_t)len)
+        {
+            free(buf);
+            g_api->raiseError("Failed to read file for JSON.parsef");
+            *hasError = true;
+            return NIL_VAL;
+        }
+        buf[len] = '\0';
+
+        JsonParser p;
+        p.src = buf;
+        p.len = (int)len;
+        p.i = 0;
+        p.failed = false;
+        p.error = NULL;
+
+        Value out = parse_value(&p);
+        free(buf);
+
+        if (!p.failed)
+        {
+            skip_ws(&p);
+            if (p.i != p.len)
+                set_error(&p, "Trailing characters after JSON value");
+        }
+
+        if (p.failed)
+        {
+            g_api->raiseError("JSON.parsef failed near index %d: %s", p.i, p.error ? p.error : "invalid json");
+            *hasError = true;
+            return NIL_VAL;
+        }
+
+        return out;
+    }
+
+    if (IS_STR(argv[0]))
+    {
+
+        char *chars = readFile(AS_STR(argv[0])->chars);
+        if (chars == NULL)
+        {
+            g_api->raiseError("Failed to read file for JSON.parsef");
+            *hasError = true;
+            return NIL_VAL;
+        }
+
+        JsonParser p;
+        p.src = chars;
+        p.len = strlen(chars);
+        p.i = 0;
+        p.failed = false;
+        p.error = NULL;
+
+        Value out = parse_value(&p);
+        free(chars);
+
+        if (!p.failed)
+        {
+            skip_ws(&p);
+            if (p.i != p.len)
+                set_error(&p, "Trailing characters after JSON value");
+        }
+
+        if (p.failed)
+        {
+            g_api->raiseError("JSON.parsef failed near index %d: %s", p.i, p.error ? p.error : "invalid json");
+            *hasError = true;
+            return NIL_VAL;
+        }
+
+        return out;
+    }
+}
+
 static Value json_stringify_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     (void)pushedValue;
@@ -611,6 +704,7 @@ bool dotk_init_module(const DotKNativeApi *api)
     api->defineClassStaticMethod(jsonClass, "stringify", json_stringify_native);
 
     api->defineNative("json_parse", json_parse_native);
+    api->defineNative("jsonf", json_parse_file_native);
     api->defineNative("json_stringify", json_stringify_native);
 
     return true;

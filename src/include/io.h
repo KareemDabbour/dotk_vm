@@ -1,5 +1,7 @@
 #ifndef dotk_io_h
 #define dotk_io_h
+#include <unistd.h>
+
 #include "stack.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,7 +77,8 @@ static void disableRawMode()
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-static bool is_ctrl_arrow_char_term(char c){
+static bool is_ctrl_arrow_char_term(char c)
+{
     return c == ' ' || c == '.' || c == '_' || c == '-' || c == '+' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '<' || c == '>';
 }
 
