@@ -1404,7 +1404,7 @@ static void statement()
 
 static void number(bool canAssign)
 {
-    int len = parser.prev.len;
+    size_t len = parser.prev.len;
     char *raw = ALLOCATE(char, len + 1);
     memcpy(raw, parser.prev.start, len);
     raw[len] = '\0';
@@ -1588,7 +1588,7 @@ static void interpolateString(bool canAssign)
         new[realLen++] = c;
     }
     emitConst(OBJ_VAL(copyString(new, realLen)));
-    FREE(char, new);
+    FREE_ARRAY(char, new, tokenLen);
 }
 
 static void templateString(bool canAssign)
@@ -1656,7 +1656,7 @@ static void templateString(bool canAssign)
         new[realLen++] = c;
     }
     emitConst(OBJ_VAL(copyString(new, realLen)));
-    FREE(char, new);
+    FREE_ARRAY(char, new, tokenLen);
 }
 
 static void interpolation(bool canAssign)

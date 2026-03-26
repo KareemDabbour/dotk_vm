@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 
 #include "include/memory.h"
@@ -7,12 +8,33 @@
 #include "include/vm.h"
 
 #define ALLOCATE_OBJ(type, objectType) \
-    (type *)allocateObject(sizeof(type), objectType)
+    (setGcAllocTypeContext(#type), (type *)allocateObject(sizeof(type), objectType))
+
+static bool gcDebugEnabledObject(void)
+{
+    static int initialized = 0;
+    static bool enabled = false;
+    if (!initialized)
+    {
+        const char *value = getenv("DOTK_DEBUG_GC");
+        enabled = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+        initialized = 1;
+    }
+    return enabled;
+}
 
 static Obj *allocateObject(size_t size, ObjType type)
 {
-    Obj *object = (Obj *)reallocate(NULL, 0, size);
+    Obj *object = (Obj *)reallocateDebug(NULL, 0, size, __FILE__, __LINE__, OBJECT_TYPES[type], "alloc");
     object->type = type;
+    // if (gcDebugEnabledObject())
+    // {
+    //     fprintf(stderr, "[gc-obj] ptr=%p size=%zu type=%s(%d)\n", (void *)object, size, OBJECT_TYPES[type], type);
+    // }
+    // if (getenv("DOTK_DEBUG_GC") != NULL)
+    // {
+    //     fprintf(stderr, "[DOTK_DEBUG_GC] %p allocate %zu for %s\n", (void *)object, size, OBJECT_TYPES[type]);
+    // }
     object->isMarked = false;
     object->next = vm.objects;
     vm.objects = object;
@@ -116,6 +138,9 @@ inline bool isValidListIndex(ObjList *list, int index) { return !(index < -list-
 ObjClass *newClass(ObjString *name)
 {
     ObjClass *clazz = ALLOCATE_OBJ(ObjClass, OBJ_CLASS);
+    /* Root the newly created class while initializing to protect it
+       from GC that may run during allocations in initTable/tableAddAll. */
+    push(OBJ_VAL(clazz));
     clazz->name = name;
     clazz->initializer = NIL_VAL;
     clazz->toStr = NIL_VAL;
@@ -141,6 +166,7 @@ ObjClass *newClass(ObjString *name)
     tableSet(&clazz->staticVars, AS_STR(pop()), vm.baseObj != NULL ? OBJ_VAL(vm.baseObj) : NIL_VAL);
 
     tableSet(&clazz->staticVars, vm.clazzStr, OBJ_VAL(clazz));
+    pop();
     return clazz;
 }
 

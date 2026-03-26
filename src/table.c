@@ -2,6 +2,7 @@
 #include "include/memory.h"
 #include "include/object.h"
 #include "include/value.h"
+#include "include/vm.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,7 +58,9 @@ bool tableGet(Table *table, ObjString *key, Value *value)
 
 static void adjustCapacity(Table *table, int capacity)
 {
+    vm.gcDisabled = true;
     Entry *entries = ALLOCATE(Entry, capacity);
+    vm.gcDisabled = false;
     for (int i = 0; i < capacity; i++)
     {
         entries[i].key = NULL;

@@ -13,6 +13,7 @@
 #include <math.h>
 #include <regex.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -3021,6 +3022,32 @@ static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushed
     return NIL_VAL;
 }
 
+NATIVE_FN(roundNative)
+{
+    if (argc < 1 || argc > 2)
+    {
+        runtimeError("'round()' expects one or two arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("'round()' expects a number as argument but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (argc == 2 && !IS_NUM(argv[1]))
+    {
+        runtimeError("'round()' expects a number as second argument but got '%s'", valueTypeName(argv[1]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    double x = AS_NUM(argv[0]);
+    int digits = argc == 2 ? (int)AS_NUM(argv[1]) : 0;
+    double fac = pow(10, digits);
+    return NUM_VAL(round(x * fac) / fac);
+}
+
 NATIVE_FN(boolCastNative)
 {
     if (argc != 1)
@@ -3068,10 +3095,10 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
         ObjList *list = newList();
         for (int i = 0; i < AS_STR(argv[0])->len; i++)
         {
-            char *chr = ALLOCATE(char, 2);
+            char chr[2] = {0};
             chr[0] = AS_STR(argv[0])->chars[i];
             chr[1] = '\0';
-            appendToList(list, OBJ_VAL(takeString(chr, 1)));
+            appendToList(list, OBJ_VAL(copyString(chr, 1)));
         }
         return OBJ_VAL(list);
     }
@@ -3156,10 +3183,10 @@ static Value chrNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
     }
     int num = (int)AS_NUM(argv[0]);
 
-    char *chr = ALLOCATE(char, 2);
+    char chr[2] = {0};
     chr[0] = (char)num;
     chr[1] = '\0';
-    return OBJ_VAL(takeString(chr, 1));
+    return OBJ_VAL(copyString(chr, 1));
 }
 
 static Value ordNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -3896,7 +3923,7 @@ static Value vmApiMakeString(const char *chars, int len, bool interned)
         return OBJ_VAL(copyString("", 0));
     if (len < 0)
         len = (int)strlen(chars);
-    return interned ? OBJ_VAL(copyString(chars, len)) : OBJ_VAL(copyStringUninterned(chars, len));
+    return OBJ_VAL(copyString(chars, len));
 }
 
 static Value vmApiMakeList(void)
@@ -3997,7 +4024,112 @@ static bool call(ObjClosure *closure, int argC)
     frame->closure = closure;
     frame->ip = closure->function->chunk.code;
     frame->slots = vm.stackTop - argC - 1;
+    if (vm.profilerEnabled)
+        frame->startTimeNs = 0; /* set at run-time when run loop starts executing this frame */
     return true;
+}
+
+static uint64_t nowNs()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void profilerAddSample(ObjFunction *function, uint64_t ns)
+{
+    if (function == NULL)
+        return;
+    for (int i = 0; i < vm.profilerEntryCount; i++)
+    {
+        if (vm.profilerEntries[i].function == function)
+        {
+            vm.profilerEntries[i].callCount++;
+            vm.profilerEntries[i].totalNs += ns;
+            return;
+        }
+    }
+    /* add new entry */
+    if (vm.profilerEntryCount + 1 > vm.profilerEntryCapacity)
+    {
+        int old = vm.profilerEntryCapacity;
+        vm.profilerEntryCapacity = old < 8 ? 8 : old * 2;
+        vm.profilerEntries = (struct ProfilerEntry *)realloc(vm.profilerEntries, sizeof(*vm.profilerEntries) * vm.profilerEntryCapacity);
+        if (vm.profilerEntries == NULL)
+            exit(1);
+    }
+    vm.profilerEntries[vm.profilerEntryCount].function = function;
+    vm.profilerEntries[vm.profilerEntryCount].callCount = 1;
+    vm.profilerEntries[vm.profilerEntryCount].totalNs = ns;
+    vm.profilerEntryCount++;
+}
+
+static void profilerAddCallGraphSample(ObjFunction *caller, ObjFunction *callee, uint64_t ns)
+{
+    for (int i = 0; i < vm.callGraphEntryCount; i++)
+    {
+        if (vm.callGraphEntries[i].caller == caller && vm.callGraphEntries[i].callee == callee)
+        {
+            vm.callGraphEntries[i].callCount++;
+            vm.callGraphEntries[i].totalNs += ns;
+            return;
+        }
+    }
+    if (vm.callGraphEntryCount + 1 > vm.callGraphEntryCapacity)
+    {
+        int old = vm.callGraphEntryCapacity;
+        vm.callGraphEntryCapacity = old < 16 ? 16 : old * 2;
+        vm.callGraphEntries = (struct CallGraphEntry *)realloc(vm.callGraphEntries, sizeof(*vm.callGraphEntries) * vm.callGraphEntryCapacity);
+        if (vm.callGraphEntries == NULL)
+            exit(1);
+    }
+    vm.callGraphEntries[vm.callGraphEntryCount].caller = caller;
+    vm.callGraphEntries[vm.callGraphEntryCount].callee = callee;
+    vm.callGraphEntries[vm.callGraphEntryCount].callCount = 1;
+    vm.callGraphEntries[vm.callGraphEntryCount].totalNs = ns;
+    vm.callGraphEntryCount++;
+}
+
+static void profilerDumpCallGraph(const char *path)
+{
+    if (!vm.callGraphEntries || vm.callGraphEntryCount == 0)
+        return;
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "caller,callee,call_count,total_ns,avg_ns\n");
+    for (int i = 0; i < vm.callGraphEntryCount; i++)
+    {
+        struct CallGraphEntry *e = &vm.callGraphEntries[i];
+        const char *callerName = e->caller && e->caller->name ? e->caller->name->chars : "<root>";
+        const char *calleeName = e->callee && e->callee->name ? e->callee->name->chars : "<anonymous>";
+        uint64_t avg = e->callCount ? (e->totalNs / e->callCount) : 0;
+        fprintf(f, "\"%s\",\"%s\",%zu,%llu,%llu\n", callerName, calleeName, e->callCount, (unsigned long long)e->totalNs, (unsigned long long)avg);
+    }
+    fclose(f);
+}
+
+static void profilerDump(const char *path)
+{
+    if (!vm.profilerEntries || vm.profilerEntryCount == 0)
+        return;
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "function,call_count,total_ns,avg_ns,source\n");
+    for (int i = 0; i < vm.profilerEntryCount; i++)
+    {
+        struct ProfilerEntry *e = &vm.profilerEntries[i];
+        const char *name = e->function->name ? e->function->name->chars : "<script>";
+        uint64_t avg = e->callCount ? (e->totalNs / e->callCount) : 0;
+        const char *src = NULL;
+        if (e->function->chunk.sourceCount > 0 && e->function->chunk.sources)
+            src = e->function->chunk.sources[0].file;
+        if (!src)
+            src = "";
+        fprintf(f, "\"%s\",%zu,%llu,%llu,\"%s\"\n", name, e->callCount, (unsigned long long)e->totalNs, (unsigned long long)avg, src);
+    }
+    fclose(f);
 }
 
 static ObjString *getFunctionParamName(ObjFunction *function, int index)
@@ -4862,7 +4994,7 @@ static Value splitNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
     appendToList(list, OBJ_VAL(copyString(str, strlen(str))));
     pop();
-    free(toFree);
+    FREE_ARRAY(char, toFree, strlen(toFree) + 1);
     return OBJ_VAL(list);
 }
 
@@ -4990,7 +5122,7 @@ static Value trimNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     strcpy(result, str);
     result = trim(result);
     ObjString *res = copyString(result, (int)strlen(result));
-    free(t);
+    FREE_ARRAY(char, t, strlen(t) + 1);
     return OBJ_VAL(res);
 }
 
@@ -7725,6 +7857,7 @@ static void initCoreModule()
     defineNative("str", strCastNative);
     defineNative("hash", hashNative);
     defineNative("join", joinNative);
+    defineNative("round", roundNative);
     defineNative("int", intCastNative);
     defineNative("float", floatCastNative);
     defineNative("bool", boolCastNative);
@@ -7964,6 +8097,14 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.importCount = 0;
     vm.importSources = NULL;
 
+    vm.profilerEntries = NULL;
+    vm.profilerEntryCount = 0;
+    vm.profilerEntryCapacity = 0;
+    vm.profilerEnabled = getenv("DOTK_PROFILE") != NULL;
+    vm.callGraphEntries = NULL;
+    vm.callGraphEntryCount = 0;
+    vm.callGraphEntryCapacity = 0;
+
     vm.nextWideOp = -1;
 
     initTable(&vm.globals);
@@ -8101,6 +8242,17 @@ void freeVM()
     vm.listClass = NULL;
     vm.mapClass = NULL;
     vm.baseObj = NULL;
+    /* dump profiler if enabled */
+    if (vm.profilerEnabled)
+        profilerDump("/tmp/dotk_profile.csv");
+    free(vm.profilerEntries);
+    vm.profilerEntries = NULL;
+    vm.profilerEntryCount = 0;
+    vm.profilerEntryCapacity = 0;
+    free(vm.callGraphEntries);
+    vm.callGraphEntries = NULL;
+    vm.callGraphEntryCount = 0;
+    vm.callGraphEntryCapacity = 0;
     freeObjects();
 }
 
@@ -8168,7 +8320,7 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
             push(OBJ_VAL(copyString("", 0)));
             return;
         }
-        push(OBJ_VAL(copyStringUninterned(str->chars + start, len)));
+        push(OBJ_VAL(copyString(str->chars + start, len)));
         return;
     }
 
@@ -8212,8 +8364,8 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
         }
     }
     substring[subIndex] = '\0';
-    ObjString *ret = copyStringUninterned(substring, subIndex);
-    FREE_ARRAY(char, substring, count + 1);
+    ObjString *ret = takeString(substring, subIndex);
+    // FREE_ARRAY(char, substring, count + 1);
 
     push(OBJ_VAL(ret));
 }
@@ -8304,6 +8456,10 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
             }
         }
+
+        /* set frame start timestamp when first executing the frame */
+        if (vm.profilerEnabled && frame->startTimeNs == 0)
+            frame->startTimeNs = nowNs();
 
         uint8_t inst;
         switch (inst = READ_BYTE())
@@ -8964,7 +9120,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             printf("%.*s", strLen, str);
             // printValue(pop(), PRINT_VERBOSE_OBJECTS_DEPTH);
             // free(str);
-            FREE(char *, str);
+            FREE_ARRAY(char, str, STR_BUFF * 2);
             printf("\n");
             break;
         }
@@ -9236,11 +9392,30 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         case OP_RETURN:
         {
             Value result = pop();
+            /* profiler: record time spent in this function */
+            if (vm.profilerEnabled)
+            {
+                uint64_t end = nowNs();
+                uint64_t start = frame->startTimeNs;
+                if (start == 0)
+                    start = end; /* defensive */
+                profilerAddSample(frame->closure->function, end - start);
+                /* call-graph: record caller -> callee */
+                ObjFunction *callerFunc = NULL;
+                if (vm.frameCount >= 2)
+                    callerFunc = vm.frames[vm.frameCount - 2].closure->function;
+                profilerAddCallGraphSample(callerFunc, frame->closure->function, end - start);
+            }
             closeUpvalues(frame->slots);
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
                 pop();
+                if (vm.profilerEnabled)
+                {
+                    profilerDump("/tmp/dotk_profile.csv");
+                    profilerDumpCallGraph("/tmp/dotk_callgraph.csv");
+                }
                 return INTERPRET_OK;
             }
             vm.stackTop = frame->slots;
@@ -9254,11 +9429,28 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         case OP_RETURN_NIL:
         {
             Value result = NIL_VAL;
+            if (vm.profilerEnabled)
+            {
+                uint64_t end = nowNs();
+                uint64_t start = frame->startTimeNs;
+                if (start == 0)
+                    start = end;
+                profilerAddSample(frame->closure->function, end - start);
+                ObjFunction *callerFunc = NULL;
+                if (vm.frameCount >= 2)
+                    callerFunc = vm.frames[vm.frameCount - 2].closure->function;
+                profilerAddCallGraphSample(callerFunc, frame->closure->function, end - start);
+            }
             closeUpvalues(frame->slots);
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
                 pop();
+                if (vm.profilerEnabled)
+                {
+                    profilerDump("/tmp/dotk_profile.csv");
+                    profilerDumpCallGraph("/tmp/dotk_callgraph.csv");
+                }
                 return INTERPRET_OK;
             }
             vm.stackTop = frame->slots;
@@ -9272,11 +9464,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         case OP_RETURN_THIS:
         {
             Value result = frame->slots[0];
+            if (vm.profilerEnabled)
+            {
+                uint64_t end = nowNs();
+                uint64_t start = frame->startTimeNs;
+                if (start == 0)
+                    start = end;
+                profilerAddSample(frame->closure->function, end - start);
+            }
             closeUpvalues(frame->slots);
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
                 pop();
+                if (vm.profilerEnabled)
+                {
+                    profilerDump("/tmp/dotk_profile.csv");
+                    profilerDumpCallGraph("/tmp/dotk_callgraph.csv");
+                }
                 return INTERPRET_OK;
             }
             vm.stackTop = frame->slots;
@@ -9466,8 +9671,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
                 }
 
-                vm.importSources = (char **)realloc(vm.importSources, sizeof(char *) * ++vm.importCount);
-                vm.importSources[vm.importCount - 1] = source;
+                /* Grow importSources safely: avoid incrementing vm.importCount until
+                   realloc succeeds to prevent losing the old pointer on OOM. */
+                char **tmp = (char **)realloc(vm.importSources, sizeof(char *) * (vm.importCount + 1));
+                if (tmp == NULL)
+                {
+                    free(source);
+                    runtimeError("Out of memory while importing '%s'", filePath->chars);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                vm.importSources = tmp;
+                vm.importSources[vm.importCount++] = source;
 
                 Table scriptGlobalsBefore;
                 snapshotGlobals(&scriptGlobalsBefore);

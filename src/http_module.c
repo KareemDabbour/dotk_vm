@@ -236,15 +236,15 @@ static Value buildHttpResponseObject(const char *url,
 
     tableSet(&result->fields,
              copyString("statusText", 10),
-             OBJ_VAL(copyStringUninterned(statusText, statusTextLen)));
+             OBJ_VAL(copyString(statusText, statusTextLen)));
 
     tableSet(&result->fields,
              copyString("headers", 7),
-             OBJ_VAL(copyStringUninterned(headers, headersLen)));
+             OBJ_VAL(copyString(headers, headersLen)));
 
     tableSet(&result->fields,
              copyString("body", 4),
-             OBJ_VAL(copyStringUninterned(body, bodyLen)));
+             OBJ_VAL(copyString(body, bodyLen)));
 
     return pop();
 }

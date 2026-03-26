@@ -25,12 +25,15 @@ static char *readFile(const char *path)
     if (buffer == NULL)
     {
         fprintf(stderr, "Not enough memory to read file \"%s\".", path);
+        fclose(file);
         return NULL;
     }
     size_t bytesRead = fread(buffer, sizeof(char), fileSize, file);
     if (bytesRead < fileSize)
     {
         fprintf(stderr, "Could not read file \"%s\".\n", path);
+        free(buffer);
+        fclose(file);
         return NULL;
     }
 

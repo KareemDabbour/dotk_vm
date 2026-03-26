@@ -5,19 +5,23 @@
 #include "object.h"
 
 #define ALLOCATE(type, count) \
-    (type *)reallocate(NULL, 0, sizeof(type) * (count))
+    ((type *)reallocateDebug(NULL, 0, sizeof(type) * (count), __FILE__, __LINE__, #type, "alloc"))
 
-#define GROW_CAPACITY(cap) ((cap) < 8 ? 8 : (cap)*2)
+#define GROW_CAPACITY(cap) ((cap) < 8 ? 8 : (cap) * 2)
 
 #define GROW_ARRAY(type, pointer, oldCount, newCount) \
-    (type *)reallocate(pointer, sizeof(type) * (oldCount), sizeof(type) * (newCount))
+    (setGcAllocTypeContext(#type), (type *)reallocateDebug(pointer, sizeof(type) * (oldCount), sizeof(type) * (newCount), __FILE__, __LINE__, #type, "grow"))
 
 #define FREE_ARRAY(type, pointer, size) \
-    (type *)reallocate(pointer, sizeof(type) * (size), 0)
+    (setGcAllocTypeContext(#type), (type *)reallocateDebug(pointer, sizeof(type) * (size), 0, __FILE__, __LINE__, #type, "free array"))
 
-#define FREE(type, pointer) reallocate(pointer, sizeof(type), 0)
+#define FREE(type, pointer) \
+    (setGcAllocTypeContext(#type), reallocateDebug(pointer, sizeof(type), 0, __FILE__, __LINE__, #type, "free"))
 
 void *reallocate(void *pointer, size_t oldSize, size_t newSize);
+void *reallocateDebug(void *pointer, size_t oldSize, size_t newSize, const char *file, int line, const char *type, const char *op);
+void setGcAllocTypeContext(const char *type);
+void clearGcAllocTypeContext(void);
 void markValue(Value value);
 void markObj(Obj *object);
 void collectGarbage();

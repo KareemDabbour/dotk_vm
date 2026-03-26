@@ -26,6 +26,7 @@ typedef struct _CallFrame
     ObjClosure *closure;
     uint8_t *ip;
     Value *slots;
+    uint64_t startTimeNs;
 } CallFrame;
 
 typedef struct _VM
@@ -75,6 +76,27 @@ typedef struct _VM
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
 
+    /* Profiler for language-level timings */
+    struct ProfilerEntry
+    {
+        ObjFunction *function;
+        size_t callCount;
+        uint64_t totalNs;
+    } *profilerEntries;
+    int profilerEntryCount;
+    int profilerEntryCapacity;
+    bool profilerEnabled;
+    /* Call-graph profiler entries (caller -> callee) */
+    struct CallGraphEntry
+    {
+        ObjFunction *caller;
+        ObjFunction *callee;
+        size_t callCount;
+        uint64_t totalNs;
+    } *callGraphEntries;
+    int callGraphEntryCount;
+    int callGraphEntryCapacity;
+
     size_t bytesAllocated;
     size_t nextGC;
     size_t maxHeapSize;
@@ -84,6 +106,7 @@ typedef struct _VM
     Obj **grayStack;
     int importCount;
     char **importSources;
+    bool gcDisabled;
     bool isInTryCatch;
     bool isRepl;
     ObjString *lastError;

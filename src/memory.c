@@ -1,7 +1,10 @@
 #include "include/memory.h"
 #include "include/compiler.h"
 #include "include/vm.h"
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <threads.h>
 
 #ifdef DEBUG_LOG_GC
 #include "include/debug.h"
@@ -9,13 +12,55 @@
 
 #define GC_HEAP_GROW_FACTOR 2
 
+/* Thread-local context for tracking object type during allocation */
+thread_local const char *gc_alloc_type_context = NULL;
+
+static bool gcDebugEnabled(void)
+{
+    static int initialized = 0;
+    static bool enabled = false;
+    if (!initialized)
+    {
+        const char *value = getenv("DOTK_DEBUG_GC");
+        enabled = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+        initialized = 1;
+    }
+    return enabled;
+}
+
+void *reallocateDebug(void *pointer, size_t oldSize, size_t newSize, const char *file, int line, const char *type, const char *op)
+{
+    if (gcDebugEnabled())
+    {
+        if (type != NULL)
+            fprintf(stderr, "[gc-alloc][%s] %s:%d old=%zu new=%zu ptr=%p type=%s\n", op, file, line, oldSize, newSize, pointer, type);
+        else
+            fprintf(stderr, "[gc-alloc][%s] %s:%d old=%zu new=%zu ptr=%p\n", op, file, line, oldSize, newSize, pointer);
+    }
+    return reallocate(pointer, oldSize, newSize);
+}
+
+void setGcAllocTypeContext(const char *type)
+{
+    gc_alloc_type_context = type;
+}
+
+void clearGcAllocTypeContext(void)
+{
+    // gc_alloc_type_context = NULL;
+}
+
 void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 {
     vm.bytesAllocated += newSize - oldSize;
+#ifdef DEBUG_LOG_GC
+    fprintf(stderr, "%p realloc old:%zu new: %zu vmtot: %ld\n", (void *)pointer, oldSize, newSize, vm.bytesAllocated);
+#endif
     if (newSize > oldSize)
     {
 #if DEBUG_STRESS_GC
-        collectGarbage();
+        if (!vm.gcDisabled)
+            collectGarbage();
 #endif
         if (vm.bytesAllocated > vm.maxHeapSize)
         {
@@ -28,7 +73,7 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
             //     exit(1);
             // }
         }
-        if (vm.bytesAllocated > vm.nextGC)
+        if (vm.bytesAllocated > vm.nextGC && !vm.gcDisabled)
         {
             collectGarbage();
         }
@@ -208,6 +253,10 @@ static void freeObject(Obj *object)
     case OBJ_STRING:
     {
         ObjString *string = (ObjString *)object;
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_STRING: %s\n", (void *)object, string->chars);
+#endif
+
         FREE_ARRAY(char, string->chars, string->len + 1);
         FREE(ObjString, object);
         break;
@@ -215,8 +264,12 @@ static void freeObject(Obj *object)
     case OBJ_FUNCTION:
     {
         ObjFunction *func = (ObjFunction *)object;
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_FUNCTION (%s)\n", (void *)object, func->name ? func->name->chars : "anonymous");
+#endif
         FREE_ARRAY(uint16_t, func->paramNameConsts, func->paramCount);
         FREE_ARRAY(uint16_t, func->localNameConsts, func->localNameCount);
+        // FREE(ObjString, func->name);
         freeChunk(&func->chunk);
         FREE(ObjFunction, object);
         break;
@@ -224,6 +277,10 @@ static void freeObject(Obj *object)
     case OBJ_LIST:
     {
         ObjList *list = (ObjList *)object;
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_LIST of %d elements\n", (void *)object, list->count);
+#endif
+
         FREE_ARRAY(Value, list->items, list->capacity);
         FREE(ObjList, object);
         break;
@@ -231,21 +288,35 @@ static void freeObject(Obj *object)
     case OBJ_SLICE:
     {
         ObjSlice *slice = (ObjSlice *)object;
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_SLICE %d:%d:%d\n", (void *)object, slice->start, slice->end, slice->step);
+#endif
         FREE(ObjSlice, object);
         break;
     }
     case OBJ_BOUND_METHOD:
     {
-        FREE(ObjBoundMethod, object);
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_BOUND_METHOD\n", (void *)object);
+#endif
+        ObjBoundMethod *boundMethod = (ObjBoundMethod *)object;
+        FREE(ObjBoundMethod, boundMethod);
+
         break;
     }
     case OBJ_BOUND_BUILTIN:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_BOUND_BUILTIN\n", (void *)object);
+#endif
         FREE(ObjBoundBuiltin, object);
         break;
     }
     case OBJ_CLOSURE:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_CLOSURE\n", (void *)object);
+#endif
         ObjClosure *closure = (ObjClosure *)object;
         FREE_ARRAY(ObjUpvalue *, closure->upvalues, closure->upvalueCount);
         FREE(ObjClosure, object);
@@ -253,6 +324,9 @@ static void freeObject(Obj *object)
     }
     case OBJ_MAP:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_MAP\n", (void *)object);
+#endif
         ObjMap *map = (ObjMap *)object;
         freeMap(&map->map);
         FREE(ObjMap, object);
@@ -260,6 +334,9 @@ static void freeObject(Obj *object)
     }
     case OBJ_CLASS:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_CLASS\n", (void *)object);
+#endif
         ObjClass *clazz = (ObjClass *)object;
         freeTable(&clazz->methods);
         freeTable(&clazz->staticVars);
@@ -268,19 +345,31 @@ static void freeObject(Obj *object)
     }
     case OBJ_INSTANCE:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_INSTANCE\n", (void *)object);
+#endif
         ObjInstance *instance = (ObjInstance *)object;
         freeTable(&instance->fields);
         FREE(ObjInstance, instance);
         break;
     }
     case OBJ_UPVALUE:
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_UPVALUE\n", (void *)object);
+#endif
         FREE(ObjUpvalue, object);
         break;
     case OBJ_NATIVE:
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_NATIVE\n", (void *)object);
+#endif
         FREE(ObjNative, object);
         break;
     case OBJ_FOREIGN:
     {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_FOREIGN\n", (void *)object);
+#endif
         ObjForeign *foreign = (ObjForeign *)object;
         if (foreign->ownsPtr)
             free(foreign->ptr);
@@ -311,12 +400,20 @@ static void markRoots()
 
     markTable(&vm.globals);
     markTable(&vm.constGlobals);
-    // markTable(&vm.strings);
+    markTable(&vm.strings);
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
     markObj((Obj *)vm.currentModuleExports);
     markCompilerRoots();
     markObj((Obj *)vm.initStr);
+    markObj((Obj *)vm.strDunderStr);
+    markObj((Obj *)vm.setitemDunderStr);
+    markObj((Obj *)vm.hashDunderStr);
+    markObj((Obj *)vm.lenDunderStr);
+    markObj((Obj *)vm.eqDunderStr);
+    markObj((Obj *)vm.ltDunderStr);
+    markObj((Obj *)vm.gtDunderStr);
+    markObj((Obj *)vm.getitemDunderStr);
     markObj((Obj *)vm.toStr);
     markObj((Obj *)vm.eqStr);
     markObj((Obj *)vm.ltStr);
@@ -374,6 +471,64 @@ void collectGarbage()
     printf("-- gc begin\n");
     size_t before = vm.bytesAllocated;
 #endif
+    /* Optional runtime GC debug output when DOTK_DEBUG_GC is set. */
+    if (getenv("DOTK_DEBUG_GC") != NULL)
+    {
+        size_t objCount = 0;
+        size_t cnt_string = 0, cnt_function = 0, cnt_closure = 0, cnt_list = 0, cnt_map = 0, cnt_class = 0, cnt_instance = 0, cnt_upvalue = 0, cnt_foreign = 0, cnt_native = 0, cnt_bound_method = 0, cnt_bound_builtin = 0, cnt_slice = 0, cnt_other = 0;
+        for (Obj *o = vm.objects; o != NULL; o = o->next)
+        {
+            objCount++;
+            switch (o->type)
+            {
+            case OBJ_STRING:
+                cnt_string++;
+                break;
+            case OBJ_FUNCTION:
+                cnt_function++;
+                break;
+            case OBJ_CLOSURE:
+                cnt_closure++;
+                break;
+            case OBJ_LIST:
+                cnt_list++;
+                break;
+            case OBJ_MAP:
+                cnt_map++;
+                break;
+            case OBJ_CLASS:
+                cnt_class++;
+                break;
+            case OBJ_INSTANCE:
+                cnt_instance++;
+                break;
+            case OBJ_UPVALUE:
+                cnt_upvalue++;
+                break;
+            case OBJ_FOREIGN:
+                cnt_foreign++;
+                break;
+            case OBJ_NATIVE:
+                cnt_native++;
+                break;
+            case OBJ_BOUND_METHOD:
+                cnt_bound_method++;
+                break;
+            case OBJ_BOUND_BUILTIN:
+                cnt_bound_builtin++;
+                break;
+            case OBJ_SLICE:
+                cnt_slice++;
+                break;
+            default:
+                cnt_other++;
+                break;
+            }
+        }
+        fprintf(stderr, "[DOTK_DEBUG_GC] gc begin bytes=%zu objects=%zu strings=%d/%d importCount=%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
+                vm.bytesAllocated, objCount, vm.strings.count, vm.strings.capacity, vm.importCount, vm.nextGC,
+                cnt_string, cnt_function, cnt_closure, cnt_list, cnt_map, cnt_class, cnt_instance, cnt_upvalue, cnt_foreign, cnt_native, cnt_bound_method, cnt_bound_builtin, cnt_slice, cnt_other);
+    }
     markRoots();
     traceReferences();
     tableRemoveWhite(&vm.strings);
@@ -386,6 +541,63 @@ void collectGarbage()
             before - vm.bytesAllocated, before, vm.bytesAllocated,
             vm.nextGC);
 #endif
+    if (getenv("DOTK_DEBUG_GC") != NULL)
+    {
+        size_t objCount2 = 0;
+        size_t cnt_string2 = 0, cnt_function2 = 0, cnt_closure2 = 0, cnt_list2 = 0, cnt_map2 = 0, cnt_class2 = 0, cnt_instance2 = 0, cnt_upvalue2 = 0, cnt_foreign2 = 0, cnt_native2 = 0, cnt_bound_method2 = 0, cnt_bound_builtin2 = 0, cnt_slice2 = 0, cnt_other2 = 0;
+        for (Obj *o = vm.objects; o != NULL; o = o->next)
+        {
+            objCount2++;
+            switch (o->type)
+            {
+            case OBJ_STRING:
+                cnt_string2++;
+                break;
+            case OBJ_FUNCTION:
+                cnt_function2++;
+                break;
+            case OBJ_CLOSURE:
+                cnt_closure2++;
+                break;
+            case OBJ_LIST:
+                cnt_list2++;
+                break;
+            case OBJ_MAP:
+                cnt_map2++;
+                break;
+            case OBJ_CLASS:
+                cnt_class2++;
+                break;
+            case OBJ_INSTANCE:
+                cnt_instance2++;
+                break;
+            case OBJ_UPVALUE:
+                cnt_upvalue2++;
+                break;
+            case OBJ_FOREIGN:
+                cnt_foreign2++;
+                break;
+            case OBJ_NATIVE:
+                cnt_native2++;
+                break;
+            case OBJ_BOUND_METHOD:
+                cnt_bound_method2++;
+                break;
+            case OBJ_BOUND_BUILTIN:
+                cnt_bound_builtin2++;
+                break;
+            case OBJ_SLICE:
+                cnt_slice2++;
+                break;
+            default:
+                cnt_other2++;
+                break;
+            }
+        }
+        fprintf(stderr, "[DOTK_DEBUG_GC] gc end bytes=%zu objects=%zu strings=%d/%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
+                vm.bytesAllocated, objCount2, vm.strings.count, vm.strings.capacity, vm.nextGC,
+                cnt_string2, cnt_function2, cnt_closure2, cnt_list2, cnt_map2, cnt_class2, cnt_instance2, cnt_upvalue2, cnt_foreign2, cnt_native2, cnt_bound_method2, cnt_bound_builtin2, cnt_slice2, cnt_other2);
+    }
 }
 
 void freeObjects()

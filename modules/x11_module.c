@@ -11,12 +11,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 static const DotKNativeApi *g_api = NULL;
+
+typedef struct
+{
+    float x;
+    float y;
+    float z;
+} ObjVert;
+
+typedef struct
+{
+    int a;
+    int b;
+} ObjEdge;
+
+typedef struct ObjModelCache
+{
+    char *path;
+    ObjVert *verts;
+    int vertCount;
+    ObjEdge *edges;
+    int edgeCount;
+    struct ObjModelCache *next;
+} ObjModelCache;
+
+static ObjModelCache *g_objCache = NULL;
 
 static Display *g_display = NULL;
 static Window g_window = 0;
@@ -410,6 +435,25 @@ static Value x11_close_window_native(int argc, Value *argv, bool *hasError, bool
         g_mouseDown[i] = false;
         g_mouseClicked[i] = false;
     }
+    if (g_lastRunOutput != NULL)
+    {
+        free(g_lastRunOutput);
+        g_lastRunOutput = NULL;
+    }
+    if (g_objCache != NULL)
+    {
+        ObjModelCache *cache = g_objCache;
+        while (cache != NULL)
+        {
+            ObjModelCache *next = cache->next;
+            free(cache->path);
+            free(cache->verts);
+            free(cache->edges);
+            free(cache);
+            cache = next;
+        }
+        g_objCache = NULL;
+    }
     return NIL_VAL;
 }
 
@@ -534,31 +578,6 @@ static Value x11_draw_line_native(int argc, Value *argv, bool *hasError, bool *p
               as_int(argv[3]));
     return NIL_VAL;
 }
-
-typedef struct
-{
-    float x;
-    float y;
-    float z;
-} ObjVert;
-
-typedef struct
-{
-    int a;
-    int b;
-} ObjEdge;
-
-typedef struct ObjModelCache
-{
-    char *path;
-    ObjVert *verts;
-    int vertCount;
-    ObjEdge *edges;
-    int edgeCount;
-    struct ObjModelCache *next;
-} ObjModelCache;
-
-static ObjModelCache *g_objCache = NULL;
 
 static int edge_cmp(const void *lhs, const void *rhs)
 {
