@@ -8,7 +8,7 @@
 #include "include/vm.h"
 
 #define ALLOCATE_OBJ(type, objectType) \
-    (setGcAllocTypeContext(#type), (type *)allocateObject(sizeof(type), objectType))
+    (type *)allocateObject(sizeof(type), objectType)
 
 static bool gcDebugEnabledObject(void)
 {
@@ -27,14 +27,6 @@ static Obj *allocateObject(size_t size, ObjType type)
 {
     Obj *object = (Obj *)reallocateDebug(NULL, 0, size, __FILE__, __LINE__, OBJECT_TYPES[type], "alloc");
     object->type = type;
-    // if (gcDebugEnabledObject())
-    // {
-    //     fprintf(stderr, "[gc-obj] ptr=%p size=%zu type=%s(%d)\n", (void *)object, size, OBJECT_TYPES[type], type);
-    // }
-    // if (getenv("DOTK_DEBUG_GC") != NULL)
-    // {
-    //     fprintf(stderr, "[DOTK_DEBUG_GC] %p allocate %zu for %s\n", (void *)object, size, OBJECT_TYPES[type]);
-    // }
     object->isMarked = false;
     object->next = vm.objects;
     vm.objects = object;

@@ -1055,6 +1055,11 @@ static uint32_t hashValueShallow(Value value)
             ObjSlice *slice = AS_SLICE(value);
             return (slice->start + slice->end + slice->step) * 41;
         }
+        case OBJ_FOREIGN:
+        {
+            ObjForeign *o = AS_FOREIGN(value);
+            return (uint32_t)(uintptr_t)o->ptr + o->type * 97;
+        }
         }
     }
 }

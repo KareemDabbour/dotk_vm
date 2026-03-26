@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <threads.h>
 
 #ifdef DEBUG_LOG_GC
 #include "include/debug.h"
@@ -12,8 +11,6 @@
 
 #define GC_HEAP_GROW_FACTOR 2
 
-/* Thread-local context for tracking object type during allocation */
-thread_local const char *gc_alloc_type_context = NULL;
 
 static bool gcDebugEnabled(void)
 {
@@ -40,15 +37,6 @@ void *reallocateDebug(void *pointer, size_t oldSize, size_t newSize, const char 
     return reallocate(pointer, oldSize, newSize);
 }
 
-void setGcAllocTypeContext(const char *type)
-{
-    gc_alloc_type_context = type;
-}
-
-void clearGcAllocTypeContext(void)
-{
-    // gc_alloc_type_context = NULL;
-}
 
 void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 {
