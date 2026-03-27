@@ -118,6 +118,9 @@ static int instructionLength(Chunk *chunk, int offset, bool widePending, bool *c
     case OP_CONSTANT_LONG:
         return 4;
 
+    case OP_DEFAULT_LOCAL:
+        return 4;
+
     case OP_CLOSURE:
     {
         int constWidth = widePending ? 2 : 1;
@@ -518,6 +521,17 @@ static bool eliminateUnreachable(Chunk *chunk)
             }
         }
 
+        if (inst == OP_DEFAULT_LOCAL)
+        {
+            int jump = ((int)chunk->code[off + 2] << 8) | (int)chunk->code[off + 3];
+            int target = off + 4 + jump;
+            if (target >= 0 && target < size && isStart[target] && !reachable[target])
+            {
+                reachable[target] = true;
+                queue[qTail++] = target;
+            }
+        }
+
         if (!terminates && next < size && isStart[next] && !reachable[next])
         {
             reachable[next] = true;
@@ -791,8 +805,24 @@ static bool compactNops(Chunk *chunk)
             continue;
 
         uint8_t inst = oldCode[off];
-        if (inst != OP_JUMP && inst != OP_JUMP_IF_FALSE && inst != OP_LOOP)
+        if (inst != OP_JUMP && inst != OP_JUMP_IF_FALSE && inst != OP_LOOP && inst != OP_DEFAULT_LOCAL)
             continue;
+
+        if (inst == OP_DEFAULT_LOCAL)
+        {
+            int oldJump = ((int)oldCode[off + 2] << 8) | (int)oldCode[off + 3];
+            int oldTarget = off + 4 + oldJump;
+            int newOff = oldToNew[off];
+            int newTarget = mapOldOffsetToNew(oldTarget, oldSize, newSize, oldToNew, nextKept);
+            int delta = newTarget - (newOff + 4);
+            if (delta < 0)
+                delta = 0;
+            if (delta > UINT16_MAX)
+                delta = UINT16_MAX;
+            newCode[newOff + 2] = (uint8_t)((delta >> 8) & 0xff);
+            newCode[newOff + 3] = (uint8_t)(delta & 0xff);
+            continue;
+        }
 
         int oldTarget = decodeJumpTarget(chunk, off, inst);
         int newOff = oldToNew[off];
@@ -990,6 +1020,20 @@ bool optimizerValidateFunction(ObjFunction *function, char *errBuf, size_t errCa
                 free(nextStart);
                 if (errBuf != NULL && errCap > 0)
                     snprintf(errBuf, errCap, "invalid jump target at offset %d -> %d", off, target);
+                return false;
+            }
+        }
+
+        if (inst == OP_DEFAULT_LOCAL)
+        {
+            int jump = ((int)chunk->code[off + 2] << 8) | (int)chunk->code[off + 3];
+            int target = off + 4 + jump;
+            if (target < 0 || target > size || (target < size && !isStart[target]))
+            {
+                free(isStart);
+                free(nextStart);
+                if (errBuf != NULL && errCap > 0)
+                    snprintf(errBuf, errCap, "invalid default_local jump target at offset %d -> %d", off, target);
                 return false;
             }
         }

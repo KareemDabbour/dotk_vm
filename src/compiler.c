@@ -347,7 +347,27 @@ static ObjFunction *endCompiler()
     // #if DEBUG_PRINT_CODE
     if (unlikely(current->printBytecode))
         if (!parser.hadError)
-            disassembleChunk(currentChunk(), func->name != NULL ? func->name->chars : "<script>");
+        {
+            const char *fname = func->name != NULL ? func->name->chars : "<script>";
+            if (func->arity > 0)
+            {
+                printf("-- %s(", fname);
+                for (int i = 0; i < func->paramCount; i++)
+                {
+                    if (i > 0)
+                        printf(", ");
+                    Value nameVal = func->chunk.constants.values[func->paramNameConsts[i]];
+                    if (IS_STR(nameVal))
+                        printf("%s", AS_STR(nameVal)->chars);
+                    if (func->isVariadic && i == func->paramCount - 1)
+                        printf("*");
+                    else if (func->defaultStart >= 0 && i >= func->defaultStart)
+                        printf("=...");
+                }
+                printf(") [minArity=%d] --\n", func->minArity);
+            }
+            disassembleChunk(currentChunk(), fname);
+        }
     // #endif
     current = current->enclosing;
     return func;
@@ -513,6 +533,14 @@ static void addFunctionParamName(ObjFunction *function, Token *paramName)
     function->paramNameConsts = GROW_ARRAY(uint16_t, function->paramNameConsts, oldCount, oldCount + 1);
     function->paramNameConsts[oldCount] = constant;
     function->paramCount = oldCount + 1;
+}
+
+static void addFunctionDefaultConst(ObjFunction *function, uint16_t constIndex)
+{
+    int oldCount = function->defaultCount;
+    function->defaultConsts = GROW_ARRAY(uint16_t, function->defaultConsts, oldCount, oldCount + 1);
+    function->defaultConsts[oldCount] = constIndex;
+    function->defaultCount = oldCount + 1;
 }
 
 static void setFunctionLocalName(ObjFunction *function, int slotIndex, Token *localName)
@@ -723,6 +751,7 @@ static void function(FunctionType type)
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
     bool hasVariadicParam = false;
+    bool hasDefaults = false;
     if (!check(TOKEN_RIGHT_PAREN))
     {
         do
@@ -743,7 +772,6 @@ static void function(FunctionType type)
             Token parameter = parser.prev;
 
             current->function->arity++;
-            current->function->minArity = hasVariadicParam ? current->function->arity - 1 : current->function->arity;
             current->function->isVariadic = hasVariadicParam;
 
             if (current->function->arity >= UINT16_MAX)
@@ -752,6 +780,49 @@ static void function(FunctionType type)
             declareVar(false);
             addFunctionParamName(current->function, &parameter);
             defineVar(0);
+
+            // Check for default value: param = <expression>
+            if (!isVariadicParam && match(TOKEN_EQUAL))
+            {
+                hasDefaults = true;
+                if (current->function->defaultStart < 0)
+                    current->function->defaultStart = current->function->arity - 1;
+                current->function->defaultCount++;
+
+                // Get the local slot for this parameter
+                uint8_t slot = (uint8_t)(current->localCount - 1);
+
+                // Emit: OP_DEFAULT_LOCAL slot offset_placeholder
+                // If the local is not UNDEF, jump past the default expression
+                emitByte(OP_DEFAULT_LOCAL);
+                emitByte(slot);
+                int patchOffset = currentChunk()->size;
+                emitByte(0xFF);
+                emitByte(0xFF);
+
+                // Compile the default expression
+                expression();
+
+                // Store result in the parameter's local slot
+                emitByte(OP_SET_LOCAL);
+                emitByte(slot);
+                emitByte(OP_POP);
+
+                // Patch the jump offset to skip past the default expr
+                patchJump(patchOffset);
+            }
+            else if (hasDefaults && !isVariadicParam)
+            {
+                error("Non-default parameter follows default parameter.");
+            }
+            else
+            {
+                // Non-default, non-variadic param: count towards minArity
+                if (!hasVariadicParam)
+                    current->function->minArity = current->function->arity;
+                else if (!isVariadicParam)
+                    current->function->minArity = current->function->arity - 1;
+            }
 
             if (hasVariadicParam && check(TOKEN_COMMA))
             {

@@ -4286,6 +4286,20 @@ static bool normalizeClosureArgsOnStack(ObjClosure *closure, int positionalCount
         }
     }
 
+    // Fill UNDEF for unassigned optional parameters (defaults handled by bytecode preamble)
+    if (function->defaultStart >= 0)
+    {
+        int fixedEnd = function->isVariadic ? formalCount - 1 : formalCount;
+        for (int i = function->defaultStart; i < fixedEnd; i++)
+        {
+            if (!assigned[i])
+            {
+                finalArgs[i] = UNDEF_VAL;
+                assigned[i] = true;
+            }
+        }
+    }
+
     if (function->isVariadic)
     {
         finalArgs[formalCount - 1] = OBJ_VAL(rest);
@@ -9806,6 +9820,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (vm.nextWideOp == 1)
                 vm.nextWideOp = 0;
             break;
+        case OP_DEFAULT_LOCAL:
+        {
+            uint8_t slot = READ_BYTE();
+            uint16_t offset = READ_SHORT();
+            if (!IS_UNDEF(frame->slots[slot]))
+                frame->ip += offset;
+            break;
+        }
         default:
             break;
         }

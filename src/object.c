@@ -183,6 +183,9 @@ ObjFunction *newFunction()
     func->paramCount = 0;
     func->isVariadic = false;
     func->paramNameConsts = NULL;
+    func->defaultStart = -1;
+    func->defaultCount = 0;
+    func->defaultConsts = NULL;
     func->localNameCount = 0;
     func->localNameConsts = NULL;
     func->upValueCount = 0;
@@ -293,6 +296,11 @@ static void printFunction(ObjFunction *function)
     if (function->name == NULL)
     {
         printf("<script>");
+        return;
+    }
+    if (function->defaultCount > 0)
+    {
+        printf("<%s (%d args, %d defaults)>", function->name->chars, function->arity, function->defaultCount);
         return;
     }
     if (function->arity)

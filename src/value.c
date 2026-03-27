@@ -42,6 +42,11 @@ void printValue(Value value, int depth)
         printf("null");
         return;
     }
+    if (IS_UNDEF(value))
+    {
+        printf("<undef>");
+        return;
+    }
     if (IS_NUM(value))
     {
         printf("%.15g", AS_NUM(value));
@@ -56,6 +61,9 @@ void printValue(Value value, int depth)
         break;
     case VAL_NIL:
         printf("null");
+        break;
+    case VAL_UNDEF:
+        printf("<undef>");
         break;
     case VAL_NUMBER:
         printf("%.15g", AS_NUM(value));

@@ -101,6 +101,9 @@ typedef struct
     int paramCount;
     bool isVariadic;
     uint16_t *paramNameConsts;
+    int defaultStart;
+    int defaultCount;
+    uint16_t *defaultConsts;
     int localNameCount;
     uint16_t *localNameConsts;
     int upValueCount;

@@ -256,6 +256,7 @@ static void freeObject(Obj *object)
         fprintf(stderr, "%p freeing OBJ_FUNCTION (%s)\n", (void *)object, func->name ? func->name->chars : "anonymous");
 #endif
         FREE_ARRAY(uint16_t, func->paramNameConsts, func->paramCount);
+        FREE_ARRAY(uint16_t, func->defaultConsts, func->defaultCount);
         FREE_ARRAY(uint16_t, func->localNameConsts, func->localNameCount);
         // FREE(ObjString, func->name);
         freeChunk(&func->chunk);

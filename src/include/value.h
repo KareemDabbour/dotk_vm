@@ -12,14 +12,16 @@ typedef enum
     VAL_BOOL,
     VAL_NIL,
     VAL_NUMBER,
-    VAL_OBJ
+    VAL_OBJ,
+    VAL_UNDEF
 } ValueType;
 
-static char *VALUE_TYPES[4] = {
+static char *VALUE_TYPES[5] = {
     "Boolean",
     "Null",
     "Number",
-    "Object"};
+    "Object",
+    "Undefined"};
 
 #ifdef NAN_BOXING
 typedef uint64_t Value;
@@ -30,6 +32,7 @@ typedef uint64_t Value;
 #define TAG_NIL 1
 #define TAG_FALSE 2
 #define TAG_TRUE 3
+#define TAG_UNDEF 4
 
 static inline Value numToValue(double num)
 {
@@ -47,11 +50,13 @@ static inline double valueToNum(Value value)
 
 #define BOOL_VAL(val) ((val) ? (Value)(QNAN | TAG_TRUE) : (Value)(QNAN | TAG_FALSE))
 #define NIL_VAL ((Value)(QNAN | TAG_NIL))
+#define UNDEF_VAL ((Value)(QNAN | TAG_UNDEF))
 #define NUM_VAL(val) numToValue(val)
 #define OBJ_VAL(object) ((Value)(SIGN_BIT | QNAN | (uint64_t)(uintptr_t)(Obj *)(object)))
 
 #define IS_BOOL(value) (((value) | 1) == (QNAN | TAG_TRUE))
 #define IS_NIL(value) ((value) == NIL_VAL)
+#define IS_UNDEF(value) ((value) == UNDEF_VAL)
 #define IS_NUM(value) (((value) & QNAN) != QNAN)
 #define IS_OBJ(value) (((value) & (QNAN | SIGN_BIT)) == (QNAN | SIGN_BIT))
 
@@ -65,6 +70,8 @@ static inline ValueType VALUE_TYPE(Value value)
         return VAL_BOOL;
     if (IS_NIL(value))
         return VAL_NIL;
+    if (IS_UNDEF(value))
+        return VAL_UNDEF;
     if (IS_NUM(value))
         return VAL_NUMBER;
     return VAL_OBJ;
@@ -84,6 +91,7 @@ typedef struct
 
 #define IS_BOOL(value) ((value).type == VAL_BOOL)
 #define IS_NIL(value) ((value).type == VAL_NIL)
+#define IS_UNDEF(value) ((value).type == VAL_UNDEF)
 #define IS_NUM(value) ((value).type == VAL_NUMBER)
 #define IS_OBJ(value) ((value).type == VAL_OBJ)
 
@@ -94,6 +102,7 @@ typedef struct
 #define OBJ_VAL(object) ((Value){.type = VAL_OBJ, {.obj = (Obj *)object}})
 #define BOOL_VAL(val) ((Value){.type = VAL_BOOL, {.boolean = val}})
 #define NIL_VAL ((Value){.type = VAL_NIL, {.number = 0}})
+#define UNDEF_VAL ((Value){.type = VAL_UNDEF, {.number = 0}})
 #define NUM_VAL(val) ((Value){.type = VAL_NUMBER, {.number = val}})
 
 static inline ValueType VALUE_TYPE(Value value)

@@ -265,6 +265,14 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_CATCH", offset);
     case OP_NOP:
         return simpleInst("OP_NOP", offset);
+    case OP_DEFAULT_LOCAL:
+    {
+        uint8_t slot = chunk->code[offset + 1];
+        uint16_t jump = (uint16_t)(chunk->code[offset + 2] << 8);
+        jump |= chunk->code[offset + 3];
+        printf("%-16s %4d -> %d\n", "OP_DEFAULT_LOCAL", slot, offset + 4 + jump);
+        return offset + 4;
+    }
     case OP_GET_GLOBAL:
         return constInst("OP_GET_GLOBAL", chunk, offset);
     case OP_SET_GLOBAL:

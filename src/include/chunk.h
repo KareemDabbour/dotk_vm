@@ -70,7 +70,8 @@ typedef enum
     OP_BUILD_MAP,
     OP_TRY,
     OP_CATCH,
-    OP_NOP
+    OP_NOP,
+    OP_DEFAULT_LOCAL
 } OpCode;
 
 typedef struct
