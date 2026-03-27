@@ -9791,7 +9791,11 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_CONSTANT_LONG:
         {
-            Value constant = frame->closure->function->chunk.constants.values[(READ_BYTE() & 0xff) | ((READ_BYTE() << 8) & 0xff) | ((READ_BYTE() << 16) & 0xff)];
+            uint32_t constantIndex =
+                ((uint32_t)(READ_BYTE() & 0xff)) |
+                ((uint32_t)(READ_BYTE() & 0xff) << 8) |
+                ((uint32_t)(READ_BYTE() & 0xff) << 16);
+            Value constant = frame->closure->function->chunk.constants.values[constantIndex];
             push(constant);
             break;
         }

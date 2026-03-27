@@ -1547,20 +1547,34 @@ class UndirectedGraph <Graph> {
 
     shortestPath(src, dest){
         var dist = this.dijkstra(src);
+      if (dist.get(dest, Math.INF) == Math.INF){
+        return [];
+      }
         var ret = [];
         var u = dest;
+      var limit = len(this.adjList.keys()) + 1;
+      var steps = 0;
         while ( u != src){
             ret.append(u);
             var adj = this.adjList.get(u, []);
-            var min = Math.INF;
-            var minV = -1;
+        var du = dist.get(u, Math.INF);
+        var min = Math.INF;
+        var minV = null;
             adj.foreach(fn (v) {
-                if (dist[v] < min){
-                    min = dist[v];
+          var dv = dist.get(v, Math.INF);
+          if (dv != Math.INF && (dv + 1) == du && dv < min){
+            min = dv;
                     minV = v;
                 }
             });
+        if (minV == null){
+          return [];
+        }
             u = minV;
+        steps += 1;
+        if (steps > limit){
+          return [];
+        }
         }
         ret.append(src);
         return ret[:@-1];
@@ -1642,38 +1656,53 @@ class WeightedDirectedGraph <Graph> {
 
     shortestPath(src, dest){
         var dist = this.dijkstra(src);
+      if (dist.get(dest, Math.INF) == Math.INF){
+        return [];
+      }
         var ret = [];
         var u = dest;
+      var limit = len(this.adjList.keys()) + 1;
+      var steps = 0;
         while (u != src){
             ret.append(u);
-            var adj = this.adjList.get(u, []);
+        var du = dist.get(u, Math.INF);
             var min = Math.INF;
-            var minV = -1;
-            adj.foreach(fn (vP) {
-                var v = vP.first;
-                if (dist[v] < min){
-                    min = dist[v];
-                    minV = v;
-                }
+        var minV = null;
+        this.adjList.entries().foreach(fn (e) {
+              var srcNode = e.key;
+              var dFrom = dist.get(srcNode, Math.INF);
+          e.value.foreach(fn (vP) {
+            var v = vP.first;
+            if (v == u && dFrom != Math.INF && (dFrom + 1) == du && dFrom < min){
+              min = dFrom;
+                  minV = srcNode;
+            }
+          });
             });
+        if (minV == null){
+          return [];
+        }
             u = minV;
+        steps += 1;
+        if (steps > limit){
+          return [];
+        }
         }
         ret.append(src);
         return ret[:@-1];
         
     }
 
-
-
     toStr(){
-        var s = StringBuilder();
+        # var s = StringBuilder();
+        # s.append("{\n");
         
-        this.adjList.entries().foreach(fn (e) {
-            s.append(e.key).append(" -> ").append(e.value).append("\n");
-        });
+        # this.adjList.entries().foreach(fn (e) {
+        #     s.append(f"   {e.key} -> {e.value}\n");
+        # });
 
-        return s.toStr();
-        # return this.adjList.toStr();
+        # return s.toStr();
+        return this.adjList.toStr();
     }
 
 }
