@@ -224,8 +224,17 @@ static void blackenObject(Obj *object)
         break;
     }
     case OBJ_STRING:
-    case OBJ_NATIVE:
         break;
+    case OBJ_NATIVE:
+    {
+        ObjNative *native = (ObjNative *)object;
+        for (int i = 0; i < native->paramCount; i++)
+        {
+            if (native->params[i].hasDefault)
+                markValue(native->params[i].defaultVal);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -352,6 +361,7 @@ static void freeObject(Obj *object)
 #ifdef DEBUG_LOG_GC
         fprintf(stderr, "%p freeing OBJ_NATIVE\n", (void *)object);
 #endif
+        FREE_ARRAY(NativeParamDef, ((ObjNative *)object)->params, ((ObjNative *)object)->paramCount);
         FREE(ObjNative, object);
         break;
     case OBJ_FOREIGN:

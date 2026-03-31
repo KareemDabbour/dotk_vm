@@ -218,6 +218,28 @@ ObjNative *newNative(NativeFn function)
 {
     ObjNative *native = ALLOCATE_OBJ(ObjNative, OBJ_NATIVE);
     native->function = function;
+    native->name = NULL;
+    native->paramCount = 0;
+    native->minArity = 0;
+    native->params = NULL;
+    return native;
+}
+
+ObjNative *newNativeWithParams(NativeFn function, NativeParamDef *params, int paramCount)
+{
+    ObjNative *native = ALLOCATE_OBJ(ObjNative, OBJ_NATIVE);
+    native->function = function;
+    native->name = NULL;
+    native->paramCount = paramCount;
+    native->params = ALLOCATE(NativeParamDef, paramCount);
+    int minArity = 0;
+    for (int i = 0; i < paramCount; i++)
+    {
+        native->params[i] = params[i];
+        if (!params[i].hasDefault)
+            minArity = i + 1;
+    }
+    native->minArity = minArity;
     return native;
 }
 
@@ -414,8 +436,28 @@ void printObj(Value value, int depth)
         printFunction(AS_CLOSURE(value)->function);
         break;
     case OBJ_NATIVE:
-        printf("<native fn>");
+    {
+        ObjNative *native = (ObjNative *)AS_OBJ(value);
+        printf("<native %s", native->name ? native->name : "fn");
+        if (native->paramCount > 0)
+        {
+            printf("(");
+            for (int i = 0; i < native->paramCount; i++)
+            {
+                if (i > 0)
+                    printf(", ");
+                printf("%s", native->params[i].name);
+                if (native->params[i].hasDefault)
+                {
+                    printf("=");
+                    printValue(native->params[i].defaultVal, 0);
+                }
+            }
+            printf(")");
+        }
+        printf(">");
         break;
+    }
     case OBJ_CLASS:
         printf("%s class", AS_CLASS(value)->name->chars);
         break;
@@ -435,10 +477,29 @@ void printObj(Value value, int depth)
         printFunction(AS_BOUND_METHOD(value)->method->function);
         break;
     case OBJ_BOUND_BUILTIN:
-        printf("<native method bound to ");
-        printObj(AS_BOUND_BUILTIN(value)->receiver, depth - 1);
+    {
+        ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(value);
+        ObjNative *native = bound->native;
+        printf("<bound native %s", native->name ? native->name : "fn");
+        if (native->paramCount > 0)
+        {
+            printf("(");
+            for (int i = 0; i < native->paramCount; i++)
+            {
+                if (i > 0)
+                    printf(", ");
+                printf("%s", native->params[i].name);
+                if (native->params[i].hasDefault)
+                {
+                    printf("=");
+                    printValue(native->params[i].defaultVal, 0);
+                }
+            }
+            printf(")");
+        }
         printf(">");
         break;
+    }
     case OBJ_LIST:
         printList(AS_LIST(value), depth);
         break;

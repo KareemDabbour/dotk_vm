@@ -57,6 +57,8 @@ static int gDebugScriptPos = 0;
 
 static bool invoke(ObjString *name, int argc);
 static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
+static void setNativeMethod(Table *table, const char *name, NativeFn fn);
+static Value namedNativeVal(const char *name, NativeFn fn);
 static InterpretResult run(bool isRepl, int runUntilFrame);
 static char *valueToString(Value val, char *buff, int *len);
 static char *valueToStringSized(Value val, char *buff, size_t cap, int *len);
@@ -2157,14 +2159,14 @@ NATIVE_FN(fileInitNative)
     tableSet(&f->fields, copyString("name", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
 
-    tableSet(&f->methods, copyString("close", 5), OBJ_VAL(newNative(fileCloseNative)));
-    tableSet(&f->methods, copyString("size", 4), OBJ_VAL(newNative(fileFSizeNative)));
-    tableSet(&f->methods, copyString("write", 5), OBJ_VAL(newNative(fileWriteNative)));
-    tableSet(&f->methods, copyString("read", 4), OBJ_VAL(newNative(fileReadNative)));
-    tableSet(&f->methods, copyString("readLine", 8), OBJ_VAL(newNative(fileReadLineNative)));
-    tableSet(&f->methods, copyString("readLines", 9), OBJ_VAL(newNative(fileReadLinesNative)));
-    tableSet(&f->methods, copyString("resetCursor", 11), OBJ_VAL(newNative(fileResetCursorNative)));
-    tableSet(&f->methods, copyString("cursorPos", 9), OBJ_VAL(newNative(fileCursorPosition)));
+    setNativeMethod(&f->methods, "close", fileCloseNative);
+    setNativeMethod(&f->methods, "size", fileFSizeNative);
+    setNativeMethod(&f->methods, "write", fileWriteNative);
+    setNativeMethod(&f->methods, "read", fileReadNative);
+    setNativeMethod(&f->methods, "readLine", fileReadLineNative);
+    setNativeMethod(&f->methods, "readLines", fileReadLinesNative);
+    setNativeMethod(&f->methods, "resetCursor", fileResetCursorNative);
+    setNativeMethod(&f->methods, "cursorPos", fileCursorPosition);
 
     return OBJ_VAL(f);
 }
@@ -2357,11 +2359,11 @@ NATIVE_FN(sqlInitNative)
     tableSet(&f->fields, copyString("path", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
 
-    tableSet(&f->methods, copyString("close", 5), OBJ_VAL(newNative(sqlCloseNative)));
-    tableSet(&f->methods, copyString("exec", 4), OBJ_VAL(newNative(sqlExecNative)));
-    tableSet(&f->methods, copyString("query", 5), OBJ_VAL(newNative(sqlQueryNative)));
-    // tableSet(&f->methods, copyString("lastInsertId", 12), OBJ_VAL(newNative(sqlLastInsertIdNative)));
-    // tableSet(&f->methods, copyString("changes", 7), OBJ_VAL(newNative(sqlChangesNative)));
+    setNativeMethod(&f->methods, "close", sqlCloseNative);
+    setNativeMethod(&f->methods, "exec", sqlExecNative);
+    setNativeMethod(&f->methods, "query", sqlQueryNative);
+    // setNativeMethod(&f->methods, "lastInsertId", sqlLastInsertIdNative);
+    // setNativeMethod(&f->methods, "changes", sqlChangesNative);
 
     return OBJ_VAL(f);
 }
@@ -2808,9 +2810,35 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             *len = (int)index;
             return buff;
         case OBJ_NATIVE:
-            index = appendLiteral(buff, cap, 0, "<native>");
+        {
+            ObjNative *native = (ObjNative *)AS_OBJ(val);
+            index = appendLiteral(buff, cap, 0, "<native ");
+            index = appendLiteral(buff, cap, index, native->name ? native->name : "fn");
+            if (native->paramCount > 0)
+            {
+                index = appendChar(buff, cap, index, '(');
+                for (int i = 0; i < native->paramCount; i++)
+                {
+                    if (i > 0)
+                        index = appendLiteral(buff, cap, index, ", ");
+                    index = appendLiteral(buff, cap, index, native->params[i].name);
+                    if (native->params[i].hasDefault)
+                    {
+                        index = appendChar(buff, cap, index, '=');
+                        size_t remaining = index < cap ? cap - index : 0;
+                        int defLen = 0;
+                        valueToStringSized(native->params[i].defaultVal, buff + index, remaining, &defLen);
+                        index += defLen;
+                        if (cap > 0 && index >= cap)
+                            index = cap - 1;
+                    }
+                }
+                index = appendChar(buff, cap, index, ')');
+            }
+            index = appendChar(buff, cap, index, '>');
             *len = (int)index;
             return buff;
+        }
         case OBJ_CLOSURE:
             index = appendLiteral(buff, cap, 0, AS_CLOSURE(val)->function->name == NULL ? "<script>" : AS_CLOSURE(val)->function->name->chars);
             *len = (int)index;
@@ -2820,9 +2848,36 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             *len = (int)index;
             return buff;
         case OBJ_BOUND_BUILTIN:
-            index = appendLiteral(buff, cap, 0, "<bound native>");
+        {
+            ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(val);
+            ObjNative *native = bound->native;
+            index = appendLiteral(buff, cap, 0, "<bound native ");
+            index = appendLiteral(buff, cap, index, native->name ? native->name : "fn");
+            if (native->paramCount > 0)
+            {
+                index = appendChar(buff, cap, index, '(');
+                for (int i = 0; i < native->paramCount; i++)
+                {
+                    if (i > 0)
+                        index = appendLiteral(buff, cap, index, ", ");
+                    index = appendLiteral(buff, cap, index, native->params[i].name);
+                    if (native->params[i].hasDefault)
+                    {
+                        index = appendChar(buff, cap, index, '=');
+                        size_t remaining = index < cap ? cap - index : 0;
+                        int defLen = 0;
+                        valueToStringSized(native->params[i].defaultVal, buff + index, remaining, &defLen);
+                        index += defLen;
+                        if (cap > 0 && index >= cap)
+                            index = cap - 1;
+                    }
+                }
+                index = appendChar(buff, cap, index, ')');
+            }
+            index = appendChar(buff, cap, index, '>');
             *len = (int)index;
             return buff;
+        }
         case OBJ_UPVALUE:
             index = appendLiteral(buff, cap, 0, "<upvalue>");
             *len = (int)index;
@@ -3029,26 +3084,20 @@ static Value floatCastNative(int argc, Value *argv, bool *hasError, bool *pushed
 
 NATIVE_FN(roundNative)
 {
-    if (argc < 1 || argc > 2)
-    {
-        runtimeError("'round()' expects one or two arguments %d were passed in", argc);
-        *hasError = true;
-        return NIL_VAL;
-    }
     if (!IS_NUM(argv[0]))
     {
-        runtimeError("'round()' expects a number as argument but got '%s'", valueTypeName(argv[0]));
+        runtimeError("'round()' expects a number as first argument but got '%s'", valueTypeName(argv[0]));
         *hasError = true;
         return NIL_VAL;
     }
-    if (argc == 2 && !IS_NUM(argv[1]))
+    if (!IS_NUM(argv[1]))
     {
         runtimeError("'round()' expects a number as second argument but got '%s'", valueTypeName(argv[1]));
         *hasError = true;
         return NIL_VAL;
     }
     double x = AS_NUM(argv[0]);
-    int digits = argc == 2 ? (int)AS_NUM(argv[1]) : 0;
+    int digits = (int)AS_NUM(argv[1]);
     double fac = pow(10, digits);
     return NUM_VAL(round(x * fac) / fac);
 }
@@ -3833,10 +3882,37 @@ static Value openFileNative(int argc, Value *argv, bool *hasError, bool *pushedV
 static void defineNative(const char *name, NativeFn function)
 {
     push(OBJ_VAL(copyString(name, (int)strlen(name))));
-    push(OBJ_VAL(newNative(function)));
+    ObjNative *native = newNative(function);
+    native->name = name;
+    push(OBJ_VAL(native));
     tableSet(&vm.globals, AS_STR(peek(1)), peek(0));
     pop();
     pop();
+}
+
+static void defineNativeWithParams(const char *name, NativeFn function, NativeParamDef *params, int paramCount)
+{
+    push(OBJ_VAL(copyString(name, (int)strlen(name))));
+    ObjNative *native = newNativeWithParams(function, params, paramCount);
+    native->name = name;
+    push(OBJ_VAL(native));
+    tableSet(&vm.globals, AS_STR(peek(1)), peek(0));
+    pop();
+    pop();
+}
+
+static void setNativeMethod(Table *table, const char *name, NativeFn fn)
+{
+    ObjNative *native = newNative(fn);
+    native->name = name;
+    tableSet(table, copyString(name, (int)strlen(name)), OBJ_VAL(native));
+}
+
+static Value namedNativeVal(const char *name, NativeFn fn)
+{
+    ObjNative *native = newNative(fn);
+    native->name = name;
+    return OBJ_VAL(native);
 }
 
 void vmDefineNative(const char *name, NativeFn function)
@@ -3871,7 +3947,7 @@ void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function)
         return;
 
     ObjString *methodName = copyString(name, (int)strlen(name));
-    Value method = OBJ_VAL(newNative(function));
+    Value method = namedNativeVal(name, function);
     tableSet(&clazz->methods, methodName, method);
 
     ObjString *canonical = methodName;
@@ -3919,7 +3995,7 @@ void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn funct
 {
     if (clazz == NULL || name == NULL || function == NULL)
         return;
-    tableSet(&clazz->staticVars, copyString(name, (int)strlen(name)), OBJ_VAL(newNative(function)));
+    tableSet(&clazz->staticVars, copyString(name, (int)strlen(name)), namedNativeVal(name, function));
 }
 
 static Value vmApiMakeString(const char *chars, int len, bool interned)
@@ -4368,6 +4444,135 @@ static bool callClosureWithArgs(ObjClosure *closure, int positionalCount, int ke
     return call(closure, normalizedArgCount);
 }
 
+static bool normalizeNativeArgsOnStack(ObjNative *native, int positionalCount, int keywordCount, int *normalizedArgCount)
+{
+    if (native->paramCount == 0)
+        return normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, normalizedArgCount);
+
+    int rawArgCount = positionalCount + (keywordCount * 2);
+    Value *base = vm.stackTop - rawArgCount - 1;
+    Value *rawPositional = base + 1;
+    Value *rawKeywords = rawPositional + positionalCount;
+
+    int formalCount = native->paramCount;
+
+    if (positionalCount > formalCount)
+    {
+        runtimeError("Expected at most %d argument(s) but got %d", formalCount, positionalCount);
+        return false;
+    }
+
+    Value *finalArgs = ALLOCATE(Value, formalCount);
+    bool *assigned = ALLOCATE(bool, formalCount);
+    for (int i = 0; i < formalCount; i++)
+        assigned[i] = false;
+
+    for (int i = 0; i < keywordCount; i++)
+    {
+        Value key = rawKeywords[i * 2];
+        Value value = rawKeywords[(i * 2) + 1];
+        if (!IS_STR(key))
+        {
+            runtimeError("Keyword argument name must be a string.");
+            FREE_ARRAY(bool, assigned, formalCount);
+            FREE_ARRAY(Value, finalArgs, formalCount);
+            return false;
+        }
+        ObjString *keyStr = AS_STR(key);
+        int paramIndex = -1;
+        for (int j = 0; j < formalCount; j++)
+        {
+            if (strcmp(native->params[j].name, keyStr->chars) == 0)
+            {
+                paramIndex = j;
+                break;
+            }
+        }
+        if (paramIndex < 0)
+        {
+            runtimeError("Unexpected keyword argument '%s'", keyStr->chars);
+            FREE_ARRAY(bool, assigned, formalCount);
+            FREE_ARRAY(Value, finalArgs, formalCount);
+            return false;
+        }
+        if (assigned[paramIndex])
+        {
+            runtimeError("Multiple values for parameter '%s'", keyStr->chars);
+            FREE_ARRAY(bool, assigned, formalCount);
+            FREE_ARRAY(Value, finalArgs, formalCount);
+            return false;
+        }
+        finalArgs[paramIndex] = value;
+        assigned[paramIndex] = true;
+    }
+
+    for (int i = 0; i < positionalCount; i++)
+    {
+        int targetIndex = -1;
+        for (int j = 0; j < formalCount; j++)
+        {
+            if (!assigned[j])
+            {
+                targetIndex = j;
+                break;
+            }
+        }
+        if (targetIndex < 0)
+        {
+            runtimeError("Too many positional arguments");
+            FREE_ARRAY(bool, assigned, formalCount);
+            FREE_ARRAY(Value, finalArgs, formalCount);
+            return false;
+        }
+        finalArgs[targetIndex] = rawPositional[i];
+        assigned[targetIndex] = true;
+    }
+
+    for (int i = 0; i < formalCount; i++)
+    {
+        if (!assigned[i])
+        {
+            if (native->params[i].hasDefault)
+            {
+                finalArgs[i] = native->params[i].defaultVal;
+                assigned[i] = true;
+            }
+            else
+            {
+                runtimeError("Missing required argument '%s'", native->params[i].name);
+                FREE_ARRAY(bool, assigned, formalCount);
+                FREE_ARRAY(Value, finalArgs, formalCount);
+                return false;
+            }
+        }
+    }
+
+    vm.stackTop = base + 1;
+    for (int i = 0; i < formalCount; i++)
+        push(finalArgs[i]);
+
+    *normalizedArgCount = formalCount;
+    FREE_ARRAY(bool, assigned, formalCount);
+    FREE_ARRAY(Value, finalArgs, formalCount);
+    return true;
+}
+
+static bool callNativeNormalized(ObjNative *native, int argCount)
+{
+    NativeFn fn = native->function;
+    bool hasError = false;
+    bool pushedValue = false;
+    Value result = fn(argCount, vm.stackTop - argCount, &hasError, &pushedValue);
+    if (hasError)
+        return false;
+    if (!pushedValue)
+    {
+        vm.stackTop -= argCount + 1;
+        push(result);
+    }
+    return true;
+}
+
 static bool callValue(Value callee, int argC)
 {
     if (IS_OBJ(callee))
@@ -4384,6 +4589,13 @@ static bool callValue(Value callee, int argC)
         {
             ObjBoundBuiltin *bound = AS_BOUND_BUILTIN(callee);
             vm.stackTop[-argC - 1] = bound->receiver;
+            if (bound->native->paramCount > 0)
+            {
+                int normalizedArgCount = 0;
+                if (!normalizeNativeArgsOnStack(bound->native, argC, 0, &normalizedArgCount))
+                    return false;
+                return callNativeNormalized(bound->native, normalizedArgCount);
+            }
             bool hasError = false;
             bool pushedValue = false;
             Value result = bound->native->function(argC, vm.stackTop - argC, &hasError, &pushedValue);
@@ -4413,7 +4625,15 @@ static bool callValue(Value callee, int argC)
         }
         case OBJ_NATIVE:
         {
-            NativeFn native = AS_NATIVE(callee);
+            ObjNative *nativeObj = (ObjNative *)AS_OBJ(callee);
+            if (nativeObj->paramCount > 0)
+            {
+                int normalizedArgCount = 0;
+                if (!normalizeNativeArgsOnStack(nativeObj, argC, 0, &normalizedArgCount))
+                    return false;
+                return callNativeNormalized(nativeObj, normalizedArgCount);
+            }
+            NativeFn native = nativeObj->function;
             bool hasError = false;
             bool pushedValue = false;
             Value result = native(argC, vm.stackTop - argC, &hasError, &pushedValue);
@@ -4468,20 +4688,17 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
             vm.stackTop[-rawArgCount - 1] = bound->receiver;
 
             int nativeArgCount = positionalCount;
-            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
-                return false;
-
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = bound->native->function(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
+            if (bound->native->paramCount > 0)
             {
-                vm.stackTop -= nativeArgCount + 1;
-                push(result);
+                if (!normalizeNativeArgsOnStack(bound->native, positionalCount, keywordCount, &nativeArgCount))
+                    return false;
             }
-            return true;
+            else
+            {
+                if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
+                    return false;
+            }
+            return callNativeNormalized(bound->native, nativeArgCount);
         }
         case OBJ_CLASS:
         {
@@ -4500,22 +4717,19 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
         }
         case OBJ_NATIVE:
         {
+            ObjNative *nativeObj = (ObjNative *)AS_OBJ(callee);
             int nativeArgCount = positionalCount;
-            if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
-                return false;
-
-            NativeFn native = AS_NATIVE(callee);
-            bool hasError = false;
-            bool pushedValue = false;
-            Value result = native(nativeArgCount, vm.stackTop - nativeArgCount, &hasError, &pushedValue);
-            if (hasError)
-                return false;
-            if (!pushedValue)
+            if (nativeObj->paramCount > 0)
             {
-                vm.stackTop -= nativeArgCount + 1;
-                push(result);
+                if (!normalizeNativeArgsOnStack(nativeObj, positionalCount, keywordCount, &nativeArgCount))
+                    return false;
             }
-            return true;
+            else
+            {
+                if (!normalizeKeywordArgsToMapOnStack(positionalCount, keywordCount, &nativeArgCount))
+                    return false;
+            }
+            return callNativeNormalized(nativeObj, nativeArgCount);
         }
         case OBJ_FOREIGN:
         {
@@ -7876,7 +8090,10 @@ static void initCoreModule()
     defineNative("str", strCastNative);
     defineNative("hash", hashNative);
     defineNative("join", joinNative);
-    defineNative("round", roundNative);
+    defineNativeWithParams("round", roundNative, (NativeParamDef[]){
+        {"value", NIL_VAL, false},
+        {"digits", NUM_VAL(0), true}
+    }, 2);
     defineNative("int", intCastNative);
     defineNative("float", floatCastNative);
     defineNative("bool", boolCastNative);
@@ -7957,70 +8174,70 @@ static void initPrimitiveClassesModule()
     vm.baseObj = NULL;
     ObjClass *baseObj = primativeClass("Object");
     vm.baseObj = baseObj;
-    baseObj->toStr = OBJ_VAL(newNative(baseToStrNative));
+    baseObj->toStr = namedNativeVal("toStr", baseToStrNative);
     tableSet(&baseObj->methods, copyString("toStr", 5), baseObj->toStr);
 
     vm.errorClass = NULL;
     ObjClass *errorClass = primativeClass("Error");
     vm.errorClass = errorClass;
-    errorClass->initializer = OBJ_VAL(newNative(errorInitNative));
-    errorClass->toStr = OBJ_VAL(newNative(errorToStringNative));
+    errorClass->initializer = namedNativeVal("init", errorInitNative);
+    errorClass->toStr = namedNativeVal("toStr", errorToStringNative);
     tableSet(&errorClass->methods, copyString("toStr", 5), errorClass->toStr);
     tableSet(&errorClass->methods, copyString("init", 4), errorClass->initializer);
 
     vm.stringClass = NULL;
     ObjClass *stringClass = primativeClass("String");
     vm.stringClass = stringClass;
-    stringClass->initializer = OBJ_VAL(newNative(initStringNative));
-    stringClass->hashFn = OBJ_VAL(newNative(strHashNative));
+    stringClass->initializer = namedNativeVal("init", initStringNative);
+    stringClass->hashFn = namedNativeVal("hash", strHashNative);
 
     tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
     tableSet(&stringClass->methods, copyString("_hash_", 6), stringClass->hashFn);
-    tableSet(&stringClass->methods, copyString("split", 5), OBJ_VAL(newNative(split2Native)));
-    tableSet(&stringClass->methods, copyString("match", 5), OBJ_VAL(newNative(regexMatchStrNative)));
-    tableSet(&stringClass->methods, copyString("findall", 7), OBJ_VAL(newNative(regexFindAllNative)));
-    tableSet(&stringClass->methods, copyString("replace", 7), OBJ_VAL(newNative(replace2Native)));
-    tableSet(&stringClass->methods, copyString("splitOnWs", 9), OBJ_VAL(newNative(splitByWhitespace2Native)));
-    tableSet(&stringClass->methods, copyString("trim", 4), OBJ_VAL(newNative(trim2Native)));
-    tableSet(&stringClass->methods, copyString("find", 4), OBJ_VAL(newNative(find2Native)));
-    tableSet(&stringClass->methods, copyString("lower", 5), OBJ_VAL(newNative(lower2Native)));
-    tableSet(&stringClass->methods, copyString("upper", 5), OBJ_VAL(newNative(upper2Native)));
-    tableSet(&stringClass->methods, copyString("trimLeft", 8), OBJ_VAL(newNative(trimLeft2Native)));
-    tableSet(&stringClass->methods, copyString("trimRight", 9), OBJ_VAL(newNative(trimRight2Native)));
-    tableSet(&stringClass->methods, copyString("isWhitespace", 12), OBJ_VAL(newNative(isWhitespace2Native)));
-    tableSet(&stringClass->methods, copyString("contains", 8), OBJ_VAL(newNative(contains2Native)));
-    tableSet(&stringClass->methods, copyString("isDigit", 7), OBJ_VAL(newNative(isDigitNative)));
-    tableSet(&stringClass->methods, copyString("title", 5), OBJ_VAL(newNative(titleNative)));
-    tableSet(&stringClass->methods, copyString("join", 4), OBJ_VAL(newNative(join2Native)));
-    tableSet(&stringClass->methods, copyString("format", 6), OBJ_VAL(newNative(formatNative)));
-    tableSet(&stringClass->methods, copyString("f", 1), OBJ_VAL(newNative(formatNative)));
+    setNativeMethod(&stringClass->methods, "split", split2Native);
+    setNativeMethod(&stringClass->methods, "match", regexMatchStrNative);
+    setNativeMethod(&stringClass->methods, "findall", regexFindAllNative);
+    setNativeMethod(&stringClass->methods, "replace", replace2Native);
+    setNativeMethod(&stringClass->methods, "splitOnWs", splitByWhitespace2Native);
+    setNativeMethod(&stringClass->methods, "trim", trim2Native);
+    setNativeMethod(&stringClass->methods, "find", find2Native);
+    setNativeMethod(&stringClass->methods, "lower", lower2Native);
+    setNativeMethod(&stringClass->methods, "upper", upper2Native);
+    setNativeMethod(&stringClass->methods, "trimLeft", trimLeft2Native);
+    setNativeMethod(&stringClass->methods, "trimRight", trimRight2Native);
+    setNativeMethod(&stringClass->methods, "isWhitespace", isWhitespace2Native);
+    setNativeMethod(&stringClass->methods, "contains", contains2Native);
+    setNativeMethod(&stringClass->methods, "isDigit", isDigitNative);
+    setNativeMethod(&stringClass->methods, "title", titleNative);
+    setNativeMethod(&stringClass->methods, "join", join2Native);
+    setNativeMethod(&stringClass->methods, "format", formatNative);
+    setNativeMethod(&stringClass->methods, "f", formatNative);
 
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
     vm.listClass = listClass;
-    listClass->initializer = OBJ_VAL(newNative(initListNative));
-    tableSet(&listClass->methods, copyString("append", 6), OBJ_VAL(newNative(appendListNative)));
-    tableSet(&listClass->methods, copyString("of", 2), OBJ_VAL(newNative(listOfNative)));
-    tableSet(&listClass->methods, copyString("extend", 6), OBJ_VAL(newNative(extendListNative)));
-    tableSet(&listClass->methods, copyString("prepend", 7), OBJ_VAL(newNative(prependListNative)));
-    tableSet(&listClass->methods, copyString("contains", 8), OBJ_VAL(newNative(containsListNative)));
-    tableSet(&listClass->methods, copyString("sort", 4), OBJ_VAL(newNative(sortListNative)));
-    tableSet(&listClass->methods, copyString("indexOf", 7), OBJ_VAL(newNative(indexOfListNative)));
-    tableSet(&listClass->methods, copyString("insert", 6), OBJ_VAL(newNative(insertListNative)));
-    tableSet(&listClass->methods, copyString("pop", 3), OBJ_VAL(newNative(popListNative)));
-    tableSet(&listClass->methods, copyString("foreach", 7), OBJ_VAL(newNative(foreachNative)));
-    tableSet(&listClass->methods, copyString("map", 3), OBJ_VAL(newNative(mapNative)));
-    tableSet(&listClass->methods, copyString("filter", 6), OBJ_VAL(newNative(removeIfNative)));
+    listClass->initializer = namedNativeVal("init", initListNative);
+    setNativeMethod(&listClass->methods, "append", appendListNative);
+    setNativeMethod(&listClass->methods, "of", listOfNative);
+    setNativeMethod(&listClass->methods, "extend", extendListNative);
+    setNativeMethod(&listClass->methods, "prepend", prependListNative);
+    setNativeMethod(&listClass->methods, "contains", containsListNative);
+    setNativeMethod(&listClass->methods, "sort", sortListNative);
+    setNativeMethod(&listClass->methods, "indexOf", indexOfListNative);
+    setNativeMethod(&listClass->methods, "insert", insertListNative);
+    setNativeMethod(&listClass->methods, "pop", popListNative);
+    setNativeMethod(&listClass->methods, "foreach", foreachNative);
+    setNativeMethod(&listClass->methods, "map", mapNative);
+    setNativeMethod(&listClass->methods, "filter", removeIfNative);
     tableSet(&listClass->methods, copyString("init", 4), listClass->initializer);
 
     vm.mapClass = NULL;
     ObjClass *mapClass = primativeClass("HashMap");
     vm.mapClass = mapClass;
-    mapClass->initializer = OBJ_VAL(newNative(mapInitNative));
-    mapClass->indexFn = OBJ_VAL(newNative(mapGetNative));
-    mapClass->setFn = OBJ_VAL(newNative(mapSetNative));
-    mapClass->sizeFn = OBJ_VAL(newNative(mapSizeNative));
-    mapClass->toStr = OBJ_VAL(newNative(mapToStrNative));
+    mapClass->initializer = namedNativeVal("init", mapInitNative);
+    mapClass->indexFn = namedNativeVal("get", mapGetNative);
+    mapClass->setFn = namedNativeVal("set", mapSetNative);
+    mapClass->sizeFn = namedNativeVal("size", mapSizeNative);
+    mapClass->toStr = namedNativeVal("toStr", mapToStrNative);
 
     tableSet(&mapClass->methods, copyString("get", 3), mapClass->indexFn);
     tableSet(&mapClass->methods, copyString("_get_", 5), mapClass->indexFn);
@@ -8029,27 +8246,27 @@ static void initPrimitiveClassesModule()
     tableSet(&mapClass->methods, copyString("_set_", 5), mapClass->setFn);
     tableSet(&mapClass->methods, copyString("toStr", 5), mapClass->toStr);
     tableSet(&mapClass->methods, copyString("_size_", 7), mapClass->sizeFn);
-    tableSet(&mapClass->methods, copyString("remove", 6), OBJ_VAL(newNative(mapRemoveNative)));
-    tableSet(&mapClass->methods, copyString("clear", 5), OBJ_VAL(newNative(mapClearNative)));
-    tableSet(&mapClass->methods, copyString("keys", 4), OBJ_VAL(newNative(mapKeysNative)));
-    tableSet(&mapClass->methods, copyString("values", 6), OBJ_VAL(newNative(mapValuesNative)));
-    tableSet(&mapClass->methods, copyString("entries", 7), OBJ_VAL(newNative(mapEntriesNative)));
-    tableSet(&mapClass->methods, copyString("containsKey", 11), OBJ_VAL(newNative(mapContainsKeyNative)));
-    tableSet(&mapClass->methods, copyString("compute", 7), OBJ_VAL(newNative(mapComputeNative)));
-    tableSet(&mapClass->methods, copyString("computeIfAbsent", 15), OBJ_VAL(newNative(mapComputeIfAbsentNative)));
-    tableSet(&mapClass->methods, copyString("computeIfPresent", 16), OBJ_VAL(newNative(mapComputeIfPresentNative)));
+    setNativeMethod(&mapClass->methods, "remove", mapRemoveNative);
+    setNativeMethod(&mapClass->methods, "clear", mapClearNative);
+    setNativeMethod(&mapClass->methods, "keys", mapKeysNative);
+    setNativeMethod(&mapClass->methods, "values", mapValuesNative);
+    setNativeMethod(&mapClass->methods, "entries", mapEntriesNative);
+    setNativeMethod(&mapClass->methods, "containsKey", mapContainsKeyNative);
+    setNativeMethod(&mapClass->methods, "compute", mapComputeNative);
+    setNativeMethod(&mapClass->methods, "computeIfAbsent", mapComputeIfAbsentNative);
+    setNativeMethod(&mapClass->methods, "computeIfPresent", mapComputeIfPresentNative);
 
     ObjClass *sb = primativeClass("StringBuilder");
-    sb->initializer = OBJ_VAL(newNative(sbInitNative));
-    sb->sizeFn = OBJ_VAL(newNative(sbSizeNative));
-    sb->toStr = OBJ_VAL(newNative(sbToStringNative));
+    sb->initializer = namedNativeVal("init", sbInitNative);
+    sb->sizeFn = namedNativeVal("size", sbSizeNative);
+    sb->toStr = namedNativeVal("toStr", sbToStringNative);
 
     tableSet(&sb->methods, copyString("_size_", 7), sb->sizeFn);
     tableSet(&sb->methods, copyString("toStr", 5), sb->toStr);
-    tableSet(&sb->methods, copyString("append", 6), OBJ_VAL(newNative(sbAppendNative)));
-    tableSet(&sb->methods, copyString("clear", 5), OBJ_VAL(newNative(sbClearNative)));
-    tableSet(&sb->methods, copyString("pop", 3), OBJ_VAL(newNative(sbPopNative)));
-    tableSet(&sb->methods, copyString("toArray", 7), OBJ_VAL(newNative(sbToArrayNative)));
+    setNativeMethod(&sb->methods, "append", sbAppendNative);
+    setNativeMethod(&sb->methods, "clear", sbClearNative);
+    setNativeMethod(&sb->methods, "pop", sbPopNative);
+    setNativeMethod(&sb->methods, "toArray", sbToArrayNative);
 }
 
 void registerBuiltinPrimitiveClassesModule()
@@ -8060,8 +8277,8 @@ void registerBuiltinPrimitiveClassesModule()
 static void initFileClassModule()
 {
     ObjClass *file = primativeClass("File");
-    file->initializer = OBJ_VAL(newNative(fileInitNative));
-    tableSet(&file->methods, copyString("exists", 6), OBJ_VAL(newNative(fileClassExistsNative)));
+    file->initializer = namedNativeVal("init", fileInitNative);
+    setNativeMethod(&file->methods, "exists", fileClassExistsNative);
 }
 
 void registerBuiltinFileClassModule()
@@ -8072,10 +8289,10 @@ void registerBuiltinFileClassModule()
 static void initSQLClassModule()
 {
     ObjClass *sql = primativeClass("SQL");
-    sql->initializer = OBJ_VAL(newNative(sqlInitNative));
-    tableSet(&sql->methods, copyString("close", 5), OBJ_VAL(newNative(sqlCloseNative)));
-    tableSet(&sql->methods, copyString("exec", 4), OBJ_VAL(newNative(sqlExecNative)));
-    tableSet(&sql->methods, copyString("query", 5), OBJ_VAL(newNative(sqlQueryNative)));
+    sql->initializer = namedNativeVal("init", sqlInitNative);
+    setNativeMethod(&sql->methods, "close", sqlCloseNative);
+    setNativeMethod(&sql->methods, "exec", sqlExecNative);
+    setNativeMethod(&sql->methods, "query", sqlQueryNative);
 }
 
 void registerBuiltinSQLClassModule()

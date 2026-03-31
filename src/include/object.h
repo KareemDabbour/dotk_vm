@@ -137,10 +137,21 @@ typedef struct ObjClosure
 
 typedef Value (*NativeFn)(int argC, Value *argV, bool *hasError, bool *pushedValue);
 
+typedef struct
+{
+    const char *name;
+    Value defaultVal;
+    bool hasDefault;
+} NativeParamDef;
+
 typedef struct ObjNative
 {
     Obj obj;
     NativeFn function;
+    const char *name;
+    int paramCount;
+    int minArity;
+    NativeParamDef *params;
 } ObjNative;
 
 typedef struct ObjForeign
@@ -231,6 +242,7 @@ ObjInstance *newInstance(ObjClass *klass);
 ObjBoundMethod *newBoundMethod(Value receiver, ObjClosure *method);
 ObjBoundBuiltin *newBoundBuiltin(Value receiver, ObjNative *native);
 ObjNative *newNative(NativeFn function);
+ObjNative *newNativeWithParams(NativeFn function, NativeParamDef *params, int paramCount);
 ObjString *takeString(char *chars, int len);
 ObjString *copyString(const char *chars, int len);
 ObjString *copyStringUninterned(const char *chars, int len);
