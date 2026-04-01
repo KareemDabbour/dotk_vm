@@ -10,22 +10,13 @@
 #define ALLOCATE_OBJ(type, objectType) \
     (type *)allocateObject(sizeof(type), objectType)
 
-static bool gcDebugEnabledObject(void)
-{
-    static int initialized = 0;
-    static bool enabled = false;
-    if (!initialized)
-    {
-        const char *value = getenv("DOTK_DEBUG_GC");
-        enabled = value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
-        initialized = 1;
-    }
-    return enabled;
-}
-
 static Obj *allocateObject(size_t size, ObjType type)
 {
+#ifdef DEBUG_ALLOCATIONS
     Obj *object = (Obj *)reallocateDebug(NULL, 0, size, __FILE__, __LINE__, OBJECT_TYPES[type], "alloc");
+#else
+    Obj *object = (Obj *)reallocate(NULL, 0, size);
+#endif
     object->type = type;
     object->isMarked = false;
     object->next = vm.objects;
@@ -60,6 +51,15 @@ ObjMap *newMap()
     initMap(&map->map);
     map->map.entries = NULL;
     return map;
+}
+
+ObjNamespace *newNamespace()
+{
+    ObjNamespace *ns = ALLOCATE_OBJ(ObjNamespace, OBJ_NAMESPACE);
+    initTable(&ns->exports);
+    initTable(&ns->globals);
+    initTable(&ns->constGlobals);
+    return ns;
 }
 
 ObjList *newList()
@@ -172,7 +172,36 @@ ObjClosure *newClosure(ObjFunction *function)
     closure->function = function;
     closure->upvalues = upvalues;
     closure->upvalueCount = function->upValueCount;
+    closure->moduleNamespace = NULL;
     return closure;
+}
+
+ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount)
+{
+    ObjGenerator *generator = ALLOCATE_OBJ(ObjGenerator, OBJ_GENERATOR);
+    generator->closure = closure;
+    generator->argCount = argCount;
+    generator->started = false;
+    generator->finished = false;
+    generator->stack = NULL;
+    generator->stackCount = 0;
+    generator->stackCapacity = 0;
+    generator->frames = NULL;
+    generator->frameCount = 0;
+    generator->frameCapacity = 0;
+
+    if (argCount > 0)
+    {
+        generator->args = ALLOCATE(Value, argCount);
+        for (int i = 0; i < argCount; i++)
+            generator->args[i] = args[i];
+    }
+    else
+    {
+        generator->args = NULL;
+    }
+
+    return generator;
 }
 
 ObjFunction *newFunction()
@@ -189,6 +218,7 @@ ObjFunction *newFunction()
     func->localNameCount = 0;
     func->localNameConsts = NULL;
     func->upValueCount = 0;
+    func->isGenerator = false;
     func->name = NULL;
     initChunk(&func->chunk);
     return func;
@@ -435,6 +465,15 @@ void printObj(Value value, int depth)
     case OBJ_CLOSURE:
         printFunction(AS_CLOSURE(value)->function);
         break;
+    case OBJ_GENERATOR:
+    {
+        ObjGenerator *generator = AS_GENERATOR(value);
+        const char *name = "<anonymous>";
+        if (generator->closure != NULL && generator->closure->function != NULL && generator->closure->function->name != NULL)
+            name = generator->closure->function->name->chars;
+        printf("<generator %s>", name);
+        break;
+    }
     case OBJ_NATIVE:
     {
         ObjNative *native = (ObjNative *)AS_OBJ(value);
@@ -508,6 +547,9 @@ void printObj(Value value, int depth)
         break;
     case OBJ_MAP:
         printMap(AS_MAP(value), depth);
+        break;
+    case OBJ_NAMESPACE:
+        printf("<namespace>");
         break;
     case OBJ_UPVALUE:
         printf("upvalue");

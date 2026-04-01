@@ -22,6 +22,9 @@ void freeMap(Map *map)
 
 void markMap(Map *map)
 {
+    if (map->entries == NULL || map->capacity <= 0)
+        return;
+
     for (int i = 0; i < map->capacity; i++)
     {
         MapEntry *entry = &map->entries[i];

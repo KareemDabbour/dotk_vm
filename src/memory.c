@@ -11,7 +11,6 @@
 
 #define GC_HEAP_GROW_FACTOR 2
 
-
 static bool gcDebugEnabled(void)
 {
     static int initialized = 0;
@@ -27,16 +26,11 @@ static bool gcDebugEnabled(void)
 
 void *reallocateDebug(void *pointer, size_t oldSize, size_t newSize, const char *file, int line, const char *type, const char *op)
 {
-    if (gcDebugEnabled())
-    {
-        if (type != NULL)
-            fprintf(stderr, "[gc-alloc][%s] %s:%d old=%zu new=%zu ptr=%p type=%s\n", op, file, line, oldSize, newSize, pointer, type);
-        else
-            fprintf(stderr, "[gc-alloc][%s] %s:%d old=%zu new=%zu ptr=%p\n", op, file, line, oldSize, newSize, pointer);
-    }
+
+    fprintf(stderr, "[gc-alloc][%s] %s:%d old=%zu new=%zu ptr=%p type=%s\n", op, file, line, oldSize, newSize, pointer, type);
+
     return reallocate(pointer, oldSize, newSize);
 }
-
 
 void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 {
@@ -127,16 +121,37 @@ static void blackenObject(Obj *object)
     {
         ObjClosure *closure = (ObjClosure *)object;
         markObj((Obj *)closure->function);
+        markObj((Obj *)closure->moduleNamespace);
         for (int i = 0; i < closure->upvalueCount; i++)
         {
             markObj((Obj *)closure->upvalues[i]);
         }
         break;
     }
+    case OBJ_GENERATOR:
+    {
+        ObjGenerator *generator = (ObjGenerator *)object;
+        markObj((Obj *)generator->closure);
+        for (int i = 0; i < generator->argCount; i++)
+            markValue(generator->args[i]);
+        for (int i = 0; i < generator->stackCount; i++)
+            markValue(generator->stack[i]);
+        for (int i = 0; i < generator->frameCount; i++)
+            markObj((Obj *)generator->frames[i].closure);
+        break;
+    }
     case OBJ_MAP:
     {
         ObjMap *map = (ObjMap *)object;
         markMap(&map->map);
+        break;
+    }
+    case OBJ_NAMESPACE:
+    {
+        ObjNamespace *ns = (ObjNamespace *)object;
+        markTable(&ns->exports);
+        markTable(&ns->globals);
+        markTable(&ns->constGlobals);
         break;
     }
     case OBJ_LIST:
@@ -320,6 +335,18 @@ static void freeObject(Obj *object)
         FREE(ObjClosure, object);
         break;
     }
+    case OBJ_GENERATOR:
+    {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_GENERATOR\n", (void *)object);
+#endif
+        ObjGenerator *generator = (ObjGenerator *)object;
+        FREE_ARRAY(Value, generator->args, generator->argCount);
+        FREE_ARRAY(Value, generator->stack, generator->stackCapacity);
+        FREE_ARRAY(ObjGeneratorFrame, generator->frames, generator->frameCapacity);
+        FREE(ObjGenerator, object);
+        break;
+    }
     case OBJ_MAP:
     {
 #ifdef DEBUG_LOG_GC
@@ -328,6 +355,18 @@ static void freeObject(Obj *object)
         ObjMap *map = (ObjMap *)object;
         freeMap(&map->map);
         FREE(ObjMap, object);
+        break;
+    }
+    case OBJ_NAMESPACE:
+    {
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_NAMESPACE\n", (void *)object);
+#endif
+        ObjNamespace *ns = (ObjNamespace *)object;
+        freeTable(&ns->exports);
+        freeTable(&ns->globals);
+        freeTable(&ns->constGlobals);
+        FREE(ObjNamespace, object);
         break;
     }
     case OBJ_CLASS:
@@ -403,6 +442,7 @@ static void markRoots()
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
     markObj((Obj *)vm.currentModuleExports);
+    markObj((Obj *)vm.currentLoadingModule);
     markCompilerRoots();
     markObj((Obj *)vm.initStr);
     markObj((Obj *)vm.strDunderStr);
@@ -421,9 +461,17 @@ static void markRoots()
     markObj((Obj *)vm.setStr);
     markObj((Obj *)vm.sizeStr);
     markObj((Obj *)vm.hashStr);
+    markObj((Obj *)vm.iterStr);
+    markObj((Obj *)vm.iterDunderStr);
+    markObj((Obj *)vm.nextStr);
+    markObj((Obj *)vm.nextDunderStr);
     markObj((Obj *)vm.stringClass);
     markObj((Obj *)vm.listClass);
     markObj((Obj *)vm.mapClass);
+    markObj((Obj *)vm.generatorClass);
+    markObj((Obj *)vm.listIteratorClass);
+    markObj((Obj *)vm.stringIteratorClass);
+    markObj((Obj *)vm.mapIteratorClass);
     markObj((Obj *)vm.lastError);
     markObj((Obj *)vm.errorClass);
     markObj((Obj *)vm.baseObj);
@@ -474,7 +522,7 @@ void collectGarbage()
     if (getenv("DOTK_DEBUG_GC") != NULL)
     {
         size_t objCount = 0;
-        size_t cnt_string = 0, cnt_function = 0, cnt_closure = 0, cnt_list = 0, cnt_map = 0, cnt_class = 0, cnt_instance = 0, cnt_upvalue = 0, cnt_foreign = 0, cnt_native = 0, cnt_bound_method = 0, cnt_bound_builtin = 0, cnt_slice = 0, cnt_other = 0;
+        size_t cnt_string = 0, cnt_function = 0, cnt_closure = 0, cnt_list = 0, cnt_map = 0, cnt_namespace = 0, cnt_class = 0, cnt_instance = 0, cnt_upvalue = 0, cnt_foreign = 0, cnt_native = 0, cnt_bound_method = 0, cnt_bound_builtin = 0, cnt_slice = 0, cnt_other = 0;
         for (Obj *o = vm.objects; o != NULL; o = o->next)
         {
             objCount++;
@@ -489,11 +537,17 @@ void collectGarbage()
             case OBJ_CLOSURE:
                 cnt_closure++;
                 break;
+            case OBJ_GENERATOR:
+                cnt_other++;
+                break;
             case OBJ_LIST:
                 cnt_list++;
                 break;
             case OBJ_MAP:
                 cnt_map++;
+                break;
+            case OBJ_NAMESPACE:
+                cnt_namespace++;
                 break;
             case OBJ_CLASS:
                 cnt_class++;
@@ -524,9 +578,9 @@ void collectGarbage()
                 break;
             }
         }
-        fprintf(stderr, "[DOTK_DEBUG_GC] gc begin bytes=%zu objects=%zu strings=%d/%d importCount=%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
+        fprintf(stderr, "[DOTK_DEBUG_GC] gc begin bytes=%zu objects=%zu strings=%d/%d importCount=%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu namespace=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
                 vm.bytesAllocated, objCount, vm.strings.count, vm.strings.capacity, vm.importCount, vm.nextGC,
-                cnt_string, cnt_function, cnt_closure, cnt_list, cnt_map, cnt_class, cnt_instance, cnt_upvalue, cnt_foreign, cnt_native, cnt_bound_method, cnt_bound_builtin, cnt_slice, cnt_other);
+                cnt_string, cnt_function, cnt_closure, cnt_list, cnt_map, cnt_namespace, cnt_class, cnt_instance, cnt_upvalue, cnt_foreign, cnt_native, cnt_bound_method, cnt_bound_builtin, cnt_slice, cnt_other);
     }
     markRoots();
     traceReferences();
@@ -543,7 +597,7 @@ void collectGarbage()
     if (getenv("DOTK_DEBUG_GC") != NULL)
     {
         size_t objCount2 = 0;
-        size_t cnt_string2 = 0, cnt_function2 = 0, cnt_closure2 = 0, cnt_list2 = 0, cnt_map2 = 0, cnt_class2 = 0, cnt_instance2 = 0, cnt_upvalue2 = 0, cnt_foreign2 = 0, cnt_native2 = 0, cnt_bound_method2 = 0, cnt_bound_builtin2 = 0, cnt_slice2 = 0, cnt_other2 = 0;
+        size_t cnt_string2 = 0, cnt_function2 = 0, cnt_closure2 = 0, cnt_list2 = 0, cnt_map2 = 0, cnt_namespace2 = 0, cnt_class2 = 0, cnt_instance2 = 0, cnt_upvalue2 = 0, cnt_foreign2 = 0, cnt_native2 = 0, cnt_bound_method2 = 0, cnt_bound_builtin2 = 0, cnt_slice2 = 0, cnt_other2 = 0;
         for (Obj *o = vm.objects; o != NULL; o = o->next)
         {
             objCount2++;
@@ -558,11 +612,17 @@ void collectGarbage()
             case OBJ_CLOSURE:
                 cnt_closure2++;
                 break;
+            case OBJ_GENERATOR:
+                cnt_other2++;
+                break;
             case OBJ_LIST:
                 cnt_list2++;
                 break;
             case OBJ_MAP:
                 cnt_map2++;
+                break;
+            case OBJ_NAMESPACE:
+                cnt_namespace2++;
                 break;
             case OBJ_CLASS:
                 cnt_class2++;
@@ -593,9 +653,9 @@ void collectGarbage()
                 break;
             }
         }
-        fprintf(stderr, "[DOTK_DEBUG_GC] gc end bytes=%zu objects=%zu strings=%d/%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
+        fprintf(stderr, "[DOTK_DEBUG_GC] gc end bytes=%zu objects=%zu strings=%d/%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu namespace=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
                 vm.bytesAllocated, objCount2, vm.strings.count, vm.strings.capacity, vm.nextGC,
-                cnt_string2, cnt_function2, cnt_closure2, cnt_list2, cnt_map2, cnt_class2, cnt_instance2, cnt_upvalue2, cnt_foreign2, cnt_native2, cnt_bound_method2, cnt_bound_builtin2, cnt_slice2, cnt_other2);
+                cnt_string2, cnt_function2, cnt_closure2, cnt_list2, cnt_map2, cnt_namespace2, cnt_class2, cnt_instance2, cnt_upvalue2, cnt_foreign2, cnt_native2, cnt_bound_method2, cnt_bound_builtin2, cnt_slice2, cnt_other2);
     }
 }
 

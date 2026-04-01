@@ -237,8 +237,11 @@ static TokenType identifierType()
                 return checkKeyword(2, 0, "", TOKEN_IF);
             case 'm':
                 return checkKeyword(2, 4, "port", TOKEN_IMPORT);
+            case 'n':
+                return checkKeyword(2, 0, "", TOKEN_IN);
             }
         }
+        break;
     }
     case 'n':
         return checkKeyword(1, 3, "ull", TOKEN_NIL);
@@ -287,6 +290,8 @@ static TokenType identifierType()
         return checkKeyword(1, 2, "ar", TOKEN_VAR);
     case 'w':
         return checkKeyword(1, 4, "hile", TOKEN_WHILE);
+    case 'y':
+        return checkKeyword(1, 4, "ield", TOKEN_YIELD);
     case 'f':
         if (scanner.current - scanner.start > 1)
         {

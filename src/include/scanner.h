@@ -65,6 +65,7 @@ typedef enum
     TOKEN_FOR,
     TOKEN_FUN,
     TOKEN_IF,
+    TOKEN_IN,
     TOKEN_NIL,
     TOKEN_OR,
     TOKEN_PRINT,
@@ -87,6 +88,7 @@ typedef enum
     TOKEN_BREAK,
     TOKEN_TRY,
     TOKEN_CATCH,
+    TOKEN_YIELD,
 
     TOKEN_ERROR,
     TOKEN_EOF
@@ -145,6 +147,7 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_FOR] = "FOR",
     [TOKEN_FUN] = "FUN",
     [TOKEN_IF] = "IF",
+    [TOKEN_IN] = "IN",
     [TOKEN_NIL] = "NIL",
     [TOKEN_OR] = "OR",
     [TOKEN_PRINT] = "PRINT",
@@ -168,6 +171,7 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_ARROW] = "ARROW",
     [TOKEN_TRY] = "TRY",
     [TOKEN_CATCH] = "CATCH",
+    [TOKEN_YIELD] = "YIELD",
     [TOKEN_EOF] = "EOF"};
 
 typedef struct

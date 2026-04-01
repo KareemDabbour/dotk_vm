@@ -60,6 +60,7 @@ static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
 static void setNativeMethod(Table *table, const char *name, NativeFn fn);
 static Value namedNativeVal(const char *name, NativeFn fn);
 static InterpretResult run(bool isRepl, int runUntilFrame);
+static bool runGeneratorNext(ObjGenerator *generator, Value *out);
 static char *valueToString(Value val, char *buff, int *len);
 static char *valueToStringSized(Value val, char *buff, size_t cap, int *len);
 static ObjString *valueToObjStringDynamic(Value val);
@@ -67,6 +68,9 @@ static uint32_t hashValueDeep(Value value);
 static ObjString *getFunctionParamName(ObjFunction *function, int index);
 static ObjString *getFunctionLocalName(ObjFunction *function, int index);
 static bool gStringifyTruncated = false;
+static bool gYieldTrapActive = false;
+static bool gYieldTrapHit = false;
+static Value gYieldTrapValue = NIL_VAL;
 
 static inline uint32_t hashNumberBits(double number)
 {
@@ -329,6 +333,9 @@ static void debuggerFormatValue(Value v, char *buf, size_t cap)
         break;
     case OBJ_MAP:
         snprintf(buf, cap, "map(size=%d)@%p", AS_MAP(v)->map.count, (void *)AS_MAP(v));
+        break;
+    case OBJ_NAMESPACE:
+        snprintf(buf, cap, "namespace(size=%d)@%p", AS_NAMESPACE(v)->exports.count, (void *)AS_NAMESPACE(v));
         break;
     case OBJ_CLASS:
         snprintf(buf, cap, "%s class", AS_CLASS(v)->name->chars);
@@ -954,12 +961,12 @@ void runtimeError(const char *format, ...)
 
 static bool isBuiltinClass(Value value)
 {
-    return IS_OBJ(value) && (IS_LIST(value) || IS_MAP(value) || IS_STR(value)); //(AS_OBJ(value)->type & (OBJ_MAP | OBJ_STRING | OBJ_LIST)); // IS_BUILTIN(val); //
+    return IS_OBJ(value) && (IS_LIST(value) || IS_MAP(value) || IS_STR(value) || IS_GENERATOR(value));
 }
 
 static bool isBuiltinClazz(ObjClass *clazz)
 {
-    return clazz == vm.listClass || clazz == vm.mapClass || clazz == vm.stringClass;
+    return clazz == vm.listClass || clazz == vm.mapClass || clazz == vm.stringClass || clazz == vm.generatorClass;
 }
 
 ObjClass *getVmClass(Value val)
@@ -970,6 +977,8 @@ ObjClass *getVmClass(Value val)
         return vm.mapClass;
     if (IS_STR(val))
         return vm.stringClass;
+    if (IS_GENERATOR(val))
+        return vm.generatorClass;
     return NULL;
 }
 
@@ -1047,6 +1056,21 @@ static uint32_t hashValueShallow(Value value)
                 if (entry->isUsed)
                 {
                     hash += hashValueShallow(entry->key);
+                    hash += hashValueShallow(entry->value);
+                }
+            }
+            return hash;
+        }
+        case OBJ_NAMESPACE:
+        {
+            uint32_t hash = 0;
+            ObjNamespace *ns = AS_NAMESPACE(value);
+            for (int i = 0; i < ns->exports.capacity; i++)
+            {
+                Entry *entry = &ns->exports.entries[i];
+                if (entry->key != NULL)
+                {
+                    hash += entry->key->hash;
                     hash += hashValueShallow(entry->value);
                 }
             }
@@ -1278,9 +1302,23 @@ static void snapshotGlobals(Table *snapshot)
     tableAddAll(&vm.globals, snapshot);
 }
 
-static ObjMap *collectGlobalDiff(Table *before)
+static void snapshotTable(Table *source, Table *snapshot)
 {
-    ObjMap *exports = newMap();
+    initTable(snapshot);
+    tableAddAll(source, snapshot);
+}
+
+static void restoreTable(Table *target, Table *snapshot)
+{
+    freeTable(target);
+    initTable(target);
+    tableAddAll(snapshot, target);
+    freeTable(snapshot);
+}
+
+static ObjNamespace *collectGlobalDiff(Table *before)
+{
+    ObjNamespace *exports = newNamespace();
     push(OBJ_VAL(exports));
 
     for (int i = 0; i < vm.globals.capacity; i++)
@@ -1291,11 +1329,42 @@ static ObjMap *collectGlobalDiff(Table *before)
 
         Value oldValue;
         if (!tableGet(before, entry->key, &oldValue) || !valuesEqual(oldValue, entry->value))
-            mapSet(&exports->map, OBJ_VAL(entry->key), entry->value);
+        {
+            tableSet(&exports->exports, entry->key, entry->value);
+
+            Value isConst;
+            if (tableGet(&vm.constGlobals, entry->key, &isConst))
+                tableSet(&exports->constGlobals, entry->key, BOOL_VAL(true));
+        }
     }
 
     pop();
     return exports;
+}
+
+static void exportAllModuleGlobals(ObjNamespace *moduleNamespace)
+{
+    for (int i = 0; i < moduleNamespace->globals.capacity; i++)
+    {
+        Entry *entry = &moduleNamespace->globals.entries[i];
+        if (entry->key == NULL)
+            continue;
+        tableSet(&moduleNamespace->exports, entry->key, entry->value);
+    }
+}
+
+static inline Table *frameGlobalsTable(CallFrame *frame)
+{
+    if (frame != NULL && frame->closure != NULL && frame->closure->moduleNamespace != NULL)
+        return &frame->closure->moduleNamespace->globals;
+    return &vm.globals;
+}
+
+static inline Table *frameConstGlobalsTable(CallFrame *frame)
+{
+    if (frame != NULL && frame->closure != NULL && frame->closure->moduleNamespace != NULL)
+        return &frame->closure->moduleNamespace->constGlobals;
+    return &vm.constGlobals;
 }
 
 static size_t appendChar(char *buff, size_t cap, size_t index, char ch)
@@ -1443,6 +1512,11 @@ static char *mapToString(Map *map, char *buff, size_t cap, int *len)
 static Value clockNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     return NUM_VAL((double)clock() / CLOCKS_PER_SEC);
+}
+
+NATIVE_FN(timeNative)
+{
+    return NUM_VAL((double)time(NULL));
 }
 
 static Value fOpenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2523,6 +2597,9 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
         case OBJ_MAP:
             type = "map";
             break;
+        case OBJ_NAMESPACE:
+            type = "namespace";
+            break;
         case OBJ_CLASS:
             type = "class";
             break;
@@ -2759,6 +2836,12 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             ObjMap *map = AS_MAP(val);
             return mapToString(&map->map, buff, cap, len);
         }
+        case OBJ_NAMESPACE:
+        {
+            index = appendLiteral(buff, cap, 0, "<namespace>");
+            *len = (int)index;
+            return buff;
+        }
         case OBJ_FOREIGN:
         {
             ObjForeign *obj = AS_FOREIGN(val);
@@ -2874,6 +2957,18 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
                 }
                 index = appendChar(buff, cap, index, ')');
             }
+            index = appendChar(buff, cap, index, '>');
+            *len = (int)index;
+            return buff;
+        }
+        case OBJ_GENERATOR:
+        {
+            ObjGenerator *generator = AS_GENERATOR(val);
+            index = appendLiteral(buff, cap, 0, "<generator ");
+            if (generator->closure != NULL && generator->closure->function != NULL && generator->closure->function->name != NULL)
+                index = appendLiteral(buff, cap, index, generator->closure->function->name->chars);
+            else
+                index = appendLiteral(buff, cap, index, "<anonymous>");
             index = appendChar(buff, cap, index, '>');
             *len = (int)index;
             return buff;
@@ -3134,6 +3229,33 @@ NATIVE_FN(boolCastNative)
     return NIL_VAL;
 }
 
+static ObjList *copyList(ObjList *list)
+{
+    ObjList *copy = newList();
+    push(OBJ_VAL(copy));
+    for (int i = 0; i < list->count; i++)
+    {
+        Value item = list->items[i];
+        if (IS_LIST(item) && AS_LIST(item) == list)
+        {
+            appendToList(copy, OBJ_VAL(copy));
+        }
+        else if (IS_LIST(item))
+        {
+            ObjList *nestedCopy = copyList(AS_LIST(item));
+            push(OBJ_VAL(nestedCopy));
+            appendToList(copy, OBJ_VAL(nestedCopy));
+            pop();
+        }
+        else
+        {
+            appendToList(copy, item);
+        }
+    }
+    pop();
+    return copy;
+}
+
 static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 1)
@@ -3143,7 +3265,7 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
         return NIL_VAL;
     }
     if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_LIST)
-        return argv[0];
+        return OBJ_VAL(copyList(AS_LIST(argv[0]))); // I want to copy the list
     if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
     {
         ObjList *list = newList();
@@ -3967,6 +4089,10 @@ void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function)
         canonical = vm.sizeStr;
     else if (strcmp(name, "__hash__") == 0)
         canonical = vm.hashStr;
+    else if (strcmp(name, "__iter__") == 0)
+        canonical = vm.iterStr;
+    else if (strcmp(name, "__next__") == 0)
+        canonical = vm.nextStr;
 
     if (canonical != methodName)
         tableSet(&clazz->methods, canonical, method);
@@ -4033,6 +4159,11 @@ static bool vmApiMapSet(Value map, Value key, Value value)
     return true;
 }
 
+static Value vmApiMakeForeign(ForeignType type, void *ptr, bool ownsPtr)
+{
+    return OBJ_VAL(newForeignObj(type, ptr, ownsPtr));
+}
+
 static bool loadDynamicModulePath(const char *path, bool reportError)
 {
     void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -4060,6 +4191,7 @@ static bool loadDynamicModulePath(const char *path, bool reportError)
             .listAppend = vmApiListAppend,
             .makeMap = vmApiMakeMap,
             .mapSet = vmApiMapSet,
+            .makeForeign = vmApiMakeForeign,
             .pushValue = push,
             .popValue = pop,
             .raiseError = runtimeError,
@@ -4659,7 +4791,22 @@ static bool callValue(Value callee, int argC)
             return call(AS_CLOSURE(initMethod), argC);
         }
         case OBJ_CLOSURE:
-            return callClosureWithArgs(AS_CLOSURE(callee), argC, 0);
+        {
+            ObjClosure *closure = AS_CLOSURE(callee);
+            if (closure->function->isGenerator)
+            {
+                int normalizedArgCount = 0;
+                if (!normalizeClosureArgsOnStack(closure, argC, 0, &normalizedArgCount))
+                    return false;
+
+                Value *args = vm.stackTop - normalizedArgCount;
+                ObjGenerator *generator = newGenerator(closure, args, normalizedArgCount);
+                vm.stackTop -= normalizedArgCount + 1;
+                push(OBJ_VAL(generator));
+                return true;
+            }
+            return callClosureWithArgs(closure, argC, 0);
+        }
         default:
             break;
         }
@@ -4748,7 +4895,22 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
             return call(AS_CLOSURE(initMethod), foreignArgCount);
         }
         case OBJ_CLOSURE:
-            return callClosureWithArgs(AS_CLOSURE(callee), positionalCount, keywordCount);
+        {
+            ObjClosure *closure = AS_CLOSURE(callee);
+            if (closure->function->isGenerator)
+            {
+                int normalizedArgCount = 0;
+                if (!normalizeClosureArgsOnStack(closure, positionalCount, keywordCount, &normalizedArgCount))
+                    return false;
+
+                Value *args = vm.stackTop - normalizedArgCount;
+                ObjGenerator *generator = newGenerator(closure, args, normalizedArgCount);
+                vm.stackTop -= normalizedArgCount + 1;
+                push(OBJ_VAL(generator));
+                return true;
+            }
+            return callClosureWithArgs(closure, positionalCount, keywordCount);
+        }
         default:
             break;
         }
@@ -4788,6 +4950,18 @@ static bool invokeFromClassKw(ObjClass *klass, ObjString *name, int positionalCo
 bool invoke(ObjString *name, int argc)
 {
     Value receiver = peek(argc);
+    if (IS_NAMESPACE(receiver))
+    {
+        ObjNamespace *ns = AS_NAMESPACE(receiver);
+        Value method;
+        if (!tableGet(&ns->exports, name, &method))
+        {
+            runtimeError("Undefined export '%s'.", name->chars);
+            return false;
+        }
+        vm.stackTop[-argc - 1] = method;
+        return callValue(method, argc);
+    }
 
     if (IS_FOREIGN(receiver))
     {
@@ -4832,6 +5006,18 @@ static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
 {
     int rawArgCount = positionalCount + (keywordCount * 2);
     Value receiver = peek(rawArgCount);
+    if (IS_NAMESPACE(receiver))
+    {
+        ObjNamespace *ns = AS_NAMESPACE(receiver);
+        Value method;
+        if (!tableGet(&ns->exports, name, &method))
+        {
+            runtimeError("Undefined export '%s'.", name->chars);
+            return false;
+        }
+        vm.stackTop[-rawArgCount - 1] = method;
+        return callValueKw(method, positionalCount, keywordCount);
+    }
 
     if (IS_FOREIGN(receiver))
     {
@@ -4927,6 +5113,136 @@ static void closeUpvalues(Value *last)
     }
 }
 
+static bool saveGeneratorState(ObjGenerator *generator, int baseFrameIndex, Value *baseSlots)
+{
+    closeUpvalues(baseSlots);
+
+    int stackCount = (int)(vm.stackTop - baseSlots);
+    if (stackCount > generator->stackCapacity)
+    {
+        int oldCapacity = generator->stackCapacity;
+        generator->stackCapacity = stackCount;
+        generator->stack = GROW_ARRAY(Value, generator->stack, oldCapacity, generator->stackCapacity);
+    }
+    for (int i = 0; i < stackCount; i++)
+        generator->stack[i] = baseSlots[i];
+    generator->stackCount = stackCount;
+
+    int frameCount = vm.frameCount - baseFrameIndex;
+    if (frameCount > generator->frameCapacity)
+    {
+        int oldCapacity = generator->frameCapacity;
+        generator->frameCapacity = frameCount;
+        generator->frames = GROW_ARRAY(ObjGeneratorFrame, generator->frames, oldCapacity, generator->frameCapacity);
+    }
+
+    for (int i = 0; i < frameCount; i++)
+    {
+        CallFrame *frame = &vm.frames[baseFrameIndex + i];
+        generator->frames[i].closure = frame->closure;
+        generator->frames[i].ipOffset = (int)(frame->ip - frame->closure->function->chunk.code);
+        generator->frames[i].slotOffset = (int)(frame->slots - baseSlots);
+        generator->frames[i].startTimeNs = frame->startTimeNs;
+    }
+    generator->frameCount = frameCount;
+
+    vm.frameCount = baseFrameIndex;
+    vm.stackTop = baseSlots;
+    return true;
+}
+
+static bool restoreGeneratorState(ObjGenerator *generator, int baseFrameIndex, Value *baseSlots)
+{
+    if (generator->frameCount <= 0 || generator->stackCount <= 0)
+        return false;
+
+    if (baseSlots + generator->stackCount >= vm.stack + STACK_MAX)
+    {
+        runtimeError("Stack overflow while restoring generator state.");
+        return false;
+    }
+    if (baseFrameIndex + generator->frameCount >= FRAMES_MAX)
+    {
+        runtimeError("Call frame overflow while restoring generator state.");
+        return false;
+    }
+
+    for (int i = 0; i < generator->stackCount; i++)
+        baseSlots[i] = generator->stack[i];
+    vm.stackTop = baseSlots + generator->stackCount;
+
+    for (int i = 0; i < generator->frameCount; i++)
+    {
+        ObjGeneratorFrame *saved = &generator->frames[i];
+        CallFrame *frame = &vm.frames[baseFrameIndex + i];
+        frame->closure = saved->closure;
+        frame->ip = saved->closure->function->chunk.code + saved->ipOffset;
+        frame->slots = baseSlots + saved->slotOffset;
+        frame->startTimeNs = saved->startTimeNs;
+    }
+    vm.frameCount = baseFrameIndex + generator->frameCount;
+    return true;
+}
+
+static bool runGeneratorNext(ObjGenerator *generator, Value *out)
+{
+    if (generator->finished)
+    {
+        *out = NIL_VAL;
+        return true;
+    }
+
+    int baseFrameIndex = vm.frameCount;
+    Value *baseSlots = vm.stackTop;
+
+    if (!generator->started)
+    {
+        push(OBJ_VAL(generator->closure));
+        for (int i = 0; i < generator->argCount; i++)
+            push(generator->args[i]);
+
+        if (!call(generator->closure, generator->argCount))
+        {
+            vm.stackTop = baseSlots;
+            return false;
+        }
+        generator->started = true;
+    }
+    else
+    {
+        if (!restoreGeneratorState(generator, baseFrameIndex, baseSlots))
+        {
+            runtimeError("Generator state is invalid.");
+            return false;
+        }
+    }
+
+    gYieldTrapActive = true;
+    gYieldTrapHit = false;
+    InterpretResult result = run(false, baseFrameIndex + 1);
+    gYieldTrapActive = false;
+
+    if (result == INTERPRET_RUNTIME_ERROR)
+    {
+        generator->finished = true;
+        vm.frameCount = baseFrameIndex;
+        vm.stackTop = baseSlots;
+        return false;
+    }
+
+    if (gYieldTrapHit)
+    {
+        *out = gYieldTrapValue;
+        return saveGeneratorState(generator, baseFrameIndex, baseSlots);
+    }
+
+    generator->finished = true;
+    vm.frameCount = baseFrameIndex;
+    vm.stackTop = baseSlots;
+    *out = NIL_VAL;
+    return true;
+}
+
 static bool defineMethod(ObjString *name)
 {
     Value method = peek(0);
@@ -4950,6 +5266,10 @@ static bool defineMethod(ObjString *name)
         canonical = vm.sizeStr;
     else if (name == vm.hashDunderStr || strcmp(name->chars, "__hash__") == 0)
         canonical = vm.hashStr;
+    else if (name == vm.iterDunderStr || strcmp(name->chars, "__iter__") == 0)
+        canonical = vm.iterStr;
+    else if (name == vm.nextDunderStr || strcmp(name->chars, "__next__") == 0)
+        canonical = vm.nextStr;
 
     if (canonical != name)
         tableSet(&klass->methods, canonical, method);
@@ -6293,6 +6613,290 @@ static Value strHashNative(int argc, Value *argv, bool *hasError, bool *pushedVa
 
 //////////////////////// List CLASS NATIVE METHODS ////////////////////////
 
+NATIVE_FN(generatorIterNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_iter_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_GENERATOR(peek(argc)))
+    {
+        runtimeError("Expected a generator to be caller but got '%s' for _iter_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return peek(argc);
+}
+
+NATIVE_FN(generatorNextNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_next_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_GENERATOR(peek(argc)))
+    {
+        runtimeError("Expected a generator to be caller but got '%s' for _next_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value nextValue = NIL_VAL;
+    if (!runGeneratorNext(AS_GENERATOR(peek(argc)), &nextValue))
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return nextValue;
+}
+
+NATIVE_FN(listIterNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_iter_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_LIST(peek(argc)))
+    {
+        runtimeError("Expected a list to be caller but got '%s' for _iter_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (vm.listIteratorClass == NULL)
+    {
+        runtimeError("List iterator class is not initialized.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value receiver = peek(argc);
+    ObjInstance *iter = newInstance(vm.listIteratorClass);
+    push(OBJ_VAL(iter));
+    tableSet(&iter->fields, copyString("list", 4), receiver);
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(0));
+    pop();
+    return OBJ_VAL(iter);
+}
+
+NATIVE_FN(listIteratorNextNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_next_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected a ListIterator to be caller but got '%s' for _next_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjInstance *iter = AS_INSTANCE(peek(argc));
+    if (iter->klass != vm.listIteratorClass)
+    {
+        runtimeError("Expected ListIterator for _next_(), got '%s'", iter->klass->name->chars);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value listVal;
+    Value indexVal;
+    if (!tableGet(&iter->fields, copyString("list", 4), &listVal) || !IS_LIST(listVal))
+    {
+        runtimeError("ListIterator is missing list state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!tableGet(&iter->fields, copyString("index", 5), &indexVal) || !IS_NUM(indexVal))
+    {
+        runtimeError("ListIterator is missing index state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjList *list = AS_LIST(listVal);
+    int index = (int)AS_NUM(indexVal);
+    if (index < 0 || index >= list->count)
+        return NIL_VAL;
+
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(index + 1));
+    return list->items[index];
+}
+
+NATIVE_FN(stringIterNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_iter_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_STR(peek(argc)))
+    {
+        runtimeError("Expected a string to be caller but got '%s' for _iter_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (vm.stringIteratorClass == NULL)
+    {
+        runtimeError("String iterator class is not initialized.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value receiver = peek(argc);
+    ObjInstance *iter = newInstance(vm.stringIteratorClass);
+    push(OBJ_VAL(iter));
+    tableSet(&iter->fields, copyString("str", 3), receiver);
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(0));
+    pop();
+    return OBJ_VAL(iter);
+}
+
+NATIVE_FN(stringIteratorNextNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_next_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected a StringIterator to be caller but got '%s' for _next_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjInstance *iter = AS_INSTANCE(peek(argc));
+    if (iter->klass != vm.stringIteratorClass)
+    {
+        runtimeError("Expected StringIterator for _next_(), got '%s'", iter->klass->name->chars);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value strVal;
+    Value indexVal;
+    if (!tableGet(&iter->fields, copyString("str", 3), &strVal) || !IS_STR(strVal))
+    {
+        runtimeError("StringIterator is missing string state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!tableGet(&iter->fields, copyString("index", 5), &indexVal) || !IS_NUM(indexVal))
+    {
+        runtimeError("StringIterator is missing index state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjString *str = AS_STR(strVal);
+    int index = (int)AS_NUM(indexVal);
+    if (index < 0 || index >= str->len)
+        return NIL_VAL;
+
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(index + 1));
+    return OBJ_VAL(copyString(str->chars + index, 1));
+}
+
+NATIVE_FN(mapIterNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_iter_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_MAP(peek(argc)))
+    {
+        runtimeError("Expected a map to be caller but got '%s' for _iter_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (vm.mapIteratorClass == NULL)
+    {
+        runtimeError("Map iterator class is not initialized.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value receiver = peek(argc);
+    ObjInstance *iter = newInstance(vm.mapIteratorClass);
+    push(OBJ_VAL(iter));
+    tableSet(&iter->fields, copyString("map", 3), receiver);
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(0));
+    pop();
+    return OBJ_VAL(iter);
+}
+
+NATIVE_FN(mapIteratorNextNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("'_next_()' expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_INSTANCE(peek(argc)))
+    {
+        runtimeError("Expected a MapIterator to be caller but got '%s' for _next_()", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjInstance *iter = AS_INSTANCE(peek(argc));
+    if (iter->klass != vm.mapIteratorClass)
+    {
+        runtimeError("Expected MapIterator for _next_(), got '%s'", iter->klass->name->chars);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    Value mapVal;
+    Value indexVal;
+    if (!tableGet(&iter->fields, copyString("map", 3), &mapVal) || !IS_MAP(mapVal))
+    {
+        runtimeError("MapIterator is missing map state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!tableGet(&iter->fields, copyString("index", 5), &indexVal) || !IS_NUM(indexVal))
+    {
+        runtimeError("MapIterator is missing index state.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjMap *map = AS_MAP(mapVal);
+    int index = (int)AS_NUM(indexVal);
+    while (index < map->map.capacity && !map->map.entries[index].isUsed)
+        index++;
+
+    if (index >= map->map.capacity)
+    {
+        tableSet(&iter->fields, copyString("index", 5), NUM_VAL(index));
+        return NIL_VAL;
+    }
+
+    tableSet(&iter->fields, copyString("index", 5), NUM_VAL(index + 1));
+
+    ObjInstance *entry = newInstance(vm.baseObj);
+    push(OBJ_VAL(entry));
+    tableSet(&entry->fields, copyString("key", 3), map->map.entries[index].key);
+    tableSet(&entry->fields, copyString("value", 5), map->map.entries[index].value);
+    return pop();
+}
+
 NATIVE_FN(initListNative)
 {
     if (argc == 0)
@@ -6733,9 +7337,13 @@ static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     }
     ObjInstance *instance = AS_INSTANCE(peek(argc));
     ObjMap *map = newMap();
-    map->map.capacity = GROW_CAPACITY(0);
+    push(OBJ_VAL(map));
+    // push(OBJ_VAL(instance));
+    int capacity = GROW_CAPACITY(0);
+    MapEntry *entries = ALLOCATE(MapEntry, capacity);
+    map->map.capacity = capacity;
     map->map.count = 0;
-    map->map.entries = ALLOCATE(MapEntry, map->map.capacity);
+    map->map.entries = entries;
     for (int i = 0; i < map->map.capacity; i++)
     {
         map->map.entries[i].key = NIL_VAL;
@@ -6745,6 +7353,7 @@ static Value mapInitNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         map->map.entries[i].isTombstone = false;
     }
     // tableSet(&instance->fields, copyString("entries", 8), OBJ_VAL(map));
+    pop();
     return OBJ_VAL(map);
 }
 
@@ -8076,6 +8685,7 @@ static void initCoreModule()
     defineNative("offset", offsetNative);
 
     defineNative("clock", clockNative);
+    defineNative("time", timeNative);
     defineNative("input", inputNative);
     defineNative("getc", getcNative);
     defineNative("kbhit", kbhitNative);
@@ -8090,10 +8700,7 @@ static void initCoreModule()
     defineNative("str", strCastNative);
     defineNative("hash", hashNative);
     defineNative("join", joinNative);
-    defineNativeWithParams("round", roundNative, (NativeParamDef[]){
-        {"value", NIL_VAL, false},
-        {"digits", NUM_VAL(0), true}
-    }, 2);
+    defineNativeWithParams("round", roundNative, (NativeParamDef[]){{"value", NIL_VAL, false}, {"digits", NUM_VAL(0), true}}, 2);
     defineNative("int", intCastNative);
     defineNative("float", floatCastNative);
     defineNative("bool", boolCastNative);
@@ -8211,6 +8818,7 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&stringClass->methods, "join", join2Native);
     setNativeMethod(&stringClass->methods, "format", formatNative);
     setNativeMethod(&stringClass->methods, "f", formatNative);
+    setNativeMethod(&stringClass->methods, "_iter_", stringIterNative);
 
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
@@ -8228,6 +8836,7 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&listClass->methods, "foreach", foreachNative);
     setNativeMethod(&listClass->methods, "map", mapNative);
     setNativeMethod(&listClass->methods, "filter", removeIfNative);
+    setNativeMethod(&listClass->methods, "_iter_", listIterNative);
     tableSet(&listClass->methods, copyString("init", 4), listClass->initializer);
 
     vm.mapClass = NULL;
@@ -8255,6 +8864,28 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&mapClass->methods, "compute", mapComputeNative);
     setNativeMethod(&mapClass->methods, "computeIfAbsent", mapComputeIfAbsentNative);
     setNativeMethod(&mapClass->methods, "computeIfPresent", mapComputeIfPresentNative);
+    setNativeMethod(&mapClass->methods, "_iter_", mapIterNative);
+
+    vm.generatorClass = NULL;
+    ObjClass *generatorClass = primativeClass("Generator");
+    vm.generatorClass = generatorClass;
+    setNativeMethod(&generatorClass->methods, "_iter_", generatorIterNative);
+    setNativeMethod(&generatorClass->methods, "_next_", generatorNextNative);
+
+    vm.listIteratorClass = NULL;
+    ObjClass *listIteratorClass = primativeClass("ListIterator");
+    vm.listIteratorClass = listIteratorClass;
+    setNativeMethod(&listIteratorClass->methods, "_next_", listIteratorNextNative);
+
+    vm.stringIteratorClass = NULL;
+    ObjClass *stringIteratorClass = primativeClass("StringIterator");
+    vm.stringIteratorClass = stringIteratorClass;
+    setNativeMethod(&stringIteratorClass->methods, "_next_", stringIteratorNextNative);
+
+    vm.mapIteratorClass = NULL;
+    ObjClass *mapIteratorClass = primativeClass("MapIterator");
+    vm.mapIteratorClass = mapIteratorClass;
+    setNativeMethod(&mapIteratorClass->methods, "_next_", mapIteratorNextNative);
 
     ObjClass *sb = primativeClass("StringBuilder");
     sb->initializer = namedNativeVal("init", sbInitNative);
@@ -8349,6 +8980,7 @@ void initVM(bool printBytecode, bool printExecStack)
     initTable(&vm.imports);
     initTable(&vm.importFuncs);
     vm.currentModuleExports = NULL;
+    vm.currentLoadingModule = NULL;
     vm.currentModuleHasExplicitExports = false;
     gDebuggerEnabled = false;
     gDebuggerStepMode = false;
@@ -8407,27 +9039,55 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.hashDunderStr = NULL;
     vm.hashDunderStr = copyString("__hash__", 8);
 
+    vm.iterStr = NULL;
+    vm.iterStr = copyString("_iter_", 6);
+
+    vm.iterDunderStr = NULL;
+    vm.iterDunderStr = copyString("__iter__", 8);
+
+    vm.nextStr = NULL;
+    vm.nextStr = copyString("_next_", 6);
+
+    vm.nextDunderStr = NULL;
+    vm.nextDunderStr = copyString("__next__", 8);
+
     vm.clazzStr = NULL;
     vm.clazzStr = copyString("clazz", 5);
 
     vm.lastError = NULL;
     vm.isInTryCatch = false;
     vm.isRepl = false;
+    vm.errorClass = NULL;
+    vm.stringClass = NULL;
+    vm.listClass = NULL;
+    vm.mapClass = NULL;
+    vm.generatorClass = NULL;
+    vm.listIteratorClass = NULL;
+    vm.stringIteratorClass = NULL;
+    vm.mapIteratorClass = NULL;
+    vm.baseObj = NULL;
 
     Table preloadBefore;
     snapshotGlobals(&preloadBefore);
     importBuiltinModule(copyString("primitives", 10));
-    ObjMap *primitiveExports = collectGlobalDiff(&preloadBefore);
+    ObjNamespace *primitiveExports = collectGlobalDiff(&preloadBefore);
     freeTable(&preloadBefore);
     tableSet(&vm.imports, copyString("primitives", 10), OBJ_VAL(primitiveExports));
     tableSet(&vm.imports, copyString("primitives.k", 12), OBJ_VAL(primitiveExports));
 
     snapshotGlobals(&preloadBefore);
     importBuiltinModule(copyString("core", 4));
-    ObjMap *coreExports = collectGlobalDiff(&preloadBefore);
+    ObjNamespace *coreExports = collectGlobalDiff(&preloadBefore);
     freeTable(&preloadBefore);
     tableSet(&vm.imports, copyString("core", 4), OBJ_VAL(coreExports));
     tableSet(&vm.imports, copyString("core.k", 6), OBJ_VAL(coreExports));
+
+    snapshotGlobals(&preloadBefore);
+    importBuiltinModule(copyString("file", 4));
+    ObjNamespace *fileExports = collectGlobalDiff(&preloadBefore);
+    freeTable(&preloadBefore);
+    tableSet(&vm.imports, copyString("file", 4), OBJ_VAL(fileExports));
+    tableSet(&vm.imports, copyString("file.k", 6), OBJ_VAL(fileExports));
 }
 
 void vmEnableDebugger(bool enabled)
@@ -8452,9 +9112,9 @@ void freeVM()
     freeTable(&vm.strings);
     freeTable(&vm.imports);
     freeTable(&vm.importFuncs);
-    for (int i = 0; i < vm.importCount; i++)
-        free(vm.importSources[i]);
-    FREE_ARRAY(char, vm.importSources, vm.importCount);
+    // for (int i = 0; i < vm.importCount; i++)
+    //     free(vm.importSources[i]);
+    FREE_ARRAY(char *, vm.importSources, vm.importCount);
     vm.initStr = NULL;
     vm.toStr = NULL;
     vm.strDunderStr = NULL;
@@ -8469,6 +9129,10 @@ void freeVM()
     vm.lenDunderStr = NULL;
     vm.hashStr = NULL;
     vm.hashDunderStr = NULL;
+    vm.iterStr = NULL;
+    vm.iterDunderStr = NULL;
+    vm.nextStr = NULL;
+    vm.nextDunderStr = NULL;
     vm.ltStr = NULL;
     vm.ltDunderStr = NULL;
     vm.gtStr = NULL;
@@ -8477,6 +9141,10 @@ void freeVM()
     vm.stringClass = NULL;
     vm.listClass = NULL;
     vm.mapClass = NULL;
+    vm.generatorClass = NULL;
+    vm.listIteratorClass = NULL;
+    vm.stringIteratorClass = NULL;
+    vm.mapIteratorClass = NULL;
     vm.baseObj = NULL;
     /* dump profiler if enabled */
     if (vm.profilerEnabled)
@@ -9077,6 +9745,105 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(itemVal);
             break;
         }
+        case OP_STORE_SUBSCR_ADD:
+        case OP_STORE_SUBSCR_SUB:
+        case OP_STORE_SUBSCR_MULT:
+        case OP_STORE_SUBSCR_DIV:
+        case OP_STORE_SUBSCR_INT_DIV:
+        {
+            Value rhsVal = pop();
+            Value indexVal = pop();
+            Value listVal = pop();
+
+            if (!IS_LIST(listVal))
+            {
+                runtimeError("Compound subscript assignment is currently supported only for lists.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            ObjList *list = AS_LIST(listVal);
+
+            if (!IS_NUM(indexVal))
+            {
+                runtimeError("Expected number as list index but got '%s'", valueTypeName(indexVal));
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            int index = AS_NUM(indexVal);
+
+            if (!isValidListIndex(list, index))
+            {
+                runtimeError("List index out of range. List has size %d. However, %d was provided", list->count, index);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            if (index < 0)
+                index -= 1;
+
+            int listIndex = getValidListIndex(list, index);
+            Value currentVal = list->items[listIndex];
+            Value resultVal = NIL_VAL;
+
+            switch (inst)
+            {
+            case OP_STORE_SUBSCR_ADD:
+                if (IS_NUM(currentVal) && IS_NUM(rhsVal))
+                {
+                    resultVal = NUM_VAL(AS_NUM(currentVal) + AS_NUM(rhsVal));
+                }
+                else if (IS_STR(currentVal) && IS_STR(rhsVal))
+                {
+                    ObjString *a = AS_STR(currentVal);
+                    ObjString *b = AS_STR(rhsVal);
+                    resultVal = OBJ_VAL(addTwoStrings(a->chars, b->chars, a->len, b->len));
+                }
+                else
+                {
+                    runtimeError("Operands must be two numbers or two strings.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            case OP_STORE_SUBSCR_SUB:
+                if (!IS_NUM(currentVal) || !IS_NUM(rhsVal))
+                {
+                    runtimeError("Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                resultVal = NUM_VAL(AS_NUM(currentVal) - AS_NUM(rhsVal));
+                break;
+            case OP_STORE_SUBSCR_MULT:
+                if (!IS_NUM(currentVal) || !IS_NUM(rhsVal))
+                {
+                    runtimeError("Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                resultVal = NUM_VAL(AS_NUM(currentVal) * AS_NUM(rhsVal));
+                break;
+            case OP_STORE_SUBSCR_DIV:
+                if (!IS_NUM(currentVal) || !IS_NUM(rhsVal))
+                {
+                    runtimeError("Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                resultVal = NUM_VAL(AS_NUM(currentVal) / AS_NUM(rhsVal));
+                break;
+            case OP_STORE_SUBSCR_INT_DIV:
+                if (!IS_NUM(currentVal) || !IS_NUM(rhsVal))
+                {
+                    runtimeError("Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                resultVal = NUM_VAL((long)AS_NUM(currentVal) / (long)AS_NUM(rhsVal));
+                break;
+            default:
+                runtimeError("Unsupported compound subscript assignment opcode.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            storeToList(list, listIndex, resultVal);
+            push(resultVal);
+            break;
+        }
         case OP_INHERIT:
         {
             Value superclass = peek(1);
@@ -9118,30 +9885,41 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_DEF_GLOBAL:
         {
+            Table *globalsTable = frameGlobalsTable(frame);
+            Table *constGlobalsTable = frameConstGlobalsTable(frame);
             ObjString *name = READ_STRING();
             Value _isConst;
-            if (tableGet(&vm.constGlobals, name, &_isConst))
+            if (tableGet(constGlobalsTable, name, &_isConst))
             {
+                Value existing;
+                if (tableGet(globalsTable, name, &existing) && valuesEqual(existing, peek(0)))
+                {
+                    pop();
+                    break;
+                }
+
                 runtimeError("Cannot redefine constant '%s'.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            tableSet(&vm.globals, name, peek(0));
+            tableSet(globalsTable, name, peek(0));
             pop();
             break;
         }
         case OP_DEF_CONST_GLOBAL:
         {
+            Table *globalsTable = frameGlobalsTable(frame);
+            Table *constGlobalsTable = frameConstGlobalsTable(frame);
             ObjString *name = READ_STRING();
             Value existing;
-            if (tableGet(&vm.globals, name, &existing))
+            if (tableGet(globalsTable, name, &existing))
             {
                 runtimeError("Global '%s' is already defined.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            tableSet(&vm.globals, name, peek(0));
-            tableSet(&vm.constGlobals, name, BOOL_VAL(true));
+            tableSet(globalsTable, name, peek(0));
+            tableSet(constGlobalsTable, name, BOOL_VAL(true));
             pop();
             break;
         }
@@ -9180,7 +9958,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             ObjString *name = READ_STRING();
 
             Value value;
-            if (!tableGet(&vm.globals, name, &value))
+            if (!tableGet(frameGlobalsTable(frame), name, &value) && !tableGet(&vm.globals, name, &value))
             {
                 runtimeError("Undefined variable '%s'.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
@@ -9190,21 +9968,35 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }
         case OP_SET_GLOBAL:
         {
+            Table *globalsTable = frameGlobalsTable(frame);
+            Table *constGlobalsTable = frameConstGlobalsTable(frame);
             ObjString *name = READ_STRING();
             Value _isConst;
-            if (tableGet(&vm.constGlobals, name, &_isConst))
+            if (tableGet(constGlobalsTable, name, &_isConst))
             {
                 runtimeError("Cannot assign to constant '%s'.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            tableSet(&vm.globals, name, peek(0));
+            tableSet(globalsTable, name, peek(0));
             break;
         }
         case OP_GET_PROPERTY:
         {
             ObjClass *klass;
             ObjString *name = READ_STRING();
+            if (IS_NAMESPACE(peek(0)))
+            {
+                Value value;
+                if (!tableGet(&AS_NAMESPACE(peek(0))->exports, name, &value))
+                {
+                    runtimeError("Cannot find export %s in namespace.", name->chars);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                pop();
+                push(value);
+                break;
+            }
             if (!IS_INSTANCE(peek(0)) && !IS_CLASS(peek(0)))
             {
                 if (!isBuiltinClass(peek(0)))
@@ -9613,6 +10405,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             ObjFunction *function = AS_FUN(READ_CONSTANT());
 
             ObjClosure *closure = newClosure(function);
+            closure->moduleNamespace = frame->closure->moduleNamespace;
             push(OBJ_VAL(closure));
             for (int i = 0; i < closure->upvalueCount; i++)
             {
@@ -9624,6 +10417,19 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     closure->upvalues[i] = frame->closure->upvalues[index];
             }
             break;
+        }
+        case OP_YIELD:
+        {
+            Value yielded = pop();
+            if (!gYieldTrapActive)
+            {
+                runtimeError("'yield' can only execute in generator context.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            gYieldTrapHit = true;
+            gYieldTrapValue = yielded;
+            return INTERPRET_OK;
         }
         case OP_RETURN:
         {
@@ -9756,13 +10562,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
 
             Value value;
-            if (!tableGet(&vm.globals, name, &value))
+            if (!tableGet(frameGlobalsTable(frame), name, &value))
             {
                 runtimeError("Cannot export undefined symbol '%s'.", name->chars);
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            mapSet(&vm.currentModuleExports->map, OBJ_VAL(name), value);
+            tableSet(&vm.currentModuleExports->exports, name, value);
             vm.currentModuleHasExplicitExports = true;
             break;
         }
@@ -9773,7 +10579,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             {
                 ObjString *filePath = AS_STR(file);
                 Value importedValue;
-                if (tableGet(&vm.imports, filePath, &importedValue) && IS_MAP(importedValue))
+                if (tableGet(&vm.imports, filePath, &importedValue) && IS_NAMESPACE(importedValue))
                 {
                     push(importedValue);
                     break;
@@ -9784,7 +10590,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     filePath->chars[filePath->len - 1] == 'k')
                 {
                     ObjString *trimmed = copyString(filePath->chars, filePath->len - 2);
-                    if (tableGet(&vm.imports, trimmed, &importedValue) && IS_MAP(importedValue))
+                    if (tableGet(&vm.imports, trimmed, &importedValue) && IS_NAMESPACE(importedValue))
                     {
                         tableSet(&vm.imports, filePath, importedValue);
                         push(importedValue);
@@ -9800,7 +10606,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     withExt[filePath->len + 1] = 'k';
                     withExt[filePath->len + 2] = '\0';
                     ObjString *withExtKey = takeString(withExt, withExtLen);
-                    if (tableGet(&vm.imports, withExtKey, &importedValue) && IS_MAP(importedValue))
+                    if (tableGet(&vm.imports, withExtKey, &importedValue) && IS_NAMESPACE(importedValue))
                     {
                         tableSet(&vm.imports, filePath, importedValue);
                         push(importedValue);
@@ -9809,20 +10615,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
 
                 Table globalsBefore;
-                snapshotGlobals(&globalsBefore);
+                Table constGlobalsBefore;
+                snapshotTable(&vm.globals, &globalsBefore);
+                snapshotTable(&vm.constGlobals, &constGlobalsBefore);
 
                 if (importBuiltinModule(filePath))
                 {
-                    ObjMap *builtinExports = collectGlobalDiff(&globalsBefore);
+                    ObjNamespace *builtinExports = collectGlobalDiff(&globalsBefore);
                     tableSet(&vm.imports, filePath, OBJ_VAL(builtinExports));
-                    freeTable(&globalsBefore);
+                    restoreTable(&vm.globals, &globalsBefore);
+                    restoreTable(&vm.constGlobals, &constGlobalsBefore);
                     push(OBJ_VAL(builtinExports));
                     break;
                 }
 
                 freeTable(&globalsBefore);
+                freeTable(&constGlobalsBefore);
 
-                if (tableGet(&vm.imports, filePath, &importedValue) && IS_MAP(importedValue))
+                if (tableGet(&vm.imports, filePath, &importedValue) && IS_NAMESPACE(importedValue))
                 {
                     push(importedValue);
                     break;
@@ -9852,18 +10662,22 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     if (access(fullPath, R_OK) == 0)
                     {
                         Table soGlobalsBefore;
-                        snapshotGlobals(&soGlobalsBefore);
+                        Table soConstGlobalsBefore;
+                        snapshotTable(&vm.globals, &soGlobalsBefore);
+                        snapshotTable(&vm.constGlobals, &soConstGlobalsBefore);
 
                         loadedSo = loadDynamicModulePath(fullPath, true);
                         if (loadedSo)
                         {
-                            ObjMap *soExports = collectGlobalDiff(&soGlobalsBefore);
+                            ObjNamespace *soExports = collectGlobalDiff(&soGlobalsBefore);
                             tableSet(&vm.imports, filePath, OBJ_VAL(soExports));
                             push(OBJ_VAL(soExports));
-                            freeTable(&soGlobalsBefore);
+                            restoreTable(&vm.globals, &soGlobalsBefore);
+                            restoreTable(&vm.constGlobals, &soConstGlobalsBefore);
                             break;
                         }
                         freeTable(&soGlobalsBefore);
+                        freeTable(&soConstGlobalsBefore);
                         return INTERPRET_RUNTIME_ERROR;
                     }
                 }
@@ -9882,7 +10696,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
 
                 Value value;
-                if (tableGet(&vm.imports, filePath, &value) && IS_MAP(value))
+                if (tableGet(&vm.imports, filePath, &value) && IS_NAMESPACE(value))
                 {
                     push(value);
                     break;
@@ -9919,24 +10733,25 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 vm.importSources = tmp;
                 vm.importSources[vm.importCount++] = source;
 
-                Table scriptGlobalsBefore;
-                snapshotGlobals(&scriptGlobalsBefore);
-
-                ObjMap *previousModuleExports = vm.currentModuleExports;
+                ObjNamespace *previousModuleExports = vm.currentModuleExports;
+                ObjNamespace *previousLoadingModule = vm.currentLoadingModule;
                 bool previousHasExplicitExports = vm.currentModuleHasExplicitExports;
-                ObjMap *moduleExports = newMap();
-                vm.currentModuleExports = moduleExports;
+                ObjNamespace *moduleNamespace = newNamespace();
+                vm.currentModuleExports = moduleNamespace;
+                vm.currentLoadingModule = moduleNamespace;
                 vm.currentModuleHasExplicitExports = false;
 
                 CallFrame preImport = *frame;
                 vm.frameCount = 0;
 
                 InterpretResult res = interpret(source, filePath->chars, false, 0, NULL);
-                ObjMap *resolvedExports = vm.currentModuleHasExplicitExports ? vm.currentModuleExports : collectGlobalDiff(&scriptGlobalsBefore);
+                if (!vm.currentModuleHasExplicitExports)
+                    exportAllModuleGlobals(moduleNamespace);
+                ObjNamespace *resolvedExports = moduleNamespace;
 
                 vm.currentModuleExports = previousModuleExports;
+                vm.currentLoadingModule = previousLoadingModule;
                 vm.currentModuleHasExplicitExports = previousHasExplicitExports;
-                freeTable(&scriptGlobalsBefore);
 
                 if (res == INTERPRET_RUNTIME_ERROR)
                 {
@@ -9959,6 +10774,83 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("Import path must be a string, got '%s'.", valueTypeName(file));
                 return INTERPRET_RUNTIME_ERROR;
             }
+            break;
+        }
+        case OP_IMPORT_ALL:
+        {
+            if (!IS_NAMESPACE(peek(0)))
+            {
+                runtimeError("Can only import-all from a namespace.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            ObjNamespace *moduleNamespace = AS_NAMESPACE(peek(0));
+            Table *globalsTable = frameGlobalsTable(frame);
+            Table *constGlobalsTable = frameConstGlobalsTable(frame);
+
+            for (int i = 0; i < moduleNamespace->exports.capacity; i++)
+            {
+                Entry *entry = &moduleNamespace->exports.entries[i];
+                if (entry->key == NULL)
+                    continue;
+
+                Value _isConst;
+                if (tableGet(constGlobalsTable, entry->key, &_isConst))
+                {
+                    Value existing;
+                    if (tableGet(globalsTable, entry->key, &existing) && valuesEqual(existing, entry->value))
+                        continue;
+
+                    runtimeError("Cannot redefine constant '%s' during import-all.", entry->key->chars);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                tableSet(globalsTable, entry->key, entry->value);
+
+                if (tableGet(&moduleNamespace->constGlobals, entry->key, &_isConst))
+                    tableSet(constGlobalsTable, entry->key, BOOL_VAL(true));
+            }
+
+            pop();
+            break;
+        }
+        case OP_IMPORT_NAME:
+        {
+            if (!IS_NAMESPACE(peek(0)))
+            {
+                runtimeError("Can only import named symbols from a namespace.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            ObjNamespace *moduleNamespace = AS_NAMESPACE(peek(0));
+            ObjString *importedName = READ_STRING();
+            ObjString *aliasName = READ_STRING();
+            Table *globalsTable = frameGlobalsTable(frame);
+            Table *constGlobalsTable = frameConstGlobalsTable(frame);
+
+            Value importedValue;
+            if (!tableGet(&moduleNamespace->exports, importedName, &importedValue))
+            {
+                runtimeError("Cannot find export '%s' in namespace.", importedName->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            Value _isConst;
+            if (tableGet(constGlobalsTable, aliasName, &_isConst))
+            {
+                Value existing;
+                if (tableGet(globalsTable, aliasName, &existing) && valuesEqual(existing, importedValue))
+                    break;
+
+                runtimeError("Cannot redefine constant '%s'.", aliasName->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            tableSet(globalsTable, aliasName, importedValue);
+
+            if (tableGet(&moduleNamespace->constGlobals, importedName, &_isConst))
+                tableSet(constGlobalsTable, aliasName, BOOL_VAL(true));
+
             break;
         }
 
@@ -10097,6 +10989,7 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions,
         return INTERPRET_COMPILE_ERROR;
     push(OBJ_VAL(function));
     ObjClosure *closure = newClosure(function);
+    closure->moduleNamespace = vm.currentLoadingModule;
     // tableSet(&vm.importFuncs, file_, OBJ_VAL(closure)); This may be due to some nonesense btw I am using this table to free imports after vm is closed
     pop();
     push(OBJ_VAL(closure));

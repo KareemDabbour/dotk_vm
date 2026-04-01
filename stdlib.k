@@ -1,4 +1,4 @@
-import "lang.k"
+from lang import *
 ## A simple linked list implementation.
 class ListNode {
   init(value) {
@@ -1447,9 +1447,44 @@ class Graph {
         return minIndex;
     }
 
+    shortestPath(src, dest){
+      var dist = this.dijkstra(src);
+      if (dist.get(dest, Math.INF) == Math.INF){
+        return [];
+      }
+        var ret = [];
+        var u = dest;
+      var limit = len(this.adjList.keys()) + 1;
+      var steps = 0;
+        while (u != src){
+            ret.append(u);
+            var adj = this.adjList.get(u, []);
+        var du = dist.get(u, Math.INF);
+        var min = Math.INF;
+        var minV = null;
+            adj.foreach(fn (v) {
+          var dv = dist.get(v, Math.INF);
+          if (dv != Math.INF && (dv + 1) == du && dv < min){
+            min = dv;
+                    minV = v;
+                }
+            });
+        if (minV == null){
+          return [];
+        }
+            u = minV;
+        steps += 1;
+        if (steps > limit){
+          return [];
+        }
+        }
+        ret.append(src);
+        return ret[:@-1];
+    }
+
     dijkstra(src){
         var dist = HashMap();
-        this.adjList.keys().foreach(fn (k) => dist[k] = Math.INF);
+        this.adjList.keys().foreach(fn (k) { dist.put(k, Math.INF); });
         dist[src] = 0;
         # print("dist: ${}".f(dist));
         var sptSet = Set();
@@ -1459,7 +1494,7 @@ class Graph {
             sptSet.add(u);
             
             var adj = this.adjList.get(u, []);
-            print "adj: ${}".f(adj);
+            # print "adj: ${}".f(adj);
             adj.foreach(fn (v) {
                 # print "v: ${}".f(v);
                 if (!sptSet.contains(v) && dist[u] != Math.INF && (dist[u] + 1) < dist.get(v, Math.INF)){
@@ -1546,48 +1581,47 @@ class UndirectedGraph <Graph> {
     }
 
     shortestPath(src, dest){
-        var dist = this.dijkstra(src);
+      var dist = this.dijkstra(src);
       if (dist.get(dest, Math.INF) == Math.INF){
         return [];
       }
-        var ret = [];
-        var u = dest;
+      var ret = [];
+      var u = dest;
       var limit = len(this.adjList.keys()) + 1;
       var steps = 0;
         while ( u != src){
-            ret.append(u);
-            var adj = this.adjList.get(u, []);
-        var du = dist.get(u, Math.INF);
-        var min = Math.INF;
-        var minV = null;
-            adj.foreach(fn (v) {
-          var dv = dist.get(v, Math.INF);
-          if (dv != Math.INF && (dv + 1) == du && dv < min){
-            min = dv;
-                    minV = v;
-                }
-            });
-        if (minV == null){
-          return [];
-        }
-            u = minV;
-        steps += 1;
-        if (steps > limit){
-          return [];
-        }
+          ret.append(u);
+          var adj = this.adjList.get(u, []);
+          var du = dist.get(u, Math.INF);
+          var min = Math.INF;
+          var minV = null;
+          for v in adj{
+            var dv = dist.get(v, Math.INF);
+            if (dv != Math.INF && (dv + 1) == du && dv < min){
+              min = dv;
+              minV = v;
+            }
+          }
+          if (minV == null){
+            return [];
+          }
+          u = minV;
+          steps += 1;
+          if (steps > limit){
+            return [];
+          }
         }
         ret.append(src);
         return ret[:@-1];
-
     }
 
     toStr(){
         var s = StringBuilder();
         
-        this.adjList.entries().foreach(fn (e) {
+        for e in this.adjList {
             s.append(e.key).append(" -> ").append(e.value).append("\n");
-        });
-
+        }
+       
         return s.toStr();
         # return this.adjList.toStr();
     }

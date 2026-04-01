@@ -1,14 +1,37 @@
+import "lang"
+import "file"
 
-var rows = 50;
-var cols = 100;
+var rows = 20;
+var cols = 20;
 var line = " ${} ".f("".join([cols]{"-"}))
+var mapfn = fn(x) => bool(int(x)) ? "▓" : " "
 # var string;
 class GameOfLife{
-    init(rows, cols){
+    init(rows, cols, initial_state=null){
         this.rows = rows;
         this.cols = cols;
         this.board = create_board(rows, cols);
-        this.randomizeBoard();
+        if (initial_state != null){
+            this.loadInitialState(initial_state);
+        }else{
+            this.randomizeBoard();
+        }
+    }
+    loadInitialState(initial_state){
+        # Load initial state from file or other source
+        with(File(initial_state), fn(f){
+            var lines = f.readLines();
+            this.board = [len(lines)];
+            lines
+            .map(trim)
+            .map(list)
+            .foreach(fn(i, line){
+                this.board[i] = line.map(mapfn);
+            })
+            this.cols = len(lines[0]);
+            this.rows = len(lines);
+
+        });
     }
     randomizeBoard(){
         for (var row = 0; row < this.rows; row += 1){
@@ -99,12 +122,18 @@ class GameOfLife{
     step(){
         this.draw_board();
         this.gen2();
-        # sleep(0.05);
+        sleep(0.05);
         clear();
     }
-    run(){
-        while(true){
-            this.step();
+    run(end_time=null){
+        if (end_time == null){
+            while(true){
+                this.step();
+            }
+        }else{
+            while(clock() < end_time){
+                this.step();
+            }
         }
     }
 }
@@ -200,5 +229,14 @@ fn run(){
 # while(true){
 #     run();
 # }
+var start = clock();
+var initial_state;
 
-GameOfLife(rows, cols).run();
+var i = ARG_V.indexOf("-is")
+if (i != -1) {
+    initial_state = ARG_V[i + 1];
+    # Load initial state from file or other source
+}
+
+
+GameOfLife(rows, cols, initial_state).run()#start + 0.5);

@@ -145,3 +145,7 @@ sdl-module:
 x11-module:
 	mkdir -p modules
 	$(CC) -shared -fPIC -O3 -DNDEBUG -I./src/include modules/x11_module.c -o modules/x11_module.so -lX11
+
+ndarray-module:
+	mkdir -p modules
+	$(CC) -shared -fPIC -O3 -DNDEBUG -I./src/include modules/ndarray_module.c -o modules/ndarray_module.so

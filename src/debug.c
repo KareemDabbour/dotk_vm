@@ -129,6 +129,18 @@ static int invokeKwInst(const char *name, Chunk *chunk, int offset)
     return offset;
 }
 
+static int importNameInst(const char *name, Chunk *chunk, int offset)
+{
+    uint8_t imported = chunk->code[offset + 1];
+    uint8_t alias = chunk->code[offset + 2];
+    printf("%-16s %4d '", name, imported);
+    printValue(chunk->constants.values[imported], PRINT_VERBOSE_OBJECTS_DEPTH);
+    printf("' -> %4d '", alias);
+    printValue(chunk->constants.values[alias], PRINT_VERBOSE_OBJECTS_DEPTH);
+    printf("'\n");
+    return offset + 3;
+}
+
 static int callKwInst(const char *name, Chunk *chunk, int offset)
 {
     uint8_t positional = chunk->code[offset + 1];
@@ -177,6 +189,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_NEGATE", offset);
     case OP_RETURN:
         return simpleInst("OP_RETURN", offset);
+    case OP_YIELD:
+        return simpleInst("OP_YIELD", offset);
     case OP_RETURN_NIL:
         return simpleInst("OP_RETURN_NIL", offset);
     case OP_RETURN_THIS:
@@ -209,6 +223,16 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_INHERIT", offset);
     case OP_STORE_SUBSCR:
         return simpleInst("OP_STORE_SUBSCR", offset);
+    case OP_STORE_SUBSCR_ADD:
+        return simpleInst("OP_STORE_SUBSCR_ADD", offset);
+    case OP_STORE_SUBSCR_SUB:
+        return simpleInst("OP_STORE_SUBSCR_SUB", offset);
+    case OP_STORE_SUBSCR_MULT:
+        return simpleInst("OP_STORE_SUBSCR_MULT", offset);
+    case OP_STORE_SUBSCR_DIV:
+        return simpleInst("OP_STORE_SUBSCR_DIV", offset);
+    case OP_STORE_SUBSCR_INT_DIV:
+        return simpleInst("OP_STORE_SUBSCR_INT_DIV", offset);
     case OP_INDEX_SUBSCR:
         return simpleInst("OP_INDEX_SUBSCR", offset);
     case OP_CLOSURE:
@@ -253,6 +277,10 @@ int disassembleInst(Chunk *chunk, int offset)
         return constInst("OP_EXPORT", chunk, offset);
     case OP_IMPORT:
         return simpleInst("OP_IMPORT", offset);
+    case OP_IMPORT_NAME:
+        return importNameInst("OP_IMPORT_NAME", chunk, offset);
+    case OP_IMPORT_ALL:
+        return simpleInst("OP_IMPORT_ALL", offset);
     case OP_GET_SUPER:
         return constInst("OP_GET_SUPER", chunk, offset);
     case OP_DEF_GLOBAL:

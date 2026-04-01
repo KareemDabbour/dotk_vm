@@ -16,8 +16,10 @@
 #define IS_FUN(value) isObjType(value, OBJ_FUNCTION)
 #define IS_CLOSURE(value) isObjType(value, OBJ_CLOSURE)
 #define IS_NATIVE(value) isObjType(value, OBJ_NATIVE)
+#define IS_GENERATOR(value) isObjType(value, OBJ_GENERATOR)
 #define IS_LIST(value) isObjType(value, OBJ_LIST)
 #define IS_MAP(value) isObjType(value, OBJ_MAP)
+#define IS_NAMESPACE(value) isObjType(value, OBJ_NAMESPACE)
 #define IS_SLICE(value) isObjType(value, OBJ_SLICE)
 #define IS_FOREIGN(value) isObjType(value, OBJ_FOREIGN)
 #define IS_FOREIGN_TYPE(value, f_type) (IS_FOREIGN(value) && (AS_FOREIGN(value))->type == f_type)
@@ -32,8 +34,10 @@
 #define AS_FUN(value) ((ObjFunction *)AS_OBJ(value))
 #define AS_CLOSURE(value) ((ObjClosure *)AS_OBJ(value))
 #define AS_NATIVE(value) (((ObjNative *)AS_OBJ(value))->function)
+#define AS_GENERATOR(value) ((ObjGenerator *)AS_OBJ(value))
 #define AS_LIST(value) ((ObjList *)AS_OBJ(value))
 #define AS_MAP(value) ((ObjMap *)AS_OBJ(value))
+#define AS_NAMESPACE(value) ((ObjNamespace *)AS_OBJ(value))
 #define AS_SLICE(value) ((ObjSlice *)AS_OBJ(value))
 #define AS_FOREIGN(value) ((ObjForeign *)AS_OBJ(value))
 #define AS_FOREIGN_PTR(value) (((ObjForeign *)AS_OBJ(value))->ptr)
@@ -43,11 +47,13 @@ typedef enum
     OBJ_CLASS,
     OBJ_STRING,
     OBJ_MAP,
+    OBJ_NAMESPACE,
     OBJ_FUNCTION,
     OBJ_LIST,
     OBJ_SLICE,
     OBJ_CLOSURE,
     OBJ_NATIVE,
+    OBJ_GENERATOR,
     OBJ_UPVALUE,
     OBJ_INSTANCE,
     OBJ_BOUND_METHOD,
@@ -55,15 +61,17 @@ typedef enum
     OBJ_FOREIGN
 } ObjType;
 
-static const char *OBJECT_TYPES[13] = {
+static const char *OBJECT_TYPES[15] = {
     "CLASS",
     "STRING",
     "MAP",
+    "NAMESPACE",
     "FUNCTION",
     "LIST",
     "SLICE",
     "CLOSURE",
     "NATIVE",
+    "GENERATOR",
     "UPVALUE",
     "INSTANCE",
     "BOUND METHOD",
@@ -76,14 +84,16 @@ typedef enum
     TYPE_VM,
     TYPE_REGEX,
     TYPE_SQLITE,
+    TYPE_NDARRAY,
     TYPE_UNKNOWN,
 } ForeignType;
 
-static const char *FOREIGN_TYPES[5] = {
+static const char *FOREIGN_TYPES[6] = {
     "FILE",
     "VM",
     "REGEX",
     "SQLITE",
+    "NDARRAY",
     "UNKNOWN"};
 
 struct Obj
@@ -92,6 +102,9 @@ struct Obj
     bool isMarked;
     struct Obj *next;
 };
+
+typedef struct ObjClosure ObjClosure;
+typedef struct _ObjNamespace ObjNamespace;
 
 typedef struct
 {
@@ -107,9 +120,18 @@ typedef struct
     int localNameCount;
     uint16_t *localNameConsts;
     int upValueCount;
+    bool isGenerator;
     Chunk chunk;
     ObjString *name;
 } ObjFunction;
+
+typedef struct ObjGeneratorFrame
+{
+    ObjClosure *closure;
+    int ipOffset;
+    int slotOffset;
+    uint64_t startTimeNs;
+} ObjGeneratorFrame;
 
 struct ObjString
 {
@@ -133,7 +155,24 @@ typedef struct ObjClosure
     ObjFunction *function;
     ObjUpvalue **upvalues;
     int upvalueCount;
+    ObjNamespace *moduleNamespace;
 } ObjClosure;
+
+typedef struct ObjGenerator
+{
+    Obj obj;
+    ObjClosure *closure;
+    Value *args;
+    int argCount;
+    bool started;
+    bool finished;
+    Value *stack;
+    int stackCount;
+    int stackCapacity;
+    ObjGeneratorFrame *frames;
+    int frameCount;
+    int frameCapacity;
+} ObjGenerator;
 
 typedef Value (*NativeFn)(int argC, Value *argV, bool *hasError, bool *pushedValue);
 
@@ -196,6 +235,14 @@ typedef struct _ObjMap
     Map map;
 } ObjMap;
 
+typedef struct _ObjNamespace
+{
+    Obj obj;
+    Table exports;
+    Table globals;
+    Table constGlobals;
+} ObjNamespace;
+
 typedef struct _ObjSlice
 {
     Obj obj;
@@ -227,10 +274,12 @@ typedef struct ObjBoundBuiltin
 
 ObjClass *newClass(ObjString *name);
 ObjClosure *newClosure(ObjFunction *function);
+ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount);
 ObjFunction *newFunction();
 ObjList *newList();
 ObjList *newListWithCapacity(int capacity);
 ObjMap *newMap();
+ObjNamespace *newNamespace();
 ObjSlice *newSlice(int start, int end, int step);
 ObjForeign *newForeignObj(ForeignType type, void *ptr, bool ownsPtr);
 void appendToList(ObjList *list, Value value);

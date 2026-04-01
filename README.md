@@ -73,7 +73,7 @@ DotK syntax is C/JS-like with dynamic typing, first-class functions, classes, mo
 
 ### Variables and Primitive Values
 
-```k
+```js
 var x = 10
 var y = 2.5
 var ok = true
@@ -87,14 +87,14 @@ Semicolons are optional (you can use them, but they are not required).
 
 `var` declares a mutable variable:
 
-```k
+```js
 var count = 1
 count = count + 1
 ```
 
 `const` declares a non-reassignable binding:
 
-```k
+```js
 const limit = 9
 print(limit)
 
@@ -107,7 +107,7 @@ try {
 
 Implicit declaration (assignment without `var`/`const`) is currently supported and behaves as an implicit global:
 
-```k
+```js
 a = 1
 {
 	b = 5
@@ -123,16 +123,25 @@ Prefer explicit `var`/`const` in new code to avoid accidental globals.
 
 List literal:
 
-```k
+```js
 var xs = {1, 2, 3}
 print(xs[0])
 print(xs[-1])
 print(xs[1:])
 ```
 
+List comprehensions:
+
+```js
+var doubled = {for x from {1, 2, 3, 4} => x * 2}
+var evensSquared = {for x from {1, 2, 3, 4, 5, 6} if x % 2 == 0 => x * x}
+print(doubled)      # [2,4,6,8]
+print(evensSquared) # [4,16,36]
+```
+
 Map literal:
 
-```k
+```js
 var m = .{"a"::1, "b"::2}
 print(m["a"])
 m["c"] = 3
@@ -142,7 +151,7 @@ m["c"] = 3
 
 DotK supports negative indexing and Python-like slice ranges on indexable types:
 
-```k
+```js
 var xs = {10, 20, 30, 40, 50}
 print(xs[-1])                # 50
 print(",".join(xs[1:4]))     # 20,30,40
@@ -155,7 +164,7 @@ print(base[1:4])             # bcd
 
 DotK also supports a step component using `@step` in the slice expression:
 
-```k
+```js
 var xs = {0, 1, 2, 3, 4, 5}
 print(xs[:@2])               # every 2nd element: 0,2,4
 print(xs[1:@2])              # start at index 1, step 2: 1,3,5
@@ -164,14 +173,14 @@ print(xs[:@-1])              # reverse traversal
 
 You can also build a reusable slice spec and apply it later:
 
-```k
+```js
 var keySlice = 1:-2@1
 print("hello"[keySlice])
 ```
 
 ### Control Flow
 
-```k
+```js
 if (x > 0) {
 	print("positive")
 } else {
@@ -187,13 +196,24 @@ while (i < 3) {
 for (var j = 0; j < 3; j += 1) {
 	print(j)
 }
+
+for item in {"a", "b", "c"} {
+	print(item)
+}
 ```
+
+`for x in iterable` uses the iterator protocol:
+
+- call `iterable._iter_()` once to get an iterator object
+- repeatedly call `iterator._next_()` until it returns `null`
+
+Custom classes can participate by overriding `_iter_` and `_next_` (or `__iter__` and `__next__`).
 
 ### Functions and Closures
 
 Named function:
 
-```k
+```js
 fn add(a, b) {
 	return a + b
 }
@@ -201,7 +221,7 @@ fn add(a, b) {
 
 Anonymous function (block form):
 
-```k
+```js
 var f = fn(x) {
 	return x * 2
 }
@@ -209,13 +229,13 @@ var f = fn(x) {
 
 Arrow-style function expression:
 
-```k
+```js
 var ys = {1, 2, 3}.map(fn(n) => n * 2)
 ```
 
 Variadic function parameters are supported:
 
-```k
+```js
 fn sum(a, b, *rest) {
 	var s = a + b
 	var i = 0
@@ -227,11 +247,31 @@ fn sum(a, b, *rest) {
 }
 ```
 
+Lazy generators via `yield` are supported:
+
+```js
+fn evens(n) {
+	for (var i = 0; i < n; i += 1) {
+		yield i * 2
+	}
+}
+
+var g = evens(4)
+print(g._next_()) # 0
+print(g._next_()) # 2
+
+for x in evens(4) {
+	print(x)
+}
+```
+
+Functions that contain `yield` return a generator object. A generator implements `_iter_()` and `_next_()`, and `_next_()` returns `null` when iteration is complete.
+
 ### Keyword Arguments (Kwargs)
 
 Keyword arguments are passed with `@name=value` and can reorder/fill named parameters:
 
-```k
+```js
 fn f(a, b, c) {
 	print(a)
 	print(b)
@@ -244,7 +284,7 @@ f(10, @c=30, @b=20)
 
 Kwargs also work with variadics; extra positional values still flow into `*rest`:
 
-```k
+```js
 fn g(a, b, *rest) {
 	print(a)
 	print(b)
@@ -257,14 +297,14 @@ g(100, 200, 1, 2, 3, @b=20, @a=10)
 
 Native functions can also receive kwargs packs/maps:
 
-```k
+```js
 print(len(@x=1, @y=2))       # 2
 print(len(@x=1, @y=2, @z=3)) # 3
 ```
 
 ### Classes and Inheritance
 
-```k
+```js
 class A {
 	init(x) {
 		this.x = x
@@ -301,7 +341,7 @@ Custom classes can override operators through method hooks:
 
 Example:
 
-```k
+```js
 class Box {
 	init(v) {
 		this.v = v
@@ -341,7 +381,7 @@ Python-style dunder aliases are also supported:
 
 ### Error Handling
 
-```k
+```js
 try {
 	var xs = {1}
 	print(xs[5])
@@ -353,7 +393,7 @@ try {
 
 ### Strings and Interpolation
 
-```k
+```js
 var name = "DotK"
 var n = 42
 
@@ -365,7 +405,7 @@ print("hello ${}!".f(name))
 
 DotK supports prefixed string literals for byte-oriented/text-decoding workflows:
 
-```k
+```js
 var a = b"ABC"
 var h = x"41 42 43"
 var n = bin"01000001 01000010 01000011"
@@ -382,7 +422,7 @@ print(a == h && h == n)   # true
 
 Prefixed numeric literals are also supported:
 
-```k
+```py
 print(0xFF)                          # 255
 print(0b101010)                      # 42
 print(0y255)                         # 255
@@ -395,25 +435,53 @@ print((0x0F | 0b00110000) == 63)     # true
 
 ### Modules and Imports
 
-Import full module:
+Import full module (namespace):
 
-```k
-import "modules/mathx" as mathx
-print(mathx["PI"])
-print(mathx["add"](3, 4))
+```py
+import modules.mathx as mathx
+print(mathx.PI)
+print(mathx.add(3, 4))
+```
+
+Bare identifier imports default to aliasing the module namespace:
+
+```py
+import stdlib
+var xs = stdlib.LinkedList()
+```
+
+This is equivalent to:
+
+```py
+import stdlib as stdlib
 ```
 
 Import specific exports:
 
-```k
-from "modules/mathx.k" import add, PI
+```py
+from modules.mathx import add, PI
 print(add(2, 3))
 print(PI)
 ```
 
+Import all exports from a module:
+
+```py
+from modules.mathx import *
+print(PI)
+print(add(10, 5))
+```
+
+Path/string imports are still supported:
+
+```py
+import "modules/mathx" as mathx
+from "modules/mathx.k" import add
+```
+
 Authoring a module (declaration + export list):
 
-```k
+```py
 module mathx;
 
 fn add(a, b) {
@@ -425,20 +493,37 @@ var PI = 3;
 export add, PI;
 ```
 
+Export constants directly:
+
+```py
+module constx;
+
+export const ANSWER = 42;
+```
+
+Constness is preserved through imports:
+
+```py
+from constx import ANSWER
+# ANSWER = 99  # runtime error: constant assignment
+```
+
+Namespace access is object-style (`mod.name`). Map key access (`map.key`) is not used for module namespaces.
+
 ### Built-in Functionality
 
 Out of the box, DotK provides:
 
 - core utility built-ins (e.g., `len`, `int`, `type`, process helpers)
 - object model primitives (`Object`, `String`, `List`, `HashMap`, `StringBuilder`, etc.)
-- opt-in built-in modules for file I/O, SQL, and HTTP
+- built-in modules for file I/O, SQL, and HTTP (`file` is preloaded; others are import-on-demand)
 - native module loading via `import` or `loadLib(path)`
 
 ### `lang.k` Standard Helpers
 
 The repository includes a standard helper file at [lang.k](lang.k) that is commonly imported from scripts:
 
-```k
+```py
 from "lang" import min, max, abs, with, __hierarchy__, Ansi
 ```
 
@@ -529,7 +614,7 @@ make test-fast
 
 Each test file should include an expected-output block:
 
-```k
+```py
 # EXPECTED
 # first output line
 # second output line
@@ -549,15 +634,15 @@ Registered built-in modules:
 
 Default startup behavior:
 
-- `primitives` and `core` are preloaded
-- other built-ins are loaded when imported
+- `primitives`, `core`, and `file` are preloaded
+- `sql`, `io`, and `http` are loaded when imported
 
 Example imports:
 
-```k
-import "file"
-import "io"
-import "http"
+```py
+import io
+import http
+from sql import SQL
 ```
 
 ## External Native Modules (`.so`)
@@ -571,7 +656,7 @@ DotK resolves shared modules from:
 
 So both forms work:
 
-```k
+```py
 import "json_module"
 import "json_module.so"
 ```

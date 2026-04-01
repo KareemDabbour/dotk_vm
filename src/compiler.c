@@ -85,6 +85,7 @@ typedef struct _Compiler
     int localCount;
     UpValue upValues[UINT8_COUNT];
     int scopeDepth;
+    bool hasYield;
 } Compiler;
 
 typedef struct _ClassCompiler
@@ -111,6 +112,7 @@ static void expression();
 static void declareVar(bool isConst);
 static void namedVariable(Token name, bool canAssign);
 static void statement();
+static void yieldStatement();
 static bool identifierEqual(Token *a, Token *b);
 static void variable(bool canAssign);
 static void varDeclaration();
@@ -126,8 +128,13 @@ static void declaration();
 static ParseRule *getRule(TokenType type);
 static void parsePrecedence(Precedence precedence);
 static uint16_t parseVariable(const char *errMsg, bool isConst);
+static uint16_t declareVariableFromToken(Token name, bool isConst);
+static bool emitModuleSpecifier(Token *implicitAlias);
 static int resolveLocal(Compiler *compiler, Token *name);
 static int resolveUpValue(Compiler *compiler, Token *name);
+static void beginScope();
+static void endScope();
+static Token synthToken(const char *text);
 // static void optimizeFunction(ObjFunction *fn);
 
 static inline Chunk *currentChunk()
@@ -293,6 +300,7 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     compiler->type = type;
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
+    compiler->hasYield = false;
     compiler->isRepl = isRepl;
     compiler->printBytecode = printBytecode;
     compiler->isInTryCatch = type == TYPE_TRY || type == TYPE_CATCH;
@@ -375,6 +383,94 @@ static ObjFunction *endCompiler()
 
 static void list(bool canAssign)
 {
+    // Comprehension form:
+    //   {for item from source => expr}
+    //   {for item from source if cond => expr}
+    // This keeps existing list literals untouched while offering a Python-like builder.
+    if (match(TOKEN_FOR))
+    {
+        beginScope();
+
+        emitBytes(OP_BUILD_LIST, (uint8_t)0);
+        addLocal(synthToken("$comp_result"), false);
+        markInitialized();
+        int resultSlot = current->localCount - 1;
+
+        consume(TOKEN_IDENTIFIER, "Expect loop variable name after 'for' in list comprehension.");
+        Token itemName = parser.prev;
+
+        consume(TOKEN_FROM, "Expect 'from' after loop variable in list comprehension.");
+        expression();
+        addLocal(synthToken("$comp_source"), true);
+        markInitialized();
+        int sourceSlot = current->localCount - 1;
+
+        emitConst(NUM_VAL(0));
+        addLocal(synthToken("$comp_index"), false);
+        markInitialized();
+        int indexSlot = current->localCount - 1;
+
+        int loopStart = currentChunk()->size;
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)indexSlot);
+        namedVariable(synthToken("len"), false);
+        emitBytes(OP_GET_LOCAL, (uint16_t)sourceSlot);
+        emitBytes(OP_CALL, (uint16_t)1);
+        emitByte(OP_LESS);
+
+        int exitJump = emitJump(OP_JUMP_IF_FALSE);
+        emitByte(OP_POP);
+
+        beginScope();
+        emitBytes(OP_GET_LOCAL, (uint16_t)sourceSlot);
+        emitBytes(OP_GET_LOCAL, (uint16_t)indexSlot);
+        emitByte(OP_INDEX_SUBSCR);
+        addLocal(itemName, false);
+        markInitialized();
+
+        int skipAppendJump = -1;
+        int afterAppendJump = -1;
+        if (match(TOKEN_IF))
+        {
+            expression();
+            skipAppendJump = emitJump(OP_JUMP_IF_FALSE);
+            emitByte(OP_POP);
+        }
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)resultSlot);
+        consume(TOKEN_ARROW, "Expect '=>' before list comprehension element expression.");
+        expression();
+        emitBytes(OP_INVOKE, identifierConst(&(Token){.start = "append", .len = 6}));
+        emitByte((uint8_t)1);
+        emitByte(OP_POP);
+
+        if (skipAppendJump != -1)
+        {
+            afterAppendJump = emitJump(OP_JUMP);
+            patchJump(skipAppendJump);
+            emitByte(OP_POP);
+            patchJump(afterAppendJump);
+        }
+
+        endScope();
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)indexSlot);
+        emitConst(NUM_VAL(1));
+        emitByte(OP_ADD);
+        emitBytes(OP_SET_LOCAL, (uint16_t)indexSlot);
+        emitByte(OP_POP);
+
+        emitLoop(loopStart);
+        patchJump(exitJump);
+        emitByte(OP_POP);
+
+        consume(TOKEN_RIGHT_BRACE, "Expect '}' after list comprehension.");
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)resultSlot);
+        endScope();
+        return;
+    }
+
     int itemCount = 0;
     if (!check(TOKEN_RIGHT_BRACE))
     {
@@ -427,6 +523,31 @@ static void subscript(bool canAssign)
     {
         expression();
         emitByte(OP_STORE_SUBSCR);
+    }
+    else if (canAssign && match(TOKEN_PLUS_EQUAL))
+    {
+        expression();
+        emitByte(OP_STORE_SUBSCR_ADD);
+    }
+    else if (canAssign && match(TOKEN_MINUS_EQUAL))
+    {
+        expression();
+        emitByte(OP_STORE_SUBSCR_SUB);
+    }
+    else if (canAssign && match(TOKEN_STAR_EQUAL))
+    {
+        expression();
+        emitByte(OP_STORE_SUBSCR_MULT);
+    }
+    else if (canAssign && match(TOKEN_SLASH_EQUAL))
+    {
+        expression();
+        emitByte(OP_STORE_SUBSCR_DIV);
+    }
+    else if (canAssign && match(TOKEN_SLASH_SLASH_EQUAL))
+    {
+        expression();
+        emitByte(OP_STORE_SUBSCR_INT_DIV);
     }
     else
     {
@@ -722,16 +843,74 @@ static void returnStatement()
     }
 
     if (match(TOKEN_SEMICOLON))
+    {
         emitReturn();
+    }
     else
     {
         if (current->type == TYPE_INITIALIZER)
             error("Can't return a value from a class's constructor.");
 
+        if (current->hasYield)
+            error("Can't return a value from a generator function.");
+
         expression();
         match(TOKEN_SEMICOLON);
         emitByte(OP_RETURN);
     }
+}
+
+static bool isImplicitYieldTerminator(TokenType type)
+{
+    switch (type)
+    {
+    case TOKEN_RIGHT_BRACE:
+    case TOKEN_EOF:
+    case TOKEN_PRINT:
+    case TOKEN_FOR:
+    case TOKEN_IF:
+    case TOKEN_SWITCH:
+    case TOKEN_WHILE:
+    case TOKEN_RETURN:
+    case TOKEN_CONTINUE:
+    case TOKEN_BREAK:
+    case TOKEN_TRY:
+    case TOKEN_CATCH:
+    case TOKEN_VAR:
+    case TOKEN_CONST:
+    case TOKEN_CLASS:
+    case TOKEN_FUN:
+    case TOKEN_IMPORT:
+    case TOKEN_FROM:
+    case TOKEN_MODULE:
+    case TOKEN_EXPORT:
+    case TOKEN_CASE:
+    case TOKEN_DEFAULT:
+    case TOKEN_YIELD:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void yieldStatement()
+{
+    if (current->type == TYPE_SCRIPT)
+    {
+        error("Can't yield from top-level code");
+        return;
+    }
+
+    current->hasYield = true;
+    if (match(TOKEN_SEMICOLON) || isImplicitYieldTerminator(parser.current.type))
+        emitByte(OP_NIL);
+    else
+    {
+        expression();
+        match(TOKEN_SEMICOLON);
+    }
+
+    emitByte(OP_YIELD);
 }
 
 static void block()
@@ -791,7 +970,6 @@ static void function(FunctionType type)
 
                 // Get the local slot for this parameter
                 uint8_t slot = (uint8_t)(current->localCount - 1);
-
                 // Emit: OP_DEFAULT_LOCAL slot offset_placeholder
                 // If the local is not UNDEF, jump past the default expression
                 emitByte(OP_DEFAULT_LOCAL);
@@ -842,6 +1020,7 @@ static void function(FunctionType type)
     }
     // optimizeFunction(current->function);
     ObjFunction *function = endCompiler();
+    function->isGenerator = compiler.hasYield;
     uint16_t constant = makeConstant(OBJ_VAL(function));
     emitBytes(OP_CLOSURE, constant);
     if (check(TOKEN_LEFT_PAREN))
@@ -1114,6 +1293,83 @@ static void forStatement()
 {
     beginScope();
 
+    if (!check(TOKEN_LEFT_PAREN))
+    {
+        bool loopVarIsConst = false;
+        if (match(TOKEN_CONST))
+            loopVarIsConst = true;
+        else
+            match(TOKEN_VAR);
+
+        consume(TOKEN_IDENTIFIER, "Expect loop variable name after 'for'.");
+        Token loopVarName = parser.prev;
+        consume(TOKEN_IN, "Expect 'in' after loop variable in for-in loop.");
+
+        expression();
+        addLocal(synthToken("$for_iterable"), true);
+        markInitialized();
+        int iterableSlot = current->localCount - 1;
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)iterableSlot);
+        emitBytes(OP_INVOKE, identifierConst(&(Token){.start = "_iter_", .len = 6}));
+        emitByte((uint8_t)0);
+        addLocal(synthToken("$for_iterator"), true);
+        markInitialized();
+        int iteratorSlot = current->localCount - 1;
+
+        emitByte(OP_NIL);
+        addLocal(synthToken("$for_next"), false);
+        markInitialized();
+        int nextSlot = current->localCount - 1;
+
+        int surroundingLoopStart = innermostLoopStart;
+        int surroundingLoopScopeDepth = innermostLoopScopeDepth;
+        int numberOfBreaksPrior = numberOfBreaks;
+        innermostLoopStart = currentChunk()->size;
+        innermostLoopScopeDepth = current->scopeDepth;
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)iteratorSlot);
+        emitBytes(OP_INVOKE, identifierConst(&(Token){.start = "_next_", .len = 6}));
+        emitByte((uint8_t)0);
+        emitBytes(OP_SET_LOCAL, (uint16_t)nextSlot);
+        emitByte(OP_POP);
+
+        emitBytes(OP_GET_LOCAL, (uint16_t)nextSlot);
+        emitByte(OP_NIL);
+        emitByte(OP_EQUAL);
+        int continueJump = emitJump(OP_JUMP_IF_FALSE);
+        emitByte(OP_POP);
+        int exitJump = emitJump(OP_JUMP);
+        patchJump(continueJump);
+        emitByte(OP_POP);
+
+        beginScope();
+        emitBytes(OP_GET_LOCAL, (uint16_t)nextSlot);
+        addLocal(loopVarName, loopVarIsConst);
+        markInitialized();
+
+        statement();
+
+        endScope();
+        emitLoop(innermostLoopStart);
+        patchJump(exitJump);
+
+        if (numberOfBreaksPrior < numberOfBreaks)
+        {
+            for (int i = numberOfBreaksPrior; i < numberOfBreaks; i++)
+            {
+                patchJump(breakAddresses[i]);
+            }
+        }
+
+        innermostLoopStart = surroundingLoopStart;
+        innermostLoopScopeDepth = surroundingLoopScopeDepth;
+        numberOfBreaks = numberOfBreaksPrior;
+
+        endScope();
+        return;
+    }
+
     int loopVar = -1;
     Token loopVarName;
     loopVarName.start = NULL;
@@ -1290,6 +1546,7 @@ static void synchronize()
         case TOKEN_WHILE:
         case TOKEN_PRINT:
         case TOKEN_RETURN:
+        case TOKEN_YIELD:
             return;
 
         default:;
@@ -1456,6 +1713,8 @@ static void statement()
         whileStatement();
     else if (match(TOKEN_RETURN))
         returnStatement();
+    else if (match(TOKEN_YIELD))
+        yieldStatement();
     else if (match(TOKEN_CONTINUE))
         continueStatement();
     else if (match(TOKEN_BREAK))
@@ -2167,10 +2426,12 @@ ParseRule rules[] = {
     [TOKEN_FOR] = {NULL, NULL, PREC_NONE},
     [TOKEN_FUN] = {anonFunction, NULL, PREC_NONE},
     [TOKEN_IF] = {NULL, NULL, PREC_NONE},
+    [TOKEN_IN] = {NULL, NULL, PREC_NONE},
     [TOKEN_NIL] = {literal, NULL, PREC_NONE},
     [TOKEN_OR] = {NULL, or_, PREC_OR},
     [TOKEN_PRINT] = {NULL, NULL, PREC_NONE},
     [TOKEN_RETURN] = {NULL, NULL, PREC_NONE},
+    [TOKEN_YIELD] = {NULL, NULL, PREC_NONE},
     [TOKEN_SUPER] = {super_, NULL, PREC_NONE},
     [TOKEN_THIS] = {_this, NULL, PREC_NONE},
     [TOKEN_TRUE] = {literal, NULL, PREC_NONE},
@@ -2329,6 +2590,19 @@ static uint16_t parseVariable(const char *errMsg, bool isConst)
     return identifierConst(&parser.prev);
 }
 
+static uint16_t declareVariableFromToken(Token name, bool isConst)
+{
+    Token savedPrev = parser.prev;
+    parser.prev = name;
+    declareVar(isConst);
+    parser.prev = savedPrev;
+
+    if (current->scopeDepth > 0)
+        return 0;
+
+    return identifierConst(&name);
+}
+
 static void markInitialized()
 {
     if (current->scopeDepth == 0)
@@ -2368,8 +2642,74 @@ static void moduleDeclaration()
     match(TOKEN_SEMICOLON);
 }
 
+static void appendModulePathSegment(char **buffer, int *len, int *capacity, const char *segmentStart, int segmentLen)
+{
+    int needed = *len + segmentLen + 1;
+    if (needed > *capacity)
+    {
+        int oldCap = *capacity;
+        int newCap = GROW_CAPACITY(oldCap);
+        while (newCap < needed)
+            newCap = GROW_CAPACITY(newCap);
+        *buffer = GROW_ARRAY(char, *buffer, oldCap, newCap);
+        *capacity = newCap;
+    }
+
+    memcpy(*buffer + *len, segmentStart, segmentLen);
+    *len += segmentLen;
+    (*buffer)[*len] = '\0';
+}
+
+static bool emitModuleSpecifier(Token *implicitAlias)
+{
+    if (!check(TOKEN_IDENTIFIER))
+    {
+        expression();
+        return false;
+    }
+
+    char *modulePath = NULL;
+    int pathLen = 0;
+    int pathCap = 0;
+
+    consume(TOKEN_IDENTIFIER, "Expect module name.");
+    if (implicitAlias != NULL)
+        *implicitAlias = parser.prev;
+    appendModulePathSegment(&modulePath, &pathLen, &pathCap, parser.prev.start, parser.prev.len);
+
+    while (match(TOKEN_DOT))
+    {
+        appendModulePathSegment(&modulePath, &pathLen, &pathCap, "/", 1);
+        consume(TOKEN_IDENTIFIER, "Expect identifier after '.' in module path.");
+        if (implicitAlias != NULL)
+            *implicitAlias = parser.prev;
+        appendModulePathSegment(&modulePath, &pathLen, &pathCap, parser.prev.start, parser.prev.len);
+    }
+
+    emitConst(OBJ_VAL(copyString(modulePath, pathLen)));
+    FREE_ARRAY(char, modulePath, pathCap);
+    return true;
+}
+
 static void exportStatement()
 {
+    if (match(TOKEN_CONST))
+    {
+        uint16_t global = parseVariable("Expect constant name", true);
+        uint16_t symbol = identifierConst(&parser.prev);
+        consume(TOKEN_EQUAL, "Expect '=' after constant name");
+        expression();
+        match(TOKEN_SEMICOLON);
+
+        if (current->scopeDepth > 0)
+            defineVar(global);
+        else
+            emitBytes(OP_DEF_CONST_GLOBAL, global);
+
+        emitBytes(OP_EXPORT, symbol);
+        return;
+    }
+
     do
     {
         consume(TOKEN_IDENTIFIER, "Expect exported symbol name.");
@@ -2382,7 +2722,8 @@ static void exportStatement()
 
 static void importStatement()
 {
-    expression();
+    Token implicitAlias;
+    bool hasImplicitAlias = emitModuleSpecifier(&implicitAlias);
     emitByte(OP_IMPORT);
 
     if (match(TOKEN_AS))
@@ -2390,9 +2731,14 @@ static void importStatement()
         uint16_t alias = parseVariable("Expect alias name after 'as'.", false);
         defineVar(alias);
     }
+    else if (hasImplicitAlias)
+    {
+        uint16_t alias = declareVariableFromToken(implicitAlias, false);
+        defineVar(alias);
+    }
     else
     {
-        emitByte(OP_POP);
+        emitByte(OP_IMPORT_ALL);
     }
 
     match(TOKEN_SEMICOLON);
@@ -2400,10 +2746,17 @@ static void importStatement()
 
 static void fromImportStatement()
 {
-    expression();
+    emitModuleSpecifier(NULL);
     emitByte(OP_IMPORT);
 
     consume(TOKEN_IMPORT, "Expect 'import' after module path in from-import statement.");
+
+    if (match(TOKEN_STAR))
+    {
+        emitByte(OP_IMPORT_ALL);
+        match(TOKEN_SEMICOLON);
+        return;
+    }
 
     do
     {
@@ -2420,10 +2773,8 @@ static void fromImportStatement()
         uint16_t importedNameConst = identifierConst(&importedName);
         uint16_t aliasConst = identifierConst(&aliasName);
 
-        emitByte(OP_DUP);
-        emitBytes(OP_CONSTANT, importedNameConst);
-        emitByte(OP_INDEX_SUBSCR);
-        defineVar(aliasConst);
+        emitBytes(OP_IMPORT_NAME, importedNameConst);
+        emitByte(aliasConst);
     } while (match(TOKEN_COMMA));
 
     emitByte(OP_POP);

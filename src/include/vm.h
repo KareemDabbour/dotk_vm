@@ -48,7 +48,8 @@ typedef struct _VM
     Table constGlobals;
     Table imports;
     Table importFuncs;
-    ObjMap *currentModuleExports;
+    ObjNamespace *currentModuleExports;
+    ObjNamespace *currentLoadingModule;
     bool currentModuleHasExplicitExports;
     ObjString *initStr;
     ObjString *toStr;
@@ -67,10 +68,18 @@ typedef struct _VM
     ObjString *lenDunderStr;
     ObjString *hashStr;
     ObjString *hashDunderStr;
+    ObjString *iterStr;
+    ObjString *iterDunderStr;
+    ObjString *nextStr;
+    ObjString *nextDunderStr;
     ObjString *clazzStr;
     ObjClass *stringClass;
     ObjClass *listClass;
     ObjClass *mapClass;
+    ObjClass *generatorClass;
+    ObjClass *listIteratorClass;
+    ObjClass *mapIteratorClass;
+    ObjClass *stringIteratorClass;
     ObjClass *errorClass;
     ObjClass *baseObj;
     ObjUpvalue *openUpvalues;

@@ -105,6 +105,9 @@ static int instructionLength(Chunk *chunk, int offset, bool widePending, bool *c
     case OP_CALL_KW:
         return 3;
 
+    case OP_IMPORT_NAME:
+        return 3;
+
     case OP_INVOKE:
     case OP_SUPER_INVOKE:
         *consumedWide = widePending;

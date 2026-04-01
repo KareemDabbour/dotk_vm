@@ -19,6 +19,7 @@ typedef struct DotKNativeApi
     bool (*listAppend)(Value list, Value item);
     Value (*makeMap)(void);
     bool (*mapSet)(Value map, Value key, Value value);
+    Value (*makeForeign)(ForeignType type, void *ptr, bool ownsPtr);
     void (*pushValue)(Value value);
     Value (*popValue)(void);
     void (*raiseError)(const char *format, ...);
