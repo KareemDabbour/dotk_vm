@@ -79,7 +79,9 @@ typedef enum
     OP_TRY,
     OP_CATCH,
     OP_NOP,
-    OP_DEFAULT_LOCAL
+    OP_DEFAULT_LOCAL,
+    OP_TAIL_CALL,
+    OP_AWAIT
 } OpCode;
 
 typedef struct

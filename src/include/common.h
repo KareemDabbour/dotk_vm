@@ -40,11 +40,19 @@
 #if defined(__GNUC__) || defined(__clang__)
 #define unlikely(x) __builtin_expect((x), 0)
 #define likely(x) __builtin_expect((x), 1)
+#ifndef DOTK_NO_COMPUTED_GOTO
+#define DOTK_USE_COMPUTED_GOTO
+#endif
 #endif
 
 static void
 sigpipeHandler(int signum)
 {
+}
+
+static void sigShutdownHandler(int signum)
+{
+    _exit(128 + signum);
 }
 
 static void sigSegvHandler(int signum)
@@ -56,30 +64,30 @@ static void sigSegvHandler(int signum)
     }
 }
 
-// extern pthread_mutex_t GVL;
+extern pthread_mutex_t GVL;
 
 static void acquireGVL()
 {
-    // #ifdef DEBUG_LOG_THREAD
-    //     pthread_t tid = pthread_self();
-    //     printf("thread %lu locking GVL...\n", (unsigned long)tid);
-    // #endif
-    //     pthread_mutex_lock(&GVL);
-    // #ifdef DEBUG_LOG_THREAD
-    //     printf("thread %lu locked GVL\n", (unsigned long)tid);
-    // #endif
+#ifdef DEBUG_LOG_THREAD
+    pthread_t tid = pthread_self();
+    printf("thread %lu locking GVL...\n", (unsigned long)tid);
+#endif
+    pthread_mutex_lock(&GVL);
+#ifdef DEBUG_LOG_THREAD
+    printf("thread %lu locked GVL\n", (unsigned long)tid);
+#endif
 }
 
 static void releaseGVL()
 {
-    // #ifdef DEBUG_LOG_THREAD
-    //     pthread_t tid = pthread_self();
-    //     printf("thread %lu unlocking GVL...\n", (unsigned long)tid);
-    // #endif
-    //     pthread_mutex_unlock(&GVL);
-    // #ifdef DEBUG_LOG_THREAD
-    //     printf("thread %lu unlocked GVL\n", (unsigned long)tid);
-    // #endif
+#ifdef DEBUG_LOG_THREAD
+    pthread_t tid = pthread_self();
+    printf("thread %lu unlocking GVL...\n", (unsigned long)tid);
+#endif
+    pthread_mutex_unlock(&GVL);
+#ifdef DEBUG_LOG_THREAD
+    printf("thread %lu unlocked GVL\n", (unsigned long)tid);
+#endif
 }
 
 #endif

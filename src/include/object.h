@@ -85,15 +85,17 @@ typedef enum
     TYPE_REGEX,
     TYPE_SQLITE,
     TYPE_NDARRAY,
+    TYPE_THREAD,
     TYPE_UNKNOWN,
 } ForeignType;
 
-static const char *FOREIGN_TYPES[6] = {
+static const char *FOREIGN_TYPES[7] = {
     "FILE",
     "VM",
     "REGEX",
     "SQLITE",
     "NDARRAY",
+    "THREAD",
     "UNKNOWN"};
 
 struct Obj
@@ -121,6 +123,7 @@ typedef struct
     uint16_t *localNameConsts;
     int upValueCount;
     bool isGenerator;
+    bool isAsync;
     Chunk chunk;
     ObjString *name;
 } ObjFunction;
@@ -199,8 +202,8 @@ typedef struct ObjForeign
     ForeignType type;
     void *ptr;
     bool ownsPtr;
+    struct ObjClass *klass;
     Table fields;
-    Table methods;
 } ObjForeign;
 
 typedef struct ObjClass
@@ -218,7 +221,6 @@ typedef struct ObjClass
     Value hashFn;
     struct ObjClass *superclass;
     Table methods;
-    Table staticVars;
 } ObjClass;
 
 typedef struct _ObjList

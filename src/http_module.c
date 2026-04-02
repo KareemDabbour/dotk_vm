@@ -93,7 +93,8 @@ static bool parseHttpUrl(const char *url, HttpUrlParts *parts, char *err, size_t
 
     if (slash == NULL)
     {
-        strcpy(parts->path, "/");
+        parts->path[0] = '/';
+        parts->path[1] = '\0';
     }
     else
     {
@@ -273,9 +274,11 @@ static Value httpRequestInternal(const char *method,
     snprintf(portStr, sizeof(portStr), "%d", parts.port);
 
     struct addrinfo *res = NULL;
+    DotKThread *saved = vmBeginBlockingIO();
     int gai = getaddrinfo(parts.host, portStr, &hints, &res);
     if (gai != 0)
     {
+        vmEndBlockingIO(saved);
         runtimeError("http_request failed: DNS lookup failed for '%s'", parts.host);
         *hasError = true;
         return NIL_VAL;
@@ -292,6 +295,7 @@ static Value httpRequestInternal(const char *method,
         close(fd);
         fd = -1;
     }
+    vmEndBlockingIO(saved);
     freeaddrinfo(res);
 
     if (fd < 0)
@@ -332,7 +336,9 @@ static Value httpRequestInternal(const char *method,
         req[reqLen] = '\0';
     }
 
+    saved = vmBeginBlockingIO();
     bool sendOk = sendAll(fd, req, (size_t)reqLen);
+    vmEndBlockingIO(saved);
     FREE_ARRAY(char, req, reqCap);
     if (!sendOk)
     {
@@ -349,7 +355,9 @@ static Value httpRequestInternal(const char *method,
     while (true)
     {
         char chunk[4096];
+        saved = vmBeginBlockingIO();
         ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+        vmEndBlockingIO(saved);
         if (n < 0)
         {
             FREE_ARRAY(char, resBuf, resCap + 1);

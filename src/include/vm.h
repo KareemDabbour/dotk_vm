@@ -29,16 +29,48 @@ typedef struct _CallFrame
     uint64_t startTimeNs;
 } CallFrame;
 
+/* Per-thread execution state for the GVL-based threading model. */
+typedef enum {
+    THREAD_CREATED,
+    THREAD_RUNNING,
+    THREAD_FINISHED,
+    THREAD_ERROR,
+} DotKThreadStatus;
+
+typedef struct DotKThread
+{
+    pthread_t handle;
+    DotKThreadStatus status;
+
+    /* Per-thread VM state (swapped into global vm when running) */
+    CallFrame frames[FRAMES_MAX];
+    int frameCount;
+    Value stack[STACK_MAX];
+    Value *stackTop;
+    ObjUpvalue *openUpvalues;
+    bool isInTryCatch;
+
+    /* Initial callable + args */
+    ObjClosure *closure;
+    Value *args;
+    int argCount;
+
+    /* Result after completion */
+    Value result;
+    ObjString *errorMsg;
+
+    /* Synchronization */
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} DotKThread;
+
 typedef struct _VM
 {
-    // Threading Updates
-    // current thread
-    // main thread
-    // list of threads
-    // thread count
-
-    // Threading
-    // Each thread has its own stack, call frame, and instruction, last error, and last error trace and isInTryCatch
+    /* Threading — every execution context lives in a DotKThread.
+       mainThread is allocated once in initVM().
+       currentThread always points to whoever is active. */
+    DotKThread *mainThread;
+    DotKThread *currentThread;
     CallFrame frames[FRAMES_MAX];
     int frameCount;
     Value stack[STACK_MAX];
@@ -81,6 +113,9 @@ typedef struct _VM
     ObjClass *mapIteratorClass;
     ObjClass *stringIteratorClass;
     ObjClass *errorClass;
+    ObjClass *fileClass;
+    ObjClass *sqlClass;
+    ObjClass *threadClass;
     ObjClass *baseObj;
     ObjUpvalue *openUpvalues;
     uint8_t nextWideOp;
@@ -120,6 +155,13 @@ typedef struct _VM
     bool isRepl;
     ObjString *lastError;
     ObjString *lastErrorTrace;
+    /* Monomorphic inline cache for method dispatch */
+#define IC_SIZE 1024
+    struct InlineCacheEntry {
+        uint8_t *ip;        /* bytecode IP that produced this entry */
+        ObjClass *klass;    /* cached class pointer */
+        Value method;       /* cached method value */
+    } inlineCache[IC_SIZE];
 } VM;
 
 typedef enum
@@ -153,6 +195,12 @@ ObjClass *vmGetClassByName(const char *name);
 void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function);
 void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn function);
 void vmEnableDebugger(bool enabled);
+
+/* Blocking I/O helpers: save thread state + release GVL, reacquire + restore.
+   Must be used in matched pairs around any blocking syscall in native functions.
+   Returns an opaque handle that must be passed to vmEndBlockingIO(). */
+DotKThread *vmBeginBlockingIO(void);
+void vmEndBlockingIO(DotKThread *saved);
 
 // This is so I can use the equal override in classes for the builtin Map class
 void markMap(Map *map);

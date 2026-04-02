@@ -13,7 +13,7 @@ objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources))
 MODE ?= release
 
 CFLAGS_COMMON = -g
-LDFLAGS_COMMON = -lm -lsqlite3 -lX11 -ldl
+LDFLAGS_COMMON = -lm -lsqlite3 -ldl #-lX11
 
 CFLAGS_RELEASE = -O3 -DNDEBUG -flto -march=native -fno-plt
 LDFLAGS_RELEASE = -flto

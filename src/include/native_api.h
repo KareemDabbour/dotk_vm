@@ -3,7 +3,7 @@
 
 #include "object.h"
 
-#define DOTK_NATIVE_API_VERSION 1
+#define DOTK_NATIVE_API_VERSION 2
 
 typedef struct DotKNativeApi
 {
@@ -20,9 +20,13 @@ typedef struct DotKNativeApi
     Value (*makeMap)(void);
     bool (*mapSet)(Value map, Value key, Value value);
     Value (*makeForeign)(ForeignType type, void *ptr, bool ownsPtr);
+    Value (*makeForeignWithClass)(ObjClass *klass, void *ptr, bool ownsPtr);
     void (*pushValue)(Value value);
     Value (*popValue)(void);
     void (*raiseError)(const char *format, ...);
+    const char *(*valueTypeName)(Value value);
+    bool (*setTableValue)(Table *table, ObjString *key, Value value);
+    void (*setNativeMethod)(Table *table, const char *name, NativeFn fn);
 } DotKNativeApi;
 
 typedef bool (*DotKInitModuleFn)(const DotKNativeApi *api);

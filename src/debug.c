@@ -191,6 +191,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return simpleInst("OP_RETURN", offset);
     case OP_YIELD:
         return simpleInst("OP_YIELD", offset);
+    case OP_AWAIT:
+        return simpleInst("OP_AWAIT", offset);
     case OP_RETURN_NIL:
         return simpleInst("OP_RETURN_NIL", offset);
     case OP_RETURN_THIS:
@@ -331,6 +333,8 @@ int disassembleInst(Chunk *chunk, int offset)
         return byteInst("OP_BUILD_DEFAULT_LIST", chunk, offset);
     case OP_CALL:
         return byteInst("OP_CALL", chunk, offset);
+    case OP_TAIL_CALL:
+        return byteInst("OP_TAIL_CALL", chunk, offset);
     case OP_CALL_KW:
         return callKwInst("OP_CALL_KW", chunk, offset);
     case OP_INVOKE:

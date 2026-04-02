@@ -589,7 +589,7 @@ static int runAllTestsInDir(const char *dirPath, bool stopOnFail, const char *ex
                 }
             }
 
-            strcpy(currentModule, module);
+            snprintf(currentModule, sizeof(currentModule), "%s", module);
             modulePassed = 0;
             moduleFailed = 0;
             moduleTotal = 0;
@@ -754,7 +754,13 @@ int main(int argc, char *argv[])
         else if (ex != NULL && strcmp(ex, ".k") == 0)
             file = i;
     }
-    pthread_mutex_init(&GVL, NULL);
+    {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&GVL, &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
 
     compileSetOptimizationLevel(optimizeLevel);
 

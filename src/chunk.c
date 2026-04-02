@@ -94,6 +94,19 @@ Position getPos(Chunk *chunk, int inst)
     int end = chunk->posCount - 1;
     for (;;)
     {
+        if (start > end)
+        {
+            /* inst is out of range — return the last known position */
+            PositionEntry *entry = &chunk->positions[chunk->posCount - 1];
+            PositionSource *source = &chunk->sources[entry->sourceIndex];
+            Position position = {0};
+            position.offset = entry->offset;
+            position.line = source->line;
+            position.col = (int)entry->col;
+            position.file = source->file;
+            position.lineStart = source->lineStart;
+            return position;
+        }
         int mid = (start + end) / 2;
         PositionEntry *entry = &chunk->positions[mid];
         if (inst < entry->offset)

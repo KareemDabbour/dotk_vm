@@ -8,9 +8,10 @@ Node *create_node(char *line)
     Node *temp;
     if ((temp = (Node *)malloc(sizeof(Node))) == NULL)
         return NULL;
-    temp->line = calloc(strlen(line) + 1, sizeof(char));
-    strcpy(temp->line, line);
-    temp->line[strlen(line)] = '\0';
+    size_t lineLen = strlen(line);
+    temp->line = calloc(lineLen + 1, sizeof(char));
+    memcpy(temp->line, line, lineLen);
+    temp->line[lineLen] = '\0';
     temp->next = NULL;
     temp->prev = NULL;
     return temp;

@@ -169,7 +169,11 @@ static TokenType identifierType()
             case 'n':
                 return checkKeyword(2, 1, "d", TOKEN_AND);
             case 's':
+                if (scanner.current - scanner.start > 2)
+                    return checkKeyword(2, 3, "ync", TOKEN_ASYNC);
                 return checkKeyword(2, 0, "", TOKEN_AS);
+            case 'w':
+                return checkKeyword(2, 3, "ait", TOKEN_AWAIT);
             }
         }
         break;

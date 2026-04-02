@@ -147,7 +147,6 @@ ObjClass *newClass(ObjString *name)
     clazz->superclass = NULL;
 
     initTable(&clazz->methods);
-    initTable(&clazz->staticVars);
     if (vm.baseObj != NULL)
     {
         tableAddAll(&vm.baseObj->methods, &clazz->methods);
@@ -155,9 +154,9 @@ ObjClass *newClass(ObjString *name)
         clazz->superclass = vm.baseObj;
     }
     push(OBJ_VAL(copyString("superClass", 10)));
-    tableSet(&clazz->staticVars, AS_STR(pop()), vm.baseObj != NULL ? OBJ_VAL(vm.baseObj) : NIL_VAL);
+    tableSet(&clazz->methods, AS_STR(pop()), vm.baseObj != NULL ? OBJ_VAL(vm.baseObj) : NIL_VAL);
 
-    tableSet(&clazz->staticVars, vm.clazzStr, OBJ_VAL(clazz));
+    tableSet(&clazz->methods, vm.clazzStr, OBJ_VAL(clazz));
     pop();
     return clazz;
 }
@@ -219,6 +218,7 @@ ObjFunction *newFunction()
     func->localNameConsts = NULL;
     func->upValueCount = 0;
     func->isGenerator = false;
+    func->isAsync = false;
     func->name = NULL;
     initChunk(&func->chunk);
     return func;
@@ -230,8 +230,8 @@ ObjForeign *newForeignObj(ForeignType type, void *ptr, bool ownsPtr)
     f->ptr = ptr;
     f->type = type;
     f->ownsPtr = ownsPtr;
+    f->klass = NULL;
     initTable(&f->fields);
-    initTable(&f->methods);
     return f;
 }
 
@@ -442,10 +442,6 @@ static void printCustomObj(ObjInstance *instance, int depth)
         return;
     }
     printf("%s@%p:{", instance->klass->name->chars, instance);
-    // printf("static: {");
-    // printTable(instance->klass->staticVars);
-    // printf("}, ");
-    // printf("fields: {");
 
     printTable(instance->fields, depth);
 
@@ -557,6 +553,25 @@ void printObj(Value value, int depth)
     case OBJ_FOREIGN:
     {
         ObjForeign *o = AS_FOREIGN(value);
+        if (o->klass != NULL)
+        {
+            if (depth > 0)
+            {                                    
+                if (o == NULL)
+                {
+                    printf("%s@f<%p>::{}", FOREIGN_TYPES[o->type], o->ptr);
+                    break;
+                }   
+                printf("%s@f<%p>:{", o->klass->name->chars, o);
+
+                printTable(o->fields, depth);
+
+                printf("}");
+            }
+            else
+                printf("%s@%p", o->klass->name->chars, (void *)o);
+        }
+        else
         printf("%s f<%p>", FOREIGN_TYPES[o->type], o->ptr);
         break;
     }

@@ -1,5 +1,4 @@
 import "socket.k"
-import "file"
 
 var PORT = 8082
 var CHAT_FILE = "chat_1.log"

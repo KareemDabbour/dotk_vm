@@ -89,6 +89,8 @@ typedef enum
     TOKEN_TRY,
     TOKEN_CATCH,
     TOKEN_YIELD,
+    TOKEN_ASYNC,
+    TOKEN_AWAIT,
 
     TOKEN_ERROR,
     TOKEN_EOF
@@ -172,6 +174,8 @@ static char *TOKEN_NAMES[] = {
     [TOKEN_TRY] = "TRY",
     [TOKEN_CATCH] = "CATCH",
     [TOKEN_YIELD] = "YIELD",
+    [TOKEN_ASYNC] = "ASYNC",
+    [TOKEN_AWAIT] = "AWAIT",
     [TOKEN_EOF] = "EOF"};
 
 typedef struct

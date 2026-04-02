@@ -187,7 +187,6 @@ static void blackenObject(Obj *object)
         markObj((Obj *)klass->name);
         markObj((Obj *)klass->superclass);
         markTable(&klass->methods);
-        markTable(&klass->staticVars);
         markValue(klass->setFn);
         markValue(klass->sizeFn);
         markValue(klass->hashFn);
@@ -234,8 +233,23 @@ static void blackenObject(Obj *object)
     case OBJ_FOREIGN:
     {
         ObjForeign *foreign = (ObjForeign *)object;
+        markObj((Obj *)foreign->klass);
         markTable(&foreign->fields);
-        markTable(&foreign->methods);
+        if (foreign->type == TYPE_THREAD && foreign->ptr)
+        {
+            DotKThread *t = (DotKThread *)foreign->ptr;
+            markObj((Obj *)t->closure);
+            markValue(t->result);
+            if (t->errorMsg)
+                markObj((Obj *)t->errorMsg);
+            for (int i = 0; i < t->argCount; i++)
+                markValue(t->args[i]);
+            int stackUsed = (int)(t->stackTop - t->stack);
+            for (int i = 0; i < stackUsed; i++)
+                markValue(t->stack[i]);
+            for (int i = 0; i < t->frameCount; i++)
+                markObj((Obj *)t->frames[i].closure);
+        }
         break;
     }
     case OBJ_STRING:
@@ -376,7 +390,6 @@ static void freeObject(Obj *object)
 #endif
         ObjClass *clazz = (ObjClass *)object;
         freeTable(&clazz->methods);
-        freeTable(&clazz->staticVars);
         FREE(ObjClass, clazz);
         break;
     }
@@ -409,15 +422,42 @@ static void freeObject(Obj *object)
         fprintf(stderr, "%p freeing OBJ_FOREIGN\n", (void *)object);
 #endif
         ObjForeign *foreign = (ObjForeign *)object;
-        if (foreign->ownsPtr)
+        if (foreign->ownsPtr && foreign->ptr)
+        {
+            if (foreign->type == TYPE_THREAD)
+            {
+                DotKThread *t = (DotKThread *)foreign->ptr;
+                if (t->args)
+                    free(t->args);
+                pthread_mutex_destroy(&t->mutex);
+                pthread_cond_destroy(&t->cond);
+            }
             free(foreign->ptr);
+        }
 
         freeTable(&foreign->fields);
-        freeTable(&foreign->methods);
         FREE(ObjForeign, foreign);
         break;
     }
     }
+}
+
+static void markThreadRoots(DotKThread *t)
+{
+    int stackUsed = (int)(t->stackTop - t->stack);
+    for (int i = 0; i < stackUsed; i++)
+        markValue(t->stack[i]);
+    for (int i = 0; i < t->frameCount; i++)
+        markObj((Obj *)t->frames[i].closure);
+    if (t->openUpvalues)
+    {
+        for (ObjUpvalue *uv = t->openUpvalues; uv != NULL; uv = uv->next)
+            markObj((Obj *)uv);
+    }
+    markObj((Obj *)t->closure);
+    markValue(t->result);
+    if (t->errorMsg)
+        markObj((Obj *)t->errorMsg);
 }
 
 static void markRoots()
@@ -435,6 +475,12 @@ static void markRoots()
     {
         markObj((Obj *)upvalue);
     }
+
+    /* Scan the main thread's saved state when it is not the active thread.
+       Without this, objects only reachable from the main thread's stack
+       (e.g. the script closure) get collected while it blocks in I/O. */
+    if (vm.mainThread && vm.currentThread != vm.mainThread)
+        markThreadRoots(vm.mainThread);
 
     markTable(&vm.globals);
     markTable(&vm.constGlobals);
@@ -474,6 +520,7 @@ static void markRoots()
     markObj((Obj *)vm.mapIteratorClass);
     markObj((Obj *)vm.lastError);
     markObj((Obj *)vm.errorClass);
+    markObj((Obj *)vm.threadClass);
     markObj((Obj *)vm.baseObj);
 }
 
@@ -519,7 +566,7 @@ void collectGarbage()
     size_t before = vm.bytesAllocated;
 #endif
     /* Optional runtime GC debug output when DOTK_DEBUG_GC is set. */
-    if (getenv("DOTK_DEBUG_GC") != NULL)
+    if (gcDebugEnabled())
     {
         size_t objCount = 0;
         size_t cnt_string = 0, cnt_function = 0, cnt_closure = 0, cnt_list = 0, cnt_map = 0, cnt_namespace = 0, cnt_class = 0, cnt_instance = 0, cnt_upvalue = 0, cnt_foreign = 0, cnt_native = 0, cnt_bound_method = 0, cnt_bound_builtin = 0, cnt_slice = 0, cnt_other = 0;
@@ -586,15 +633,25 @@ void collectGarbage()
     traceReferences();
     tableRemoveWhite(&vm.strings);
     sweep();
+    memset(vm.inlineCache, 0, sizeof(vm.inlineCache));
 
-    vm.nextGC = vm.bytesAllocated * GC_HEAP_GROW_FACTOR;
+    /* Adaptive GC threshold: grow faster when live set is small, slower when large. */
+    {
+        size_t liveBytes = vm.bytesAllocated;
+        size_t minGC = 1024UL * 1024UL;  /* 1 MB floor */
+        size_t nextGC = liveBytes < (1024UL * 1024UL * 64UL)
+            ? liveBytes * GC_HEAP_GROW_FACTOR
+            : liveBytes + liveBytes / 2;  /* 1.5x for large heaps */
+        if (nextGC < minGC) nextGC = minGC;
+        vm.nextGC = nextGC;
+    }
 #ifdef DEBUG_LOG_GC
     printf("-- gc end\n");
     fprintf(stderr, "   collected %zu bytes (from %zu to %zu) next at %zu\n",
             before - vm.bytesAllocated, before, vm.bytesAllocated,
             vm.nextGC);
 #endif
-    if (getenv("DOTK_DEBUG_GC") != NULL)
+    if (gcDebugEnabled())
     {
         size_t objCount2 = 0;
         size_t cnt_string2 = 0, cnt_function2 = 0, cnt_closure2 = 0, cnt_list2 = 0, cnt_map2 = 0, cnt_namespace2 = 0, cnt_class2 = 0, cnt_instance2 = 0, cnt_upvalue2 = 0, cnt_foreign2 = 0, cnt_native2 = 0, cnt_bound_method2 = 0, cnt_bound_builtin2 = 0, cnt_slice2 = 0, cnt_other2 = 0;

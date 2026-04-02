@@ -27,6 +27,8 @@ typedef struct
 
 static const DotKNativeApi *g_api = NULL;
 
+static Value make_ndarray_value(DotKNdArray *arr);
+
 static bool expect_argc(const char *name, int got, int expected, bool *hasError)
 {
     if (got == expected)
@@ -225,11 +227,6 @@ static void ndarray_write_from_double(DotKNdArray *arr, int64_t idx, double v)
         return;
     }
     ((double *)arr->data)[idx] = v;
-}
-
-static Value make_ndarray_value(DotKNdArray *arr)
-{
-    return g_api->makeForeign(TYPE_NDARRAY, arr, true);
 }
 
 static Value nd_zeros_native(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -1089,6 +1086,17 @@ static Value nd_to_list_native(int argc, Value *argv, bool *hasError, bool *push
         return NIL_VAL;
 
     return nd_to_list_recursive(arr, 0, 0);
+}
+
+Value make_ndarray_value(DotKNdArray *arr)
+{
+    ObjForeign *f = AS_FOREIGN(g_api->makeForeign(TYPE_NDARRAY, arr, true));
+
+    g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("dtype", 5, true)), (arr->dtype == ND_DTYPE_INT64) ? g_api->makeString("int64", 5, true) : g_api->makeString("float64", 7, true));
+    g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("ndim", 4, true)), NUM_VAL((double)arr->ndim));
+    g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("size", 4, true)), NUM_VAL((double)arr->size));
+
+    return OBJ_VAL(f);
 }
 
 bool dotk_init_module(const DotKNativeApi *api)

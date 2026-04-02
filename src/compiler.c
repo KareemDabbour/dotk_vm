@@ -86,6 +86,9 @@ typedef struct _Compiler
     UpValue upValues[UINT8_COUNT];
     int scopeDepth;
     bool hasYield;
+    bool isAsyncFn;
+    int lastCallOffset;
+    bool lastCallIsSelf;
 } Compiler;
 
 typedef struct _ClassCompiler
@@ -104,6 +107,7 @@ int innermostLoopEnd = -1;
 int numberOfBreaks = 0;
 int breakAddresses[UINT8_COUNT] = {0};
 bool inTernary = false;
+static bool pendingAsync = false;
 int ternaryThen = -1;
 int ternaryElse = -1;
 static int gCompilerOptimizationLevel = 1;
@@ -301,6 +305,8 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
     compiler->hasYield = false;
+    compiler->isAsyncFn = false;
+    compiler->lastCallOffset = -1;
     compiler->isRepl = isRepl;
     compiler->printBytecode = printBytecode;
     compiler->isInTryCatch = type == TYPE_TRY || type == TYPE_CATCH;
@@ -415,6 +421,7 @@ static void list(bool canAssign)
         emitBytes(OP_GET_LOCAL, (uint16_t)indexSlot);
         namedVariable(synthToken("len"), false);
         emitBytes(OP_GET_LOCAL, (uint16_t)sourceSlot);
+        current->lastCallOffset = currentChunk()->size;
         emitBytes(OP_CALL, (uint16_t)1);
         emitByte(OP_LESS);
 
@@ -729,6 +736,24 @@ static ArgInfo argList()
 
 static void call(bool canAssign)
 {
+    // Check if the callee (already compiled) was a GET_GLOBAL for the current
+    // function's name — this indicates a potential self-recursive tail call.
+    bool isSelf = false;
+    {
+        Chunk *chunk = currentChunk();
+        int sz = chunk->size;
+        if (sz >= 2
+            && chunk->code[sz - 2] == OP_GET_GLOBAL
+            && current->type == TYPE_FUNCTION
+            && current->function->name != NULL)
+        {
+            uint16_t constIdx = chunk->code[sz - 1];
+            Value nameVal = chunk->constants.values[constIdx];
+            if (IS_STR(nameVal) && AS_STR(nameVal) == current->function->name)
+                isSelf = true;
+        }
+    }
+
     ArgInfo args = argList();
     if (args.keyword > 0)
     {
@@ -738,6 +763,8 @@ static void call(bool canAssign)
     }
     else
     {
+        current->lastCallOffset = currentChunk()->size;
+        current->lastCallIsSelf = isSelf;
         emitBytes(OP_CALL, args.positional);
     }
 }
@@ -856,6 +883,18 @@ static void returnStatement()
 
         expression();
         match(TOKEN_SEMICOLON);
+        // Tail call optimization: if the last emitted instruction is OP_CALL
+        // and it was a self-recursive call, patch it to OP_TAIL_CALL.
+        {
+            Chunk *chunk = currentChunk();
+            if (current->lastCallOffset >= 0
+                && current->lastCallOffset == chunk->size - 2
+                && chunk->code[current->lastCallOffset] == OP_CALL
+                && current->lastCallIsSelf)
+            {
+                chunk->code[current->lastCallOffset] = OP_TAIL_CALL;
+            }
+        }
         emitByte(OP_RETURN);
     }
 }
@@ -911,6 +950,35 @@ static void yieldStatement()
     }
 
     emitByte(OP_YIELD);
+    emitByte(OP_POP); // discard the send value (yield used as statement)
+}
+
+static void yieldExpr(bool canAssign)
+{
+    if (current->type == TYPE_SCRIPT)
+    {
+        error("Can't yield from top-level code");
+        return;
+    }
+
+    current->hasYield = true;
+    if (check(TOKEN_SEMICOLON) || check(TOKEN_RIGHT_PAREN) || check(TOKEN_RIGHT_BRACE)
+        || check(TOKEN_EOF) || check(TOKEN_COMMA))
+        emitByte(OP_NIL);
+    else
+        parsePrecedence(PREC_ASSIGNMENT);
+
+    emitByte(OP_YIELD);
+    /* OP_YIELD leaves the send value on the stack — this is the
+       expression result of `yield`, consumed by the enclosing context. */
+}
+
+static void awaitExpr(bool canAssign)
+{
+    /* await <expr> — evaluates expr, then emits OP_AWAIT which
+       joins the Thread if it is one, or returns the value as-is. */
+    parsePrecedence(PREC_UNARY);
+    emitByte(OP_AWAIT);
 }
 
 static void block()
@@ -926,6 +994,11 @@ static void function(FunctionType type)
 {
     Compiler compiler;
     initCompiler(&compiler, type, parser.file, current->isRepl, current->printBytecode);
+    if (pendingAsync)
+    {
+        compiler.isAsyncFn = true;
+        pendingAsync = false;
+    }
     beginScope();
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
@@ -1021,6 +1094,7 @@ static void function(FunctionType type)
     // optimizeFunction(current->function);
     ObjFunction *function = endCompiler();
     function->isGenerator = compiler.hasYield;
+    function->isAsync = compiler.isAsyncFn;
     uint16_t constant = makeConstant(OBJ_VAL(function));
     emitBytes(OP_CLOSURE, constant);
     if (check(TOKEN_LEFT_PAREN))
@@ -1035,6 +1109,7 @@ static void function(FunctionType type)
         }
         else
         {
+            current->lastCallOffset = currentChunk()->size;
             emitBytes(OP_CALL, args.positional);
         }
     }
@@ -1555,10 +1630,19 @@ static void synchronize()
     }
 }
 
+static void asyncFunDeclaration()
+{
+    consume(TOKEN_FUN, "Expect 'fn' after 'async'.");
+    pendingAsync = true;
+    funDeclaration();
+}
+
 static void declaration()
 {
     if (match(TOKEN_CLASS))
         classDeclaration();
+    else if (match(TOKEN_ASYNC))
+        asyncFunDeclaration();
     else if (match(TOKEN_FUN))
         funDeclaration();
     else if (match(TOKEN_VAR))
@@ -2431,7 +2515,9 @@ ParseRule rules[] = {
     [TOKEN_OR] = {NULL, or_, PREC_OR},
     [TOKEN_PRINT] = {NULL, NULL, PREC_NONE},
     [TOKEN_RETURN] = {NULL, NULL, PREC_NONE},
-    [TOKEN_YIELD] = {NULL, NULL, PREC_NONE},
+    [TOKEN_YIELD] = {yieldExpr, NULL, PREC_NONE},
+    [TOKEN_ASYNC] = {NULL, NULL, PREC_NONE},
+    [TOKEN_AWAIT] = {awaitExpr, NULL, PREC_NONE},
     [TOKEN_SUPER] = {super_, NULL, PREC_NONE},
     [TOKEN_THIS] = {_this, NULL, PREC_NONE},
     [TOKEN_TRUE] = {literal, NULL, PREC_NONE},

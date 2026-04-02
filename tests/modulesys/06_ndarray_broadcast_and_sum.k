@@ -1,4 +1,4 @@
-from "ndarray" import array, add, sum, sumAxis, toList;
+from ndarray import array, add, sum, sumAxis, toList;
 
 var a = array({{1, 2, 3}, {4, 5, 6}})
 var b = array({{10, 20, 30}})

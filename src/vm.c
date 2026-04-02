@@ -58,9 +58,10 @@ static int gDebugScriptPos = 0;
 static bool invoke(ObjString *name, int argc);
 static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
 static void setNativeMethod(Table *table, const char *name, NativeFn fn);
+static void *threadEntryPoint(void *arg);
 static Value namedNativeVal(const char *name, NativeFn fn);
 static InterpretResult run(bool isRepl, int runUntilFrame);
-static bool runGeneratorNext(ObjGenerator *generator, Value *out);
+static bool runGeneratorNext(ObjGenerator *generator, Value *out, Value sendValue);
 static char *valueToString(Value val, char *buff, int *len);
 static char *valueToStringSized(Value val, char *buff, size_t cap, int *len);
 static ObjString *valueToObjStringDynamic(Value val);
@@ -71,6 +72,7 @@ static bool gStringifyTruncated = false;
 static bool gYieldTrapActive = false;
 static bool gYieldTrapHit = false;
 static Value gYieldTrapValue = NIL_VAL;
+static Value gYieldSendValue = NIL_VAL;
 
 static inline uint32_t hashNumberBits(double number)
 {
@@ -908,12 +910,17 @@ void runtimeError(const char *format, ...)
     // save error from format
     va_list args;
     va_start(args, format);
-    char *buff = ALLOCATE(char, STR_BUFF);
-    vsprintf(buff, format, args);
-    vm.lastError = takeString(buff, (int)strlen(buff));
+    va_list argsCopy;
+    va_copy(argsCopy, args);
+    int needed = vsnprintf(NULL, 0, format, argsCopy);
+    va_end(argsCopy);
+    char *buff = ALLOCATE(char, needed + 1);
+    vsnprintf(buff, needed + 1, format, args);
+    vm.lastError = takeString(buff, needed);
     va_end(args);
     int len = 0;
-    char *trace = ALLOCATE(char, STR_BUFF);
+    int traceCap = 1024;
+    char *trace = ALLOCATE(char, traceCap);
     Position pos;
     for (int i = 0; i < vm.frameCount; i++)
     {
@@ -925,15 +932,29 @@ void runtimeError(const char *format, ...)
         if (strcmp(function->name->chars, pos.file) == 0)
         {
             printFunc = false;
-            len += sprintf(trace + len, "Error in:\n");
+            int n = snprintf(trace + len, traceCap - len, "Error in:\n");
+            if (len + n >= traceCap) { traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, len, traceCap); n = snprintf(trace + len, traceCap - len, "Error in:\n"); }
+            len += n;
         }
 
-        len += sprintf(trace + len, "  %s:%d:%d", pos.file, pos.line, pos.col);
+        int n = snprintf(trace + len, traceCap - len, "  %s:%d:%d", pos.file, pos.line, pos.col);
+        if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, "  %s:%d:%d", pos.file, pos.line, pos.col); }
+        len += n;
         if (function->name == NULL)
-            len += sprintf(trace + len, " in script");
+        {
+            n = snprintf(trace + len, traceCap - len, " in script");
+            if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, " in script"); }
+            len += n;
+        }
         else if (printFunc)
-            len += sprintf(trace + len, " in %s()", function->name->chars);
-        len += sprintf(trace + len, "\n");
+        {
+            n = snprintf(trace + len, traceCap - len, " in %s()", function->name->chars);
+            if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, " in %s()", function->name->chars); }
+            len += n;
+        }
+        n = snprintf(trace + len, traceCap - len, "\n");
+        if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, "\n"); }
+        len += n;
     }
     vm.lastErrorTrace = takeString(trace, len);
 
@@ -979,6 +1000,8 @@ ObjClass *getVmClass(Value val)
         return vm.stringClass;
     if (IS_GENERATOR(val))
         return vm.generatorClass;
+    if (IS_FOREIGN(val))
+        return AS_FOREIGN(val)->klass;
     return NULL;
 }
 
@@ -2229,18 +2252,10 @@ NATIVE_FN(fileInitNative)
         return NIL_VAL;
     }
     ObjForeign *f = newForeignObj(TYPE_FILE, file, false);
+    f->klass = vm.fileClass;
     tableSet(&f->fields, copyString("mode", 4), OBJ_VAL(copyString(mode, (int)strlen(mode))));
     tableSet(&f->fields, copyString("name", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
-
-    setNativeMethod(&f->methods, "close", fileCloseNative);
-    setNativeMethod(&f->methods, "size", fileFSizeNative);
-    setNativeMethod(&f->methods, "write", fileWriteNative);
-    setNativeMethod(&f->methods, "read", fileReadNative);
-    setNativeMethod(&f->methods, "readLine", fileReadLineNative);
-    setNativeMethod(&f->methods, "readLines", fileReadLinesNative);
-    setNativeMethod(&f->methods, "resetCursor", fileResetCursorNative);
-    setNativeMethod(&f->methods, "cursorPos", fileCursorPosition);
 
     return OBJ_VAL(f);
 }
@@ -2430,14 +2445,9 @@ NATIVE_FN(sqlInitNative)
     }
 
     ObjForeign *f = newForeignObj(TYPE_SQLITE, db, false);
+    f->klass = vm.sqlClass;
     tableSet(&f->fields, copyString("path", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
-
-    setNativeMethod(&f->methods, "close", sqlCloseNative);
-    setNativeMethod(&f->methods, "exec", sqlExecNative);
-    setNativeMethod(&f->methods, "query", sqlQueryNative);
-    // setNativeMethod(&f->methods, "lastInsertId", sqlLastInsertIdNative);
-    // setNativeMethod(&f->methods, "changes", sqlChangesNative);
 
     return OBJ_VAL(f);
 }
@@ -2623,6 +2633,9 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
         case OBJ_UPVALUE:
             type = "upvalue";
             break;
+        case OBJ_FOREIGN:
+            type = "foreign";
+            break;
         default:
             type = "unknown";
             break;
@@ -2741,10 +2754,12 @@ static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         *hasError = true;
         return NIL_VAL;
     }
+    DotKThread *saved = vmBeginBlockingIO();
     if (round(AS_NUM(argv[0])) == AS_NUM(argv[0]))
         sleep(AS_NUM(argv[0]));
     else
         usleep(AS_NUM(argv[0]) * 1000000);
+    vmEndBlockingIO(saved);
     return NIL_VAL;
 }
 
@@ -2845,6 +2860,52 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
         case OBJ_FOREIGN:
         {
             ObjForeign *obj = AS_FOREIGN(val);
+            if (obj->klass != NULL)
+            {
+                int strAlloc = STR_BUFF;
+                char *str = ALLOCATE(char, strAlloc);
+                int len2 = 0;
+                int initialLen = obj->klass->name->len + 2;
+                len2 = snprintf(str, strAlloc, "%s {", obj->klass->name->chars);
+
+                for (int i = 0; i < obj->fields.capacity; i++)
+                {
+                    if (obj->fields.entries[i].key != NULL && obj->fields.entries[i].key != vm.clazzStr)
+                    {
+                        ObjString *key = obj->fields.entries[i].key;
+                        Value value = obj->fields.entries[i].value;
+
+                        char valueStr[STR_BUFF] = {0};
+                        int valueLen = 0;
+                        valueToString(value, valueStr, &valueLen);
+                        int tempLen = key->len + valueLen + 4; // 4 for ": " and ", "
+                        if (len2 + tempLen + 2 >= strAlloc)
+                        {
+                            int old = strAlloc;
+                            strAlloc = GROW_CAPACITY(len2 + tempLen + 2);
+                            str = GROW_ARRAY(char, str, old, strAlloc);
+                        }
+                        int n = snprintf(str + len2, strAlloc - len2, "%s: %s, ", key->chars, valueStr);
+                        len2 += n;
+                    }
+                }
+
+                if (len2 > initialLen) // Remove the last ", " if there were any fields
+                    len2 -= 2;
+                if (len2 + 2 >= strAlloc)
+                {
+                    int old = strAlloc;
+                    strAlloc = len2 + 2;
+                    str = GROW_ARRAY(char, str, old, strAlloc);
+                }
+                str[len2++] = '}';
+                str[len2] = '\0';
+                index = appendLiteral(buff, cap, 0, str);
+                *len = (int)index;
+                FREE_ARRAY(char, str, strAlloc);
+                return buff;
+
+            }
             index = appendFormat(buff, cap, 0, "%s f<%p>", FOREIGN_TYPES[obj->type], obj->ptr);
             *len = (int)index;
             return buff;
@@ -3089,28 +3150,31 @@ static Value joinNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     // char str[STR_BUFF] = {0}; // ALLOCATE(char, 100);
     int strAlloc = 100;
     char *str = ALLOCATE(char, strAlloc);
-    str[0] = '\0';
-    int needed = 1;
-    // sprintf(str, "%s", "");
+    int pos = 0;
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        needed += len + sep->len;
+        int needed = pos + len + (i < list->count - 1 ? sep->len : 0) + 1;
 
         if (needed >= strAlloc)
         {
             int old = strAlloc;
-            strAlloc = (needed + 0.5 * needed);
+            strAlloc = needed + (needed >> 1);
             str = GROW_ARRAY(char, str, old, strAlloc);
         }
 
-        sprintf(str, "%s%s%s", str, item, sep->chars);
+        memcpy(str + pos, item, len);
+        pos += len;
+        if (i < list->count - 1)
+        {
+            memcpy(str + pos, sep->chars, sep->len);
+            pos += sep->len;
+        }
     }
-    if (list->count > 0)
-        str[needed - sep->len - 1] = '\0';
-    return OBJ_VAL(takeString(str, (int)strlen(str)));
+    str[pos] = '\0';
+    return OBJ_VAL(takeString(str, pos));
 }
 
 static Value intCastNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -3458,6 +3522,9 @@ static Value setSockOptionsNative(int argc, Value *argv, bool *hasError, bool *p
         *hasError = true;
         return BOOL_VAL(false);
     }
+#ifdef SO_REUSEPORT
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+#endif
     return BOOL_VAL(true);
 }
 
@@ -3497,8 +3564,11 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (getaddrinfo(host, NULL, &hints, &res) != 0)
+    DotKThread *saved = vmBeginBlockingIO();
+    int gaiResult = getaddrinfo(host, NULL, &hints, &res);
+    if (gaiResult != 0)
     {
+        vmEndBlockingIO(saved);
         freeaddrinfo(res);
         runtimeError("Failed to get address info for host '%s'", host);
         *hasError = true;
@@ -3517,7 +3587,9 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     //     return BOOL_VAL(false);
     // }
 
-    if (connect(sock, (struct sockaddr *)serv_addr, sizeof(*serv_addr)) < 0)
+    int connectResult = connect(sock, (struct sockaddr *)serv_addr, sizeof(*serv_addr));
+    vmEndBlockingIO(saved);
+    if (connectResult < 0)
     {
         freeaddrinfo(res);
         runtimeError("Failed to connect to host '%s' on port '%d'", host, port);
@@ -3616,7 +3688,9 @@ static Value acceptNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
     socklen_t addrlen = sizeof(address);
+    DotKThread *saved = vmBeginBlockingIO();
     int newSock = accept(sock, (struct sockaddr *)&address, &addrlen);
+    vmEndBlockingIO(saved);
     if (newSock < 0)
     {
         runtimeError("Failed to accept connection");
@@ -3647,7 +3721,9 @@ static Value readNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     // {
     //     buffer[bytesRead] = '\0';
     // }
+    DotKThread *saved = vmBeginBlockingIO();
     int valread = read(sock, buffer, BUFFER_SIZE);
+    vmEndBlockingIO(saved);
     if (valread < 0)
     {
         runtimeError("Failed to read data");
@@ -3682,7 +3758,9 @@ NATIVE_FN(pollNative)
     struct pollfd fds[1];
     fds[0].fd = sock;
     fds[0].events = POLLIN;
+    DotKThread *saved = vmBeginBlockingIO();
     int ret = poll(fds, 1, timeout);
+    vmEndBlockingIO(saved);
     if (ret < 0)
     {
         runtimeError("Failed to poll socket");
@@ -3715,7 +3793,9 @@ static Value readSizeNative(int argc, Value *argv, bool *hasError, bool *pushedV
     int sock = (int)AS_NUM(argv[0]);
     int size = (int)AS_NUM(argv[1]);
     char buffer[BUFFER_SIZE] = {0};
+    DotKThread *saved = vmBeginBlockingIO();
     int valread = read(sock, buffer, size);
+    vmEndBlockingIO(saved);
     if (valread < 0)
     {
         runtimeError("Failed to read data");
@@ -3818,7 +3898,10 @@ static Value sendNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     int sock = (int)AS_NUM(argv[0]);
     char *data = AS_CSTR(argv[1]);
     int dataLen = strlen(data);
-    if (send(sock, data, dataLen, 0) != dataLen)
+    DotKThread *saved = vmBeginBlockingIO();
+    ssize_t sent = send(sock, data, dataLen, 0);
+    vmEndBlockingIO(saved);
+    if (sent != dataLen)
     {
         runtimeError("Failed to send data");
         *hasError = true;
@@ -4121,7 +4204,7 @@ void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn funct
 {
     if (clazz == NULL || name == NULL || function == NULL)
         return;
-    tableSet(&clazz->staticVars, copyString(name, (int)strlen(name)), namedNativeVal(name, function));
+    tableSet(&clazz->methods, copyString(name, (int)strlen(name)), namedNativeVal(name, function));
 }
 
 static Value vmApiMakeString(const char *chars, int len, bool interned)
@@ -4164,6 +4247,13 @@ static Value vmApiMakeForeign(ForeignType type, void *ptr, bool ownsPtr)
     return OBJ_VAL(newForeignObj(type, ptr, ownsPtr));
 }
 
+static Value vmApiMakeForeignWithClass(ObjClass *klass, void *ptr, bool ownsPtr)
+{
+    ObjForeign *f = newForeignObj(TYPE_UNKNOWN, ptr, ownsPtr);
+    f->klass = klass;
+    return OBJ_VAL(f);
+}
+
 static bool loadDynamicModulePath(const char *path, bool reportError)
 {
     void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -4192,9 +4282,13 @@ static bool loadDynamicModulePath(const char *path, bool reportError)
             .makeMap = vmApiMakeMap,
             .mapSet = vmApiMapSet,
             .makeForeign = vmApiMakeForeign,
+            .makeForeignWithClass = vmApiMakeForeignWithClass,
             .pushValue = push,
             .popValue = pop,
             .raiseError = runtimeError,
+            .valueTypeName = valueTypeName,
+            .setNativeMethod = setNativeMethod,
+            .setTableValue = tableSet
         };
 
         ret = initModule(&api);
@@ -4782,7 +4876,7 @@ static bool callValue(Value callee, int argC)
         {
             ObjForeign *foreign = AS_FOREIGN(callee);
             Value initMethod;
-            if (!tableGet(&foreign->methods, vm.initStr, &initMethod))
+            if (!tableGet(&foreign->fields, vm.initStr, &initMethod))
             {
                 runtimeError("This foreign object %s does not have an init method", FOREIGN_TYPES[foreign->type]);
                 return false;
@@ -4803,6 +4897,90 @@ static bool callValue(Value callee, int argC)
                 ObjGenerator *generator = newGenerator(closure, args, normalizedArgCount);
                 vm.stackTop -= normalizedArgCount + 1;
                 push(OBJ_VAL(generator));
+                return true;
+            }
+            if (closure->function->isAsync)
+            {
+                int normalizedArgCount = 0;
+                if (!normalizeClosureArgsOnStack(closure, argC, 0, &normalizedArgCount))
+                    return false;
+
+                int callArgc = normalizedArgCount;
+
+                DotKThread *t = (DotKThread *)malloc(sizeof(DotKThread));
+                if (!t)
+                {
+                    runtimeError("Failed to allocate async thread.");
+                    return false;
+                }
+                memset(t, 0, sizeof(DotKThread));
+                t->status = THREAD_CREATED;
+                t->closure = closure;
+                t->result = NIL_VAL;
+                t->errorMsg = NULL;
+                t->openUpvalues = NULL;
+                t->isInTryCatch = false;
+                pthread_mutex_init(&t->mutex, NULL);
+                pthread_cond_init(&t->cond, NULL);
+
+                t->argCount = callArgc;
+                if (callArgc > 0)
+                {
+                    t->args = (Value *)malloc(sizeof(Value) * callArgc);
+                    Value *argStart = vm.stackTop - callArgc;
+                    for (int i = 0; i < callArgc; i++)
+                        t->args[i] = argStart[i];
+                }
+                else
+                {
+                    t->args = NULL;
+                }
+
+                /* Build child stack: sentinel slot + closure + args */
+                t->stackTop = t->stack;
+                *t->stackTop++ = NIL_VAL;          /* sentinel slot 0 */
+                *t->stackTop++ = OBJ_VAL(closure);
+                if (callArgc > 0)
+                {
+                    Value *argStart = vm.stackTop - callArgc;
+                    for (int i = 0; i < callArgc; i++)
+                        *t->stackTop++ = argStart[i];
+                }
+
+                /* Sentinel frame 0 */
+                t->frames[0].closure = closure;
+                t->frames[0].ip = closure->function->chunk.code;
+                t->frames[0].slots = t->stack;
+                t->frames[0].startTimeNs = 0;
+
+                /* Real call frame 1 */
+                t->frames[1].closure = closure;
+                t->frames[1].ip = closure->function->chunk.code;
+                t->frames[1].slots = t->stack + 1;
+                t->frames[1].startTimeNs = 0;
+                t->frameCount = 2;
+
+                ObjForeign *threadObj = newForeignObj(TYPE_THREAD, t, true);
+                threadObj->klass = vm.threadClass;
+
+                pthread_attr_t attr;
+                pthread_attr_init(&attr);
+                pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+                if (pthread_create(&t->handle, &attr, threadEntryPoint, t) != 0)
+                {
+                    pthread_attr_destroy(&attr);
+                    free(t->args);
+                    pthread_mutex_destroy(&t->mutex);
+                    pthread_cond_destroy(&t->cond);
+                    free(t);
+                    runtimeError("Failed to create async thread.");
+                    return false;
+                }
+                pthread_attr_destroy(&attr);
+
+                /* Replace closure + args on the caller's stack with the thread object */
+                vm.stackTop -= normalizedArgCount + 1;
+                push(OBJ_VAL(threadObj));
                 return true;
             }
             return callClosureWithArgs(closure, argC, 0);
@@ -4886,7 +5064,7 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
 
             ObjForeign *foreign = AS_FOREIGN(callee);
             Value initMethod;
-            if (!tableGet(&foreign->methods, vm.initStr, &initMethod))
+            if (!tableGet(&foreign->fields, vm.initStr, &initMethod))
             {
                 runtimeError("This foreign object %s does not have an init method", FOREIGN_TYPES[foreign->type]);
                 return false;
@@ -4925,11 +5103,29 @@ static bool invokeFromClass(ObjClass *klass, ObjString *name, int argc)
         return false;
 
     Value method;
-    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
+    if (!tableGet(&klass->methods, name, &method))
     {
         runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
         return false;
     }
+    return callValue(method, argc);
+}
+
+static bool invokeFromClassIC(ObjClass *klass, ObjString *name, int argc, uint8_t *cacheKey)
+{
+    if (klass == NULL)
+        return false;
+
+    Value method;
+    if (!tableGet(&klass->methods, name, &method))
+    {
+        runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
+        return false;
+    }
+    unsigned icIdx = ((uintptr_t)cacheKey >> 2) & (IC_SIZE - 1);
+    vm.inlineCache[icIdx].ip = cacheKey;
+    vm.inlineCache[icIdx].klass = klass;
+    vm.inlineCache[icIdx].method = method;
     return callValue(method, argc);
 }
 
@@ -4939,7 +5135,7 @@ static bool invokeFromClassKw(ObjClass *klass, ObjString *name, int positionalCo
         return false;
 
     Value method;
-    if (!tableGet(&klass->staticVars, name, &method) && !tableGet(&klass->methods, name, &method))
+    if (!tableGet(&klass->methods, name, &method))
     {
         runtimeError("Undefined method '%s' for class '%s'", name->chars, klass->name->chars);
         return false;
@@ -4947,7 +5143,7 @@ static bool invokeFromClassKw(ObjClass *klass, ObjString *name, int positionalCo
     return callValueKw(method, positionalCount, keywordCount);
 }
 
-bool invoke(ObjString *name, int argc)
+static bool invokeIC(ObjString *name, int argc, uint8_t *cacheKey)
 {
     Value receiver = peek(argc);
     if (IS_NAMESPACE(receiver))
@@ -4967,8 +5163,10 @@ bool invoke(ObjString *name, int argc)
     {
         ObjForeign *foreign = AS_FOREIGN(receiver);
         Value method;
-        if (!tableGet(&foreign->methods, name, &method))
+        if (!tableGet(&foreign->fields, name, &method))
         {
+            if (foreign->klass != NULL)
+                return invokeFromClass(foreign->klass, name, argc);
             runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
             return false;
         }
@@ -4981,7 +5179,7 @@ bool invoke(ObjString *name, int argc)
     if (!isInstance && !isClass)
     {
         if (isBuiltinClass(receiver))
-            return invokeFromClass(getVmClass(receiver), name, argc);
+            return invokeFromClassIC(getVmClass(receiver), name, argc, cacheKey);
 
         runtimeError("Only Classes and their instances have methods. -- not '%s'", valueTypeName(receiver));
         return false;
@@ -4999,7 +5197,12 @@ bool invoke(ObjString *name, int argc)
         vm.stackTop[-argc - 1] = value;
         return callValue(value, argc);
     }
-    return invokeFromClass(instance->klass, name, argc);
+    return invokeFromClassIC(instance->klass, name, argc, cacheKey);
+}
+
+bool invoke(ObjString *name, int argc)
+{
+    return invokeIC(name, argc, NULL);
 }
 
 static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
@@ -5023,8 +5226,10 @@ static bool invokeKw(ObjString *name, int positionalCount, int keywordCount)
     {
         ObjForeign *foreign = AS_FOREIGN(receiver);
         Value method;
-        if (!tableGet(&foreign->methods, name, &method))
+        if (!tableGet(&foreign->fields, name, &method))
         {
+            if (foreign->klass != NULL)
+                return invokeFromClassKw(foreign->klass, name, positionalCount, keywordCount);
             runtimeError("Undefined method '%s' for foreign object of type '%s'", name->chars, FOREIGN_TYPES[foreign->type]);
             return false;
         }
@@ -5070,10 +5275,16 @@ static bool bindMethod(ObjClass *klass, ObjString *name)
         push(OBJ_VAL(bound));
         return true;
     }
-    ObjBoundMethod *bound = newBoundMethod(peek(0), AS_CLOSURE(method));
-
+    if (IS_CLOSURE(method))
+    {
+        ObjBoundMethod *bound = newBoundMethod(peek(0), AS_CLOSURE(method));
+        pop();
+        push(OBJ_VAL(bound));
+        return true;
+    }
+    // Static data value (not a callable) — push raw value
     pop();
-    push(OBJ_VAL(bound));
+    push(method);
     return true;
 }
 
@@ -5184,7 +5395,7 @@ static bool restoreGeneratorState(ObjGenerator *generator, int baseFrameIndex, V
     return true;
 }
 
-static bool runGeneratorNext(ObjGenerator *generator, Value *out)
+static bool runGeneratorNext(ObjGenerator *generator, Value *out, Value sendValue)
 {
     if (generator->finished)
     {
@@ -5215,12 +5426,17 @@ static bool runGeneratorNext(ObjGenerator *generator, Value *out)
             runtimeError("Generator state is invalid.");
             return false;
         }
+        /* Push the value being sent into the generator.
+           yield expressions evaluate to this value on resume. */
+        push(sendValue);
     }
 
     gYieldTrapActive = true;
     gYieldTrapHit = false;
+    gYieldSendValue = sendValue;
     InterpretResult result = run(false, baseFrameIndex + 1);
     gYieldTrapActive = false;
+    gYieldSendValue = NIL_VAL;
 
     if (result == INTERPRET_RUNTIME_ERROR)
     {
@@ -5404,87 +5620,291 @@ ObjClass *vmDefineClass(const char *name)
     return primativeClass((char *)name);
 }
 
-static void *runCallableInNewThread(void *arg)
+/* ---- Thread helpers: save/restore VM <-> DotKThread ---- */
+
+/* Save the live VM state into the given DotKThread. */
+static void vmSaveToThread(DotKThread *t)
 {
-    acquireGVL();
-    ObjClosure *callable = (ObjClosure *)arg;
-    // if (!IS_CLOSURE(callable))
-    // {
-    //     runtimeError("Thread expects a closure as argument but got '%s'", VALUE_TYPES[callable.type]);
-    //     return NULL;
-    // }
-    // push(OBJ_VAL(callable));
-    if (!call(callable, 0))
+    int stackUsed = (int)(vm.stackTop - vm.stack);
+    memcpy(t->stack, vm.stack, sizeof(Value) * stackUsed);
+    t->stackTop = t->stack + stackUsed;
+    memcpy(t->frames, vm.frames, sizeof(CallFrame) * vm.frameCount);
+    t->frameCount = vm.frameCount;
+    t->openUpvalues = vm.openUpvalues;
+    t->isInTryCatch = vm.isInTryCatch;
+    /* Rebase frame slot pointers from vm.stack to t->stack */
+    for (int i = 0; i < t->frameCount; i++)
     {
-        releaseGVL();
-        return NULL;
+        ptrdiff_t off = vm.frames[i].slots - vm.stack;
+        t->frames[i].slots = t->stack + off;
     }
-    if (run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
-    {
-        releaseGVL();
-        return NULL;
-    }
-    releaseGVL();
-    return NULL; // pop();
 }
 
-// static Value newThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-// {
-//     if (argc != 1)
-//     {
-//         runtimeError("'newThread()' expects one argument but %d were passed in", argc);
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-//     if (!IS_CLOSURE(argv[0]))
-//     {
-//         runtimeError("'newThread()' expects a closure as argument but got '%s'", VALUE_TYPES[argv[0].type]);
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-//     pthread_t thread;
-//     ObjClosure *closure = AS_CLOSURE(argv[0]);
-//     if (pthread_create(&thread, NULL, runCallableInNewThread, closure) == 0)
-//     {
-//         releaseGVL();
-//         acquireGVL();
-//         return NUM_VAL((unsigned long)thread);
-//     }
-//     else
-//     {
-//         runtimeError("Failed to create thread");
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-// }
+/* Load a DotKThread's state into the live VM. */
+static void vmLoadFromThread(DotKThread *t)
+{
+    int stackUsed = (int)(t->stackTop - t->stack);
+    memcpy(vm.stack, t->stack, sizeof(Value) * stackUsed);
+    vm.stackTop = vm.stack + stackUsed;
+    memcpy(vm.frames, t->frames, sizeof(CallFrame) * t->frameCount);
+    vm.frameCount = t->frameCount;
+    vm.openUpvalues = t->openUpvalues;
+    vm.isInTryCatch = t->isInTryCatch;
+    /* Rebase frame slot pointers from t->stack to vm.stack */
+    for (int i = 0; i < vm.frameCount; i++)
+    {
+        ptrdiff_t off = t->frames[i].slots - t->stack;
+        vm.frames[i].slots = vm.stack + off;
+    }
+}
 
-// static Value joinThreadNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
-// {
-//     if (argc != 1)
-//     {
-//         runtimeError("'joinThread()' expects one argument but %d were passed in", argc);
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-//     if (!IS_NUM(argv[0]))
-//     {
-//         runtimeError("'joinThread()' expects a number as argument but got '%s'", VALUE_TYPES[argv[0].type]);
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-//     pthread_t thread = (pthread_t)AS_NUM(argv[0]);
-//     releaseGVL();
-//     int ret;
-//     if ((ret = pthread_join(thread, NULL)) != 0)
-//     {
-//         acquireGVL();
-//         runtimeError("Failed to join thread");
-//         *hasError = true;
-//         return NIL_VAL;
-//     }
-//     acquireGVL();
-//     return BOOL_VAL(ret == 0);
-// }
+/* Swap: save current thread, load new thread, update pointer. */
+static void vmSwitchThread(DotKThread *next)
+{
+    if (vm.currentThread)
+        vmSaveToThread(vm.currentThread);
+    vmLoadFromThread(next);
+    vm.currentThread = next;
+}
+
+/* ---- Blocking I/O helpers ---- */
+
+DotKThread *vmBeginBlockingIO(void)
+{
+    DotKThread *caller = vm.currentThread;
+    if (caller)
+        vmSaveToThread(caller);
+    releaseGVL();
+    return caller;
+}
+
+void vmEndBlockingIO(DotKThread *saved)
+{
+    acquireGVL();
+    if (saved)
+    {
+        vmLoadFromThread(saved);
+        vm.currentThread = saved;
+    }
+}
+
+/* ---- Child-thread entry point ---- */
+
+static void *threadEntryPoint(void *arg)
+{
+    DotKThread *t = (DotKThread *)arg;
+
+    /* Block until the GVL is available */
+    acquireGVL();
+
+    /* Load our state into the VM */
+    vmSwitchThread(t);
+
+    pthread_mutex_lock(&t->mutex);
+    t->status = THREAD_RUNNING;
+    pthread_mutex_unlock(&t->mutex);
+
+    /* Run — frameCount == 2 (sentinel + real), run until real frame returns */
+    InterpretResult res = run(false, vm.frameCount);
+
+    /* Harvest result */
+    pthread_mutex_lock(&t->mutex);
+    if (res == INTERPRET_RUNTIME_ERROR)
+    {
+        t->status = THREAD_ERROR;
+        t->result = NIL_VAL;
+        t->errorMsg = vm.lastError;
+    }
+    else
+    {
+        t->status = THREAD_FINISHED;
+        t->result = pop();
+        t->errorMsg = NULL;
+    }
+    pthread_cond_signal(&t->cond);
+    pthread_mutex_unlock(&t->mutex);
+
+    /* Save our (now-finished) state back so GC can scan it */
+    vmSaveToThread(t);
+    vm.currentThread = NULL;
+
+    releaseGVL();
+    return NULL;
+}
+
+/* ---- Thread native methods ---- */
+
+NATIVE_FN(threadInitNative)
+{
+    if (argc < 1)
+    {
+        runtimeError("Thread() expects at least 1 argument (a callable).");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("Thread() first argument must be a function.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjClosure *closure = AS_CLOSURE(argv[0]);
+    int callArgc = argc - 1;
+
+    if (callArgc != closure->function->arity)
+    {
+        runtimeError("Thread function expects %d arguments but %d were given.",
+                     closure->function->arity, callArgc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    /* Allocate the child thread */
+    DotKThread *t = (DotKThread *)malloc(sizeof(DotKThread));
+    if (!t)
+    {
+        runtimeError("Failed to allocate thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    memset(t, 0, sizeof(DotKThread));
+    t->status = THREAD_CREATED;
+    t->closure = closure;
+    t->result = NIL_VAL;
+    t->errorMsg = NULL;
+    t->openUpvalues = NULL;
+    t->isInTryCatch = false;
+    pthread_mutex_init(&t->mutex, NULL);
+    pthread_cond_init(&t->cond, NULL);
+
+    t->argCount = callArgc;
+    if (callArgc > 0)
+    {
+        t->args = (Value *)malloc(sizeof(Value) * callArgc);
+        for (int i = 0; i < callArgc; i++)
+            t->args[i] = argv[1 + i];
+    }
+    else
+    {
+        t->args = NULL;
+    }
+
+    /* Build the child's initial stack + call frame.
+       Frame 0 is a sentinel so frameCount never hits 0 inside run()
+       (which would discard the return value).  Frame 1 is the real call. */
+    t->stackTop = t->stack;
+    *t->stackTop++ = NIL_VAL;       /* sentinel slot 0 */
+    *t->stackTop++ = OBJ_VAL(closure);
+    for (int i = 0; i < callArgc; i++)
+        *t->stackTop++ = argv[1 + i];
+
+    /* Sentinel frame 0 — never actually executes */
+    t->frames[0].closure = closure;   /* placeholder */
+    t->frames[0].ip = closure->function->chunk.code;
+    t->frames[0].slots = t->stack;
+    t->frames[0].startTimeNs = 0;
+
+    /* Real call frame 1 */
+    t->frames[1].closure = closure;
+    t->frames[1].ip = closure->function->chunk.code;
+    t->frames[1].slots = t->stack + 1; /* past sentinel */
+    t->frames[1].startTimeNs = 0;
+    t->frameCount = 2;
+
+    /* Wrap in a foreign object */
+    ObjForeign *threadObj = newForeignObj(TYPE_THREAD, t, true);
+    threadObj->klass = vm.threadClass;
+
+    /* Spawn — child blocks on GVL until main releases it */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+    if (pthread_create(&t->handle, &attr, threadEntryPoint, t) != 0)
+    {
+        pthread_attr_destroy(&attr);
+        free(t->args);
+        pthread_mutex_destroy(&t->mutex);
+        pthread_cond_destroy(&t->cond);
+        free(t);
+        runtimeError("Failed to create thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    pthread_attr_destroy(&attr);
+
+    return OBJ_VAL(threadObj);
+}
+
+NATIVE_FN(threadJoinNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("join() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    DotKThread *saved = vmBeginBlockingIO();
+    pthread_join(t->handle, NULL);
+    vmEndBlockingIO(saved);
+
+    if (t->status == THREAD_ERROR)
+    {
+        runtimeError("Thread raised an error: %s",
+                     t->errorMsg ? t->errorMsg->chars : "unknown");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return t->result;
+}
+
+NATIVE_FN(threadIsAliveNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("isAlive() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    bool alive = (t->status == THREAD_CREATED || t->status == THREAD_RUNNING);
+    pthread_mutex_unlock(&t->mutex);
+
+    return BOOL_VAL(alive);
+}
+
+NATIVE_FN(threadResultNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("result() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    if (t->status != THREAD_FINISHED && t->status != THREAD_ERROR)
+    {
+        pthread_mutex_unlock(&t->mutex);
+        runtimeError("Thread has not finished yet. Call join() first.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    Value result = t->result;
+    pthread_mutex_unlock(&t->mutex);
+
+    return result;
+}
 
 static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
@@ -5503,8 +5923,14 @@ static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
 
     char input[STR_BUFF] = {0};
+    DotKThread *saved = vmBeginBlockingIO();
     char *ret = fgets(input, STR_BUFF, stdin);
-    input[strlen(input) - 1] = '\0';
+    vmEndBlockingIO(saved);
+    if (ret == NULL)
+        return OBJ_VAL(copyString("", 0));
+    size_t slen = strlen(input);
+    if (slen > 0 && input[slen - 1] == '\n')
+        input[slen - 1] = '\0';
     return OBJ_VAL(copyString(input, (int)strlen(input)));
 }
 
@@ -6450,34 +6876,31 @@ static Value join2Native(int argc, Value *argv, bool *hasError, bool *pushedValu
     ObjString *sep = AS_STR(peek(argc));
     int strAlloc = 100;
     char *str = ALLOCATE(char, strAlloc);
-    str[0] = '\0';
-    int needed = 0;
-    // sprintf(str, "%s", "");
+    int pos = 0;
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        // int strLen = strlen(str);
-        needed += len + sep->len;
+        int needed = pos + len + (i < list->count - 1 ? sep->len : 0) + 1;
 
         if (needed >= strAlloc)
         {
             int old = strAlloc;
-            strAlloc = (needed + 0.5 * needed);
-
+            strAlloc = needed + (needed >> 1);
             str = GROW_ARRAY(char, str, old, strAlloc);
         }
 
-        // GROW_ARRAY(char, str, len + strLen + sep->len + 1, strLen);
-        // char temp[STR_BUFF] = //ALLOCATE(char, strlen(str) + len + strlen(sep->chars) + 1);
-        sprintf(str, "%s%s%s", str, item, sep->chars);
-        // FREE_ARRAY(char, str, strlen(str) + 1);
-        // str = temp;
+        memcpy(str + pos, item, len);
+        pos += len;
+        if (i < list->count - 1)
+        {
+            memcpy(str + pos, sep->chars, sep->len);
+            pos += sep->len;
+        }
     }
-    if (list->count > 0)
-        str[strlen(str) - strlen(sep->chars)] = '\0';
-    return OBJ_VAL(takeString(str, (int)strlen(str)));
+    str[pos] = '\0';
+    return OBJ_VAL(takeString(str, pos));
 }
 
 static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -6647,7 +7070,33 @@ NATIVE_FN(generatorNextNative)
     }
 
     Value nextValue = NIL_VAL;
-    if (!runGeneratorNext(AS_GENERATOR(peek(argc)), &nextValue))
+    if (!runGeneratorNext(AS_GENERATOR(peek(argc)), &nextValue, NIL_VAL))
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+    return nextValue;
+}
+
+NATIVE_FN(generatorSendNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("'send()' expects 1 argument but %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_GENERATOR(peek(argc)))
+    {
+        runtimeError("Expected a generator caller for send() but got '%s'", valueTypeName(peek(argc)));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjGenerator *generator = AS_GENERATOR(peek(argc));
+    Value sendValue = argv[0];
+    Value nextValue = NIL_VAL;
+    if (!runGeneratorNext(generator, &nextValue, sendValue))
     {
         *hasError = true;
         return NIL_VAL;
@@ -7840,19 +8289,26 @@ static Value sbToStringNative(int argc, Value *argv, bool *hasError, bool *pushe
         return NIL_VAL;
     }
     ObjList *list = AS_LIST(value);
-    char *str = ALLOCATE(char, STR_BUFF);
-    sprintf(str, "%s", "");
+    int strAlloc = 256;
+    char *str = ALLOCATE(char, strAlloc);
+    int pos = 0;
     for (int i = 0; i < list->count; i++)
     {
         int len = 0;
         char item[STR_BUFF] = {0};
         valueToString(list->items[i], item, &len);
-        char *temp = ALLOCATE(char, strlen(str) + len + 1);
-        sprintf(temp, "%s%s", str, item);
-        FREE_ARRAY(char, str, strlen(str) + 1);
-        str = temp;
+        int needed = pos + len + 1;
+        if (needed >= strAlloc)
+        {
+            int old = strAlloc;
+            strAlloc = needed + (needed >> 1);
+            str = GROW_ARRAY(char, str, old, strAlloc);
+        }
+        memcpy(str + pos, item, len);
+        pos += len;
     }
-    return OBJ_VAL(takeString(str, (int)strlen(str)));
+    str[pos] = '\0';
+    return OBJ_VAL(takeString(str, pos));
 }
 
 static Value sbClearNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -8060,14 +8516,16 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
         return NIL_VAL;
     }
 
-    char str[STR_BUFF] = {0};
-    int len = 0;
     if (IS_STR(messageVal) && IS_STR(stackTrace))
     {
         ObjString *stack = AS_STR(stackTrace);
         ObjString *message = AS_STR(messageVal);
-        sprintf(str, "%s%s", stack->chars, message->chars);
-        len = stack->len + message->len + 1;
+        int len = stack->len + message->len;
+        char *str = ALLOCATE(char, len + 1);
+        memcpy(str, stack->chars, stack->len);
+        memcpy(str + stack->len, message->chars, message->len);
+        str[len] = '\0';
+        return OBJ_VAL(takeString(str, len));
     }
     else
     {
@@ -8077,10 +8535,11 @@ static Value errorToStringNative(int argc, Value *argv, bool *hasError, bool *pu
         int stackLen = 0;
         valueToString(messageVal, message, &messageLen);
         valueToString(stackTrace, stack, &stackLen);
-        sprintf(str, "Error: %.*s \nwith trace: %.*s", messageLen, message, stackLen, stack);
-        len = messageLen + stackLen + 23;
+        int cap = messageLen + stackLen + 32;
+        char *str = ALLOCATE(char, cap);
+        int len = snprintf(str, cap, "Error: %.*s \nwith trace: %.*s", messageLen, message, stackLen, stack);
+        return OBJ_VAL(takeString(str, len));
     }
-    return OBJ_VAL(copyString(str, len));
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -8108,9 +8567,7 @@ NATIVE_FN(baseToStrNative)
     char *str = ALLOCATE(char, strAlloc);
     int len = 0;
     int initialLen = instance->klass->name->len + 2;
-    sprintf(str, "%s {", instance->klass->name->chars);
-
-    len = initialLen;
+    len = snprintf(str, strAlloc, "%s {", instance->klass->name->chars);
 
     for (int i = 0; i < fields->capacity; i++)
     {
@@ -8123,21 +8580,29 @@ NATIVE_FN(baseToStrNative)
             int valueLen = 0;
             valueToString(value, valueStr, &valueLen);
             int tempLen = key->len + valueLen + 4; // 4 for ": " and ", "
-            if (len + tempLen >= strAlloc)
+            if (len + tempLen + 2 >= strAlloc)
             {
-                strAlloc = GROW_CAPACITY(strAlloc);
-                str = GROW_ARRAY(char, str, len, strAlloc);
+                int old = strAlloc;
+                strAlloc = GROW_CAPACITY(len + tempLen + 2);
+                str = GROW_ARRAY(char, str, old, strAlloc);
             }
-            sprintf(str + len, "%s: %s, ", key->chars, valueStr);
-            len += tempLen;
+            int n = snprintf(str + len, strAlloc - len, "%s: %s, ", key->chars, valueStr);
+            len += n;
         }
     }
 
     if (len > initialLen) // Remove the last ", " if there were any fields
         len -= 2;
-    sprintf(str + len, "}");
+    if (len + 2 >= strAlloc)
+    {
+        int old = strAlloc;
+        strAlloc = len + 2;
+        str = GROW_ARRAY(char, str, old, strAlloc);
+    }
+    str[len++] = '}';
+    str[len] = '\0';
 
-    return OBJ_VAL(takeString(str, len + 1));
+    return OBJ_VAL(takeString(str, len));
 }
 
 NATIVE_FN(loadLibNative)
@@ -8178,7 +8643,7 @@ NATIVE_FN(dirNative)
     else if (IS_CLASS(val)) // class
         table = AS_CLASS(val)->methods;
     else if (IS_FOREIGN(val))
-        table = AS_FOREIGN(val)->methods;
+        table = AS_FOREIGN(val)->fields;
     else
     {
         runtimeError("Expected a class or instance but got '%s' for __dir__(clazz/instance)", valueTypeName(peek(0)));
@@ -8227,11 +8692,11 @@ NATIVE_FN(varsNative)
     else if (IS_CLASS(val)) // class
     {
         ObjClass *clazz = AS_CLASS(val);
-        fields = &clazz->staticVars;
+        fields = &clazz->methods;
     }
     else if (IS_BUILTIN(val))
     {
-        fields = &getVmClass(val)->staticVars;
+        fields = &getVmClass(val)->methods;
     }
     else
     {
@@ -8769,9 +9234,6 @@ static void initCoreModule()
     defineNative("__vars__", varsNative);
     defineNative("__del__", deleteVarNative);
 
-    // Threads // SOON TO BE A BUILT-IN CLASS
-    // defineNative("newThread", newThreadNative);
-    // defineNative("joinThread", joinThreadNative);
     defineNative("loadLib", loadLibNative);
 }
 
@@ -8781,25 +9243,19 @@ static void initPrimitiveClassesModule()
     vm.baseObj = NULL;
     ObjClass *baseObj = primativeClass("Object");
     vm.baseObj = baseObj;
-    baseObj->toStr = namedNativeVal("toStr", baseToStrNative);
-    tableSet(&baseObj->methods, copyString("toStr", 5), baseObj->toStr);
+    vmDefineClassMethod(baseObj, "toStr", baseToStrNative);
 
     vm.errorClass = NULL;
     ObjClass *errorClass = primativeClass("Error");
     vm.errorClass = errorClass;
-    errorClass->initializer = namedNativeVal("init", errorInitNative);
-    errorClass->toStr = namedNativeVal("toStr", errorToStringNative);
-    tableSet(&errorClass->methods, copyString("toStr", 5), errorClass->toStr);
-    tableSet(&errorClass->methods, copyString("init", 4), errorClass->initializer);
+    vmDefineClassMethod(errorClass, "init", errorInitNative);
+    vmDefineClassMethod(errorClass, "toStr", errorToStringNative);
 
     vm.stringClass = NULL;
     ObjClass *stringClass = primativeClass("String");
     vm.stringClass = stringClass;
-    stringClass->initializer = namedNativeVal("init", initStringNative);
-    stringClass->hashFn = namedNativeVal("hash", strHashNative);
-
-    tableSet(&stringClass->methods, copyString("init", 4), stringClass->initializer);
-    tableSet(&stringClass->methods, copyString("_hash_", 6), stringClass->hashFn);
+    vmDefineClassMethod(stringClass, "init", initStringNative);
+    vmDefineClassMethod(stringClass, "_hash_", strHashNative);
     setNativeMethod(&stringClass->methods, "split", split2Native);
     setNativeMethod(&stringClass->methods, "match", regexMatchStrNative);
     setNativeMethod(&stringClass->methods, "findall", regexFindAllNative);
@@ -8823,7 +9279,7 @@ static void initPrimitiveClassesModule()
     vm.listClass = NULL;
     ObjClass *listClass = primativeClass("List");
     vm.listClass = listClass;
-    listClass->initializer = namedNativeVal("init", initListNative);
+    vmDefineClassMethod(listClass, "init", initListNative);
     setNativeMethod(&listClass->methods, "append", appendListNative);
     setNativeMethod(&listClass->methods, "of", listOfNative);
     setNativeMethod(&listClass->methods, "extend", extendListNative);
@@ -8837,24 +9293,18 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&listClass->methods, "map", mapNative);
     setNativeMethod(&listClass->methods, "filter", removeIfNative);
     setNativeMethod(&listClass->methods, "_iter_", listIterNative);
-    tableSet(&listClass->methods, copyString("init", 4), listClass->initializer);
 
     vm.mapClass = NULL;
     ObjClass *mapClass = primativeClass("HashMap");
     vm.mapClass = mapClass;
-    mapClass->initializer = namedNativeVal("init", mapInitNative);
-    mapClass->indexFn = namedNativeVal("get", mapGetNative);
-    mapClass->setFn = namedNativeVal("set", mapSetNative);
-    mapClass->sizeFn = namedNativeVal("size", mapSizeNative);
-    mapClass->toStr = namedNativeVal("toStr", mapToStrNative);
-
-    tableSet(&mapClass->methods, copyString("get", 3), mapClass->indexFn);
-    tableSet(&mapClass->methods, copyString("_get_", 5), mapClass->indexFn);
-    tableSet(&mapClass->methods, copyString("set", 3), mapClass->setFn);
-    tableSet(&mapClass->methods, copyString("put", 3), mapClass->setFn);
-    tableSet(&mapClass->methods, copyString("_set_", 5), mapClass->setFn);
-    tableSet(&mapClass->methods, copyString("toStr", 5), mapClass->toStr);
-    tableSet(&mapClass->methods, copyString("_size_", 7), mapClass->sizeFn);
+    vmDefineClassMethod(mapClass, "init", mapInitNative);
+    vmDefineClassMethod(mapClass, "_get_", mapGetNative);
+    setNativeMethod(&mapClass->methods, "get", mapGetNative);
+    vmDefineClassMethod(mapClass, "_set_", mapSetNative);
+    setNativeMethod(&mapClass->methods, "set", mapSetNative);
+    setNativeMethod(&mapClass->methods, "put", mapSetNative);
+    vmDefineClassMethod(mapClass, "_size_", mapSizeNative);
+    vmDefineClassMethod(mapClass, "toStr", mapToStrNative);
     setNativeMethod(&mapClass->methods, "remove", mapRemoveNative);
     setNativeMethod(&mapClass->methods, "clear", mapClearNative);
     setNativeMethod(&mapClass->methods, "keys", mapKeysNative);
@@ -8871,6 +9321,7 @@ static void initPrimitiveClassesModule()
     vm.generatorClass = generatorClass;
     setNativeMethod(&generatorClass->methods, "_iter_", generatorIterNative);
     setNativeMethod(&generatorClass->methods, "_next_", generatorNextNative);
+    setNativeMethod(&generatorClass->methods, "send", generatorSendNative);
 
     vm.listIteratorClass = NULL;
     ObjClass *listIteratorClass = primativeClass("ListIterator");
@@ -8888,16 +9339,23 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&mapIteratorClass->methods, "_next_", mapIteratorNextNative);
 
     ObjClass *sb = primativeClass("StringBuilder");
-    sb->initializer = namedNativeVal("init", sbInitNative);
-    sb->sizeFn = namedNativeVal("size", sbSizeNative);
-    sb->toStr = namedNativeVal("toStr", sbToStringNative);
-
-    tableSet(&sb->methods, copyString("_size_", 7), sb->sizeFn);
-    tableSet(&sb->methods, copyString("toStr", 5), sb->toStr);
+    vmDefineClassMethod(sb, "init", sbInitNative);
+    vmDefineClassMethod(sb, "_size_", sbSizeNative);
+    vmDefineClassMethod(sb, "toStr", sbToStringNative);
     setNativeMethod(&sb->methods, "append", sbAppendNative);
     setNativeMethod(&sb->methods, "clear", sbClearNative);
     setNativeMethod(&sb->methods, "pop", sbPopNative);
     setNativeMethod(&sb->methods, "toArray", sbToArrayNative);
+
+    /* Thread class */
+    vm.threadClass = NULL;
+    ObjClass *threadClass = primativeClass("Thread");
+    vm.threadClass = threadClass;
+    threadClass->initializer = namedNativeVal("init", threadInitNative);
+    tableSet(&threadClass->methods, copyString("init", 4), threadClass->initializer);
+    setNativeMethod(&threadClass->methods, "join", threadJoinNative);
+    setNativeMethod(&threadClass->methods, "isAlive", threadIsAliveNative);
+    setNativeMethod(&threadClass->methods, "result", threadResultNative);
 }
 
 void registerBuiltinPrimitiveClassesModule()
@@ -8908,8 +9366,18 @@ void registerBuiltinPrimitiveClassesModule()
 static void initFileClassModule()
 {
     ObjClass *file = primativeClass("File");
+    vm.fileClass = file;
     file->initializer = namedNativeVal("init", fileInitNative);
+    tableSet(&file->methods, copyString("init", 4), file->initializer);
     setNativeMethod(&file->methods, "exists", fileClassExistsNative);
+    setNativeMethod(&file->methods, "close", fileCloseNative);
+    setNativeMethod(&file->methods, "size", fileFSizeNative);
+    setNativeMethod(&file->methods, "write", fileWriteNative);
+    setNativeMethod(&file->methods, "read", fileReadNative);
+    setNativeMethod(&file->methods, "readLine", fileReadLineNative);
+    setNativeMethod(&file->methods, "readLines", fileReadLinesNative);
+    setNativeMethod(&file->methods, "resetCursor", fileResetCursorNative);
+    setNativeMethod(&file->methods, "cursorPos", fileCursorPosition);
 }
 
 void registerBuiltinFileClassModule()
@@ -8920,7 +9388,9 @@ void registerBuiltinFileClassModule()
 static void initSQLClassModule()
 {
     ObjClass *sql = primativeClass("SQL");
+    vm.sqlClass = sql;
     sql->initializer = namedNativeVal("init", sqlInitNative);
+    tableSet(&sql->methods, copyString("init", 4), sql->initializer);
     setNativeMethod(&sql->methods, "close", sqlCloseNative);
     setNativeMethod(&sql->methods, "exec", sqlExecNative);
     setNativeMethod(&sql->methods, "query", sqlQueryNative);
@@ -8944,6 +9414,8 @@ void initVM(bool printBytecode, bool printExecStack)
     {
         fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
     }
+    signal(SIGINT, sigShutdownHandler);
+    signal(SIGTERM, sigShutdownHandler);
     // if (signal(SIGSEGV, sigSegvHandler) == SIG_ERR)
     // {
     //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
@@ -8953,6 +9425,18 @@ void initVM(bool printBytecode, bool printExecStack)
     printExecStackGlobaL = printExecStack;
     srand(time(NULL));
     resetStack();
+
+    /* Allocate the main thread — vm.currentThread always points
+       to whoever is actively running on the VM. */
+    vm.mainThread = (DotKThread *)malloc(sizeof(DotKThread));
+    memset(vm.mainThread, 0, sizeof(DotKThread));
+    vm.mainThread->status = THREAD_RUNNING;
+    vm.mainThread->stackTop = vm.mainThread->stack;
+    vm.mainThread->result = NIL_VAL;
+    pthread_mutex_init(&vm.mainThread->mutex, NULL);
+    pthread_cond_init(&vm.mainThread->cond, NULL);
+    vm.currentThread = vm.mainThread;
+
     vm.objects = NULL;
     vm.bytesAllocated = 0;
     vm.nextGC = 1024L * 1024L;
@@ -8973,6 +9457,8 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.callGraphEntryCapacity = 0;
 
     vm.nextWideOp = -1;
+
+    memset(vm.inlineCache, 0, sizeof(vm.inlineCache));
 
     initTable(&vm.globals);
     initTable(&vm.constGlobals);
@@ -9058,6 +9544,9 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.isInTryCatch = false;
     vm.isRepl = false;
     vm.errorClass = NULL;
+    vm.fileClass = NULL;
+    vm.sqlClass = NULL;
+    vm.threadClass = NULL;
     vm.stringClass = NULL;
     vm.listClass = NULL;
     vm.mapClass = NULL;
@@ -9138,6 +9627,9 @@ void freeVM()
     vm.gtStr = NULL;
     vm.gtDunderStr = NULL;
     vm.errorClass = NULL;
+    vm.fileClass = NULL;
+    vm.sqlClass = NULL;
+    vm.threadClass = NULL;
     vm.stringClass = NULL;
     vm.listClass = NULL;
     vm.mapClass = NULL;
@@ -9157,6 +9649,17 @@ void freeVM()
     vm.callGraphEntries = NULL;
     vm.callGraphEntryCount = 0;
     vm.callGraphEntryCapacity = 0;
+
+    /* Free main thread */
+    if (vm.mainThread)
+    {
+        pthread_mutex_destroy(&vm.mainThread->mutex);
+        pthread_cond_destroy(&vm.mainThread->cond);
+        free(vm.mainThread);
+        vm.mainThread = NULL;
+        vm.currentThread = NULL;
+    }
+
     freeObjects();
 }
 
@@ -9312,6 +9815,29 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 #define READ_CONSTANT_SHORT() (frame->closure->function->chunk.constants.values[READ_SHORT()])
 #define READ_STRING() AS_STR(READ_CONSTANT())
 #define READ_STRING_SHORT() AS_STR(READ_CONSTANT_SHORT())
+
+#ifdef DOTK_USE_COMPUTED_GOTO
+#define DISPATCH()                                                          \
+    do {                                                                    \
+        if (unlikely(vm.nextWideOp == 1)) {                                \
+            runtimeError("OP_WIDE was used on an invalide opcode.");       \
+            return INTERPRET_RUNTIME_ERROR;                                \
+        } else if (unlikely(vm.nextWideOp == 2)) {                        \
+            vm.nextWideOp--;                                               \
+        }                                                                   \
+        if (unlikely((printExecStackGlobaL                                 \
+                      && vm.currentThread == vm.mainThread)                \
+                     || gDebuggerEnabled))                                  \
+            goto loop_top;                                                  \
+        if (unlikely(vm.profilerEnabled && frame->startTimeNs == 0))       \
+            frame->startTimeNs = nowNs();                                  \
+        inst = READ_BYTE();                                                \
+        goto *dispatch_table[inst];                                        \
+    } while (0)
+#else
+#define DISPATCH() break
+#endif
+
 #define BIN_OP(valueType, op)                          \
     do                                                 \
     {                                                  \
@@ -9327,6 +9853,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
     for (;;)
     {
+#ifdef DOTK_USE_COMPUTED_GOTO
+    loop_top: ;
+#endif
         // #if DEBUG_TRACE_EXEC
         if (unlikely(printExecStackGlobaL))
         {
@@ -9366,35 +9895,130 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame->startTimeNs = nowNs();
 
         uint8_t inst;
-        switch (inst = READ_BYTE())
+#ifdef DOTK_USE_COMPUTED_GOTO
+        static const void *dispatch_table[] = {
+            [OP_CONSTANT]          = &&op_OP_CONSTANT,
+            [OP_CONSTANT_LONG]     = &&op_OP_CONSTANT_LONG,
+            [OP_NIL]               = &&op_OP_NIL,
+            [OP_TRUE]              = &&op_OP_TRUE,
+            [OP_FALSE]             = &&op_OP_FALSE,
+            [OP_POP]               = &&op_OP_POP,
+            [OP_DUP]               = &&op_OP_DUP,
+            [OP_CALL]              = &&op_OP_CALL,
+            [OP_CALL_KW]           = &&op_OP_CALL_KW,
+            [OP_DEF_GLOBAL]        = &&op_OP_DEF_GLOBAL,
+            [OP_DEF_CONST_GLOBAL]  = &&op_OP_DEF_CONST_GLOBAL,
+            [OP_GET_LOCAL]         = &&op_OP_GET_LOCAL,
+            [OP_SET_LOCAL]         = &&op_OP_SET_LOCAL,
+            [OP_GET_GLOBAL]        = &&op_OP_GET_GLOBAL,
+            [OP_SET_GLOBAL]        = &&op_OP_SET_GLOBAL,
+            [OP_GET_UPVALUE]       = &&op_OP_GET_UPVALUE,
+            [OP_SET_UPVALUE]       = &&op_OP_SET_UPVALUE,
+            [OP_JUMP_IF_FALSE]     = &&op_OP_JUMP_IF_FALSE,
+            [OP_CLOSE_UPVALUE]     = &&op_OP_CLOSE_UPVALUE,
+            [OP_JUMP]              = &&op_OP_JUMP,
+            [OP_LOOP]              = &&op_OP_LOOP,
+            [OP_EQUAL]             = &&op_OP_EQUAL,
+            [OP_LESS]              = &&op_OP_LESS,
+            [OP_BIN_SHIFT_LEFT]    = &&op_OP_BIN_SHIFT_LEFT,
+            [OP_GREATER]           = &&op_OP_GREATER,
+            [OP_BIN_SHIFT_RIGHT]   = &&op_OP_BIN_SHIFT_RIGHT,
+            [OP_BIN_OR]            = &&op_OP_BIN_OR,
+            [OP_BIN_AND]           = &&op_OP_BIN_AND,
+            [OP_BIN_XOR]           = &&op_OP_BIN_XOR,
+            [OP_ADD]               = &&op_OP_ADD,
+            [OP_SUB]               = &&op_OP_SUB,
+            [OP_MULT]              = &&op_OP_MULT,
+            [OP_POW]               = &&op_OP_POW,
+            [OP_MOD]               = &&op_OP_MOD,
+            [OP_DIV]               = &&op_OP_DIV,
+            [OP_INT_DIV]           = &&op_OP_INT_DIV,
+            [OP_NOT]               = &&op_OP_NOT,
+            [OP_NEGATE]            = &&op_OP_NEGATE,
+            [OP_PRINT]             = &&op_OP_PRINT,
+            [OP_CLOSURE]           = &&op_OP_CLOSURE,
+            [OP_YIELD]             = &&op_OP_YIELD,
+            [OP_RETURN]            = &&op_OP_RETURN,
+            [OP_RETURN_NIL]        = &&op_OP_RETURN_NIL,
+            [OP_RETURN_THIS]       = &&op_OP_RETURN_THIS,
+            [OP_CLASS]             = &&op_OP_CLASS,
+            [OP_METHOD]            = &&op_OP_METHOD,
+            [OP_INVOKE]            = &&op_OP_INVOKE,
+            [OP_INVOKE_KW]         = &&op_OP_INVOKE_KW,
+            [OP_INHERIT]           = &&op_OP_INHERIT,
+            [OP_SET_PROPERTY]      = &&op_OP_SET_PROPERTY,
+            [OP_GET_PROPERTY]      = &&op_OP_GET_PROPERTY,
+            [OP_GET_SUPER]         = &&op_OP_GET_SUPER,
+            [OP_SUPER_INVOKE]      = &&op_OP_SUPER_INVOKE,
+            [OP_SUPER_INVOKE_KW]   = &&op_OP_SUPER_INVOKE_KW,
+            [OP_BUILD_LIST]        = &&op_OP_BUILD_LIST,
+            [OP_BUILD_DEFAULT_LIST]= &&op_OP_BUILD_DEFAULT_LIST,
+            [OP_INDEX_SUBSCR]      = &&op_OP_INDEX_SUBSCR,
+            [OP_STORE_SUBSCR]      = &&op_OP_STORE_SUBSCR,
+            [OP_STORE_SUBSCR_ADD]  = &&op_OP_STORE_SUBSCR_ADD,
+            [OP_STORE_SUBSCR_SUB]  = &&op_OP_STORE_SUBSCR_SUB,
+            [OP_STORE_SUBSCR_MULT] = &&op_OP_STORE_SUBSCR_MULT,
+            [OP_STORE_SUBSCR_DIV]  = &&op_OP_STORE_SUBSCR_DIV,
+            [OP_STORE_SUBSCR_INT_DIV] = &&op_OP_STORE_SUBSCR_INT_DIV,
+            [OP_WIDE]              = &&op_OP_WIDE,
+            [OP_STATIC_VAR]        = &&op_OP_STATIC_VAR,
+            [OP_EXPORT]            = &&op_OP_EXPORT,
+            [OP_IMPORT]            = &&op_OP_IMPORT,
+            [OP_IMPORT_NAME]       = &&op_OP_IMPORT_NAME,
+            [OP_IMPORT_ALL]        = &&op_OP_IMPORT_ALL,
+            [OP_BUILD_SLICE]       = &&op_OP_BUILD_SLICE,
+            [OP_BUILD_MAP]         = &&op_OP_BUILD_MAP,
+            [OP_TRY]               = &&op_OP_TRY,
+            [OP_CATCH]             = &&op_OP_CATCH,
+            [OP_NOP]               = &&op_OP_NOP,
+            [OP_DEFAULT_LOCAL]     = &&op_OP_DEFAULT_LOCAL,
+            [OP_TAIL_CALL]         = &&op_OP_TAIL_CALL,
+            [OP_AWAIT]             = &&op_OP_AWAIT,
+        };
+        inst = READ_BYTE();
+        goto *dispatch_table[inst];
+#endif
+        switch (inst
+#ifndef DOTK_USE_COMPUTED_GOTO
+            = READ_BYTE()
+#endif
+        )
         {
-        case OP_NIL:
+        case OP_NIL: op_OP_NIL:
             push(NIL_VAL);
-            break;
-        case OP_FALSE:
+            DISPATCH();
+        case OP_FALSE: op_OP_FALSE:
             push(BOOL_VAL(false));
-            break;
-        case OP_POP:
+            DISPATCH();
+        case OP_POP: op_OP_POP:
             if (vm.nextWideOp == 0 && *frame->ip == OP_POP)
             {
                 frame->ip++;
                 popN(2);
             }
+            else if (vm.nextWideOp == 0 && *frame->ip == OP_GET_LOCAL)
+            {
+                // Superinstruction: OP_POP; OP_GET_LOCAL <slot>
+                pop();
+                frame->ip++;
+                uint16_t slot = READ_BYTE();
+                push(frame->slots[slot]);
+            }
             else
             {
                 pop();
             }
-            break;
-        case OP_DUP:
+            DISPATCH();
+        case OP_DUP: op_OP_DUP:
             push(peek(0));
-            break;
-        case OP_SUB:
+            DISPATCH();
+        case OP_SUB: op_OP_SUB:
             BIN_OP(NUM_VAL, -);
-            break;
-        case OP_DIV:
+            DISPATCH();
+        case OP_DIV: op_OP_DIV:
             BIN_OP(NUM_VAL, /);
-            break;
-        case OP_INT_DIV:
+            DISPATCH();
+        case OP_INT_DIV: op_OP_INT_DIV:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -9404,13 +10028,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             double b = AS_NUM(pop());
             double a = AS_NUM(pop());
             push(NUM_VAL((long)a / (long)b));
-            break;
+            DISPATCH();
         }
-        case OP_MULT:
+        case OP_MULT: op_OP_MULT:
             BIN_OP(NUM_VAL, *);
-            break;
+            DISPATCH();
 
-        case OP_MOD:
+        case OP_MOD: op_OP_MOD:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -9420,9 +10044,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             double b = AS_NUM(pop());
             double a = AS_NUM(pop());
             push(NUM_VAL(fmod(a, b)));
-            break;
+            DISPATCH();
         }
-        case OP_POW:
+        case OP_POW: op_OP_POW:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -9432,12 +10056,12 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             double b = AS_NUM(pop());
             double a = AS_NUM(pop());
             push(NUM_VAL(pow(a, b)));
-            break;
+            DISPATCH();
         }
-        case OP_NOT:
+        case OP_NOT: op_OP_NOT:
             push(BOOL_VAL(isFalsey(pop())));
-            break;
-        case OP_GREATER:
+            DISPATCH();
+        case OP_GREATER: op_OP_GREATER:
         {
             Value b = pop();
             Value a = pop();
@@ -9445,6 +10069,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             {
                 double bD = AS_NUM(b);
                 double aD = AS_NUM(a);
+                // Superinstruction: OP_GREATER; OP_JUMP_IF_FALSE <off>
+                if (vm.nextWideOp == 0 && *frame->ip == OP_JUMP_IF_FALSE)
+                {
+                    frame->ip++;
+                    uint16_t offset = READ_SHORT();
+                    bool cond = aD > bD;
+                    push(BOOL_VAL(cond));
+                    if (!cond)
+                        frame->ip += offset;
+                    DISPATCH();
+                }
                 push(BOOL_VAL(aD > bD));
             }
             else if (IS_STR(a) && IS_STR(b))
@@ -9469,9 +10104,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
             }
             // BIN_OP(BOOL_VAL, >);
-            break;
+            DISPATCH();
         }
-        case OP_LESS:
+        case OP_LESS: op_OP_LESS:
         {
             Value b = pop();
             Value a = pop();
@@ -9479,6 +10114,18 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             {
                 double bD = AS_NUM(b);
                 double aD = AS_NUM(a);
+                // Superinstruction: OP_LESS; OP_JUMP_IF_FALSE <off>
+                // Fuse the comparison + conditional jump into one dispatch.
+                if (vm.nextWideOp == 0 && *frame->ip == OP_JUMP_IF_FALSE)
+                {
+                    frame->ip++;
+                    uint16_t offset = READ_SHORT();
+                    bool cond = aD < bD;
+                    push(BOOL_VAL(cond));
+                    if (!cond)
+                        frame->ip += offset;
+                    DISPATCH();
+                }
                 push(BOOL_VAL(aD < bD));
                 break;
             }
@@ -9506,19 +10153,19 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
 
             // BIN_OP(BOOL_VAL, <);
-            break;
+            DISPATCH();
         }
-        case OP_CLASS:
+        case OP_CLASS: op_OP_CLASS:
             push(OBJ_VAL(newClass(READ_STRING())));
-            break;
-        case OP_TRUE:
+            DISPATCH();
+        case OP_TRUE: op_OP_TRUE:
             push(BOOL_VAL(true));
-            break;
-        case OP_METHOD:
+            DISPATCH();
+        case OP_METHOD: op_OP_METHOD:
             if (!defineMethod(READ_STRING()))
                 return INTERPRET_RUNTIME_ERROR;
-            break;
-        case OP_BUILD_SLICE:
+            DISPATCH();
+        case OP_BUILD_SLICE: op_OP_BUILD_SLICE:
         {
             if (!IS_NUM(peek(0)))
             {
@@ -9540,9 +10187,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             int start = (int)AS_NUM(pop());
             ObjSlice *slice = newSlice(start, end, step);
             push(OBJ_VAL(slice));
-            break;
+            DISPATCH();
         }
-        case OP_BUILD_MAP:
+        case OP_BUILD_MAP: op_OP_BUILD_MAP:
         {
             ObjMap *map = newMap();
             uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
@@ -9560,9 +10207,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             push(OBJ_VAL(map));
 
-            break;
+            DISPATCH();
         }
-        case OP_BUILD_LIST:
+        case OP_BUILD_LIST: op_OP_BUILD_LIST:
         {
             ObjList *list = newList();
             uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
@@ -9580,9 +10227,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
 
             push(OBJ_VAL(list));
-            break;
+            DISPATCH();
         }
-        case OP_BUILD_DEFAULT_LIST:
+        case OP_BUILD_DEFAULT_LIST: op_OP_BUILD_DEFAULT_LIST:
         {
             bool hasDefault = (bool)READ_BYTE();
             Value defaultValue = NIL_VAL;
@@ -9600,9 +10247,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             pop();
             push(OBJ_VAL(list));
-            break;
+            DISPATCH();
         }
-        case OP_INDEX_SUBSCR:
+        case OP_INDEX_SUBSCR: op_OP_INDEX_SUBSCR:
         {
             Value indexVal = pop();
             Value listVal = pop();
@@ -9682,9 +10329,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             if (hadError)
                 return INTERPRET_RUNTIME_ERROR;
-            break;
+            DISPATCH();
         }
-        case OP_STORE_SUBSCR:
+        case OP_STORE_SUBSCR: op_OP_STORE_SUBSCR:
         {
             Value itemVal = pop();
             Value indexVal = pop();
@@ -9743,13 +10390,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 index -= 1;
             storeToList(list, getValidListIndex(list, index), itemVal);
             push(itemVal);
-            break;
+            DISPATCH();
         }
-        case OP_STORE_SUBSCR_ADD:
-        case OP_STORE_SUBSCR_SUB:
-        case OP_STORE_SUBSCR_MULT:
-        case OP_STORE_SUBSCR_DIV:
-        case OP_STORE_SUBSCR_INT_DIV:
+        case OP_STORE_SUBSCR_ADD: op_OP_STORE_SUBSCR_ADD:
+        case OP_STORE_SUBSCR_SUB: op_OP_STORE_SUBSCR_SUB:
+        case OP_STORE_SUBSCR_MULT: op_OP_STORE_SUBSCR_MULT:
+        case OP_STORE_SUBSCR_DIV: op_OP_STORE_SUBSCR_DIV:
+        case OP_STORE_SUBSCR_INT_DIV: op_OP_STORE_SUBSCR_INT_DIV:
         {
             Value rhsVal = pop();
             Value indexVal = pop();
@@ -9842,9 +10489,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             storeToList(list, listIndex, resultVal);
             push(resultVal);
-            break;
+            DISPATCH();
         }
-        case OP_INHERIT:
+        case OP_INHERIT: op_OP_INHERIT:
         {
             Value superclass = peek(1);
             if (!IS_CLASS(superclass))
@@ -9869,21 +10516,20 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             subclass->sizeFn = superclazz->sizeFn;
             subclass->superclass = superclazz;
             tableAddAll(&superclazz->methods, &subclass->methods);
-            tableAddAll(&superclazz->staticVars, &subclass->staticVars);
 
-            tableSet(&subclass->staticVars, copyString("superClass", 10), OBJ_VAL(superclazz));
+            tableSet(&subclass->methods, copyString("superClass", 10), OBJ_VAL(superclazz));
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_GET_SUPER:
+        case OP_GET_SUPER: op_OP_GET_SUPER:
         {
             ObjString *name = READ_STRING();
             ObjClass *super = AS_CLASS(pop());
             if (!bindMethod(super, name))
                 return INTERPRET_RUNTIME_ERROR;
-            break;
+            DISPATCH();
         }
-        case OP_DEF_GLOBAL:
+        case OP_DEF_GLOBAL: op_OP_DEF_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -9904,9 +10550,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             tableSet(globalsTable, name, peek(0));
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_DEF_CONST_GLOBAL:
+        case OP_DEF_CONST_GLOBAL: op_OP_DEF_CONST_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -9921,17 +10567,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             tableSet(globalsTable, name, peek(0));
             tableSet(constGlobalsTable, name, BOOL_VAL(true));
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_STATIC_VAR:
+        case OP_STATIC_VAR: op_OP_STATIC_VAR:
         {
             ObjClass *c = AS_CLASS(peek(1));
 
-            tableSet(&c->staticVars, READ_STRING(), peek(0));
+            tableSet(&c->methods, READ_STRING(), peek(0));
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_GET_LOCAL:
+        case OP_GET_LOCAL: op_OP_GET_LOCAL:
         {
             bool wide = isWide();
             uint16_t slot = wide ? READ_SHORT() : READ_BYTE();
@@ -9945,15 +10591,21 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 uint16_t slot2 = READ_BYTE();
                 push(frame->slots[slot2]);
             }
-            break;
+            // Superinstruction: OP_GET_LOCAL <a>; OP_RETURN
+            else if (!wide && vm.nextWideOp == 0 && *frame->ip == OP_RETURN)
+            {
+                frame->ip++;
+                goto op_OP_RETURN;
+            }
+            DISPATCH();
         }
-        case OP_SET_LOCAL:
+        case OP_SET_LOCAL: op_OP_SET_LOCAL:
         {
             uint16_t slot = isWide() ? READ_SHORT() : READ_BYTE();
             frame->slots[slot] = peek(0);
-            break;
+            DISPATCH();
         }
-        case OP_GET_GLOBAL:
+        case OP_GET_GLOBAL: op_OP_GET_GLOBAL:
         {
             ObjString *name = READ_STRING();
 
@@ -9964,9 +10616,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
             }
             push(value);
-            break;
+            DISPATCH();
         }
-        case OP_SET_GLOBAL:
+        case OP_SET_GLOBAL: op_OP_SET_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -9979,9 +10631,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
 
             tableSet(globalsTable, name, peek(0));
-            break;
+            DISPATCH();
         }
-        case OP_GET_PROPERTY:
+        case OP_GET_PROPERTY: op_OP_GET_PROPERTY:
         {
             ObjClass *klass;
             ObjString *name = READ_STRING();
@@ -10003,18 +10655,22 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 {
                     if (IS_FOREIGN(peek(0)))
                     {
+                        ObjForeign *foreign = AS_FOREIGN(peek(0));
                         Value value;
-                        if (tableGet(&AS_FOREIGN(peek(0))->fields, name, &value))
+                        if (tableGet(&foreign->fields, name, &value))
                         {
                             pop();
                             push(value);
                             break;
                         }
-                        else
+                        if (foreign->klass != NULL)
                         {
-                            runtimeError("Cannot find property %s in foreign object", name->chars);
-                            return INTERPRET_RUNTIME_ERROR;
+                            if (!bindMethod(foreign->klass, name))
+                                return INTERPRET_RUNTIME_ERROR;
+                            break;
                         }
+                        runtimeError("Cannot find property %s in foreign object", name->chars);
+                        return INTERPRET_RUNTIME_ERROR;
                     }
                     // handle foreign objects?
                     runtimeError("Cannot dereference %s, only Classes and their instances can be dereferenced.", valueTypeName(peek(0)));
@@ -10024,15 +10680,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 Value native;
                 if (tableGet(&klass->methods, name, &native))
                 {
-                    ObjBoundBuiltin *bound = newBoundBuiltin(peek(0), ((ObjNative *)AS_OBJ(native)));
-                    pop();
-                    push(OBJ_VAL(bound));
-                    break;
-                }
-                if (tableGet(&klass->staticVars, name, &native))
-                {
-                    pop();
-                    push(native);
+                    if (IS_NATIVE(native))
+                    {
+                        ObjBoundBuiltin *bound = newBoundBuiltin(peek(0), ((ObjNative *)AS_OBJ(native)));
+                        pop();
+                        push(OBJ_VAL(bound));
+                    }
+                    else
+                    {
+                        pop();
+                        push(native);
+                    }
                     break;
                 }
                 runtimeError("Cannot find property %s in %s\n", name->chars, klass->name->chars);
@@ -10049,7 +10707,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             else
             {
                 klass = AS_CLASS(peek(0));
-                table = &klass->staticVars;
+                table = &klass->methods;
             }
             Value s = peek(0);
             Value value;
@@ -10061,9 +10719,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             if (!bindMethod(klass, name))
                 return INTERPRET_RUNTIME_ERROR;
-            break;
+            DISPATCH();
         }
-        case OP_SET_PROPERTY:
+        case OP_SET_PROPERTY: op_OP_SET_PROPERTY:
         {
             if (!IS_INSTANCE(peek(1)) && !IS_CLASS(peek(1)) && !IS_FOREIGN(peek(1)))
             {
@@ -10079,10 +10737,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 ObjInstance *instance = AS_INSTANCE(peek(1));
                 table = &instance->fields;
                 Value v;
-                if (tableGet(&instance->klass->staticVars, name, &v))
+                if (tableGet(&instance->klass->methods, name, &v) && !IS_CLOSURE(v) && !IS_NATIVE(v))
                 {
-                    // tableSet(table, name, peek(0));
-                    table = &instance->klass->staticVars;
+                    table = &instance->klass->methods;
                 }
             }
             else if (IS_FOREIGN(peek(1)))
@@ -10093,16 +10750,16 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             else
             {
                 ObjClass *klass = AS_CLASS(peek(1));
-                table = &klass->staticVars;
+                table = &klass->methods;
             }
 
             tableSet(table, name, peek(0));
             Value value = pop();
             pop();
             push(value);
-            break;
+            DISPATCH();
         }
-        case OP_GET_UPVALUE:
+        case OP_GET_UPVALUE: op_OP_GET_UPVALUE:
         {
             uint8_t slot = READ_BYTE();
             push(*frame->closure->upvalues[slot]->location);
@@ -10114,21 +10771,21 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 uint8_t slot2 = READ_BYTE();
                 push(*frame->closure->upvalues[slot2]->location);
             }
-            break;
+            DISPATCH();
         }
-        case OP_SET_UPVALUE:
+        case OP_SET_UPVALUE: op_OP_SET_UPVALUE:
         {
             uint8_t slot = READ_BYTE();
             *frame->closure->upvalues[slot]->location = peek(0);
-            break;
+            DISPATCH();
         }
-        case OP_CLOSE_UPVALUE:
+        case OP_CLOSE_UPVALUE: op_OP_CLOSE_UPVALUE:
         {
             closeUpvalues(vm.stackTop - 1);
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_PRINT:
+        case OP_PRINT: op_OP_PRINT:
         {
             Value val = peek(0);
             if ((vm.stackTop - vm.stack) <= 1)
@@ -10150,9 +10807,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             // free(str);
             FREE_ARRAY(char, str, STR_BUFF * 2);
             printf("\n");
-            break;
+            DISPATCH();
         }
-        case OP_ADD:
+        case OP_ADD: op_OP_ADD:
         {
             if (IS_STR(peek(1)))
             {
@@ -10222,9 +10879,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     "Operands must be two numbers or two strings.");
                 return INTERPRET_RUNTIME_ERROR;
             }
-            break;
+            DISPATCH();
         }
-        case OP_BIN_AND:
+        case OP_BIN_AND: op_OP_BIN_AND:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10235,9 +10892,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             long b = AS_NUM(pop());
             long a = AS_NUM(pop());
             push(NUM_VAL((a & b)));
-            break;
+            DISPATCH();
         }
-        case OP_BIN_OR:
+        case OP_BIN_OR: op_OP_BIN_OR:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10248,9 +10905,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             long b = AS_NUM(pop());
             long a = AS_NUM(pop());
             push(NUM_VAL((a | b)));
-            break;
+            DISPATCH();
         }
-        case OP_BIN_XOR:
+        case OP_BIN_XOR: op_OP_BIN_XOR:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10261,9 +10918,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             long b = AS_NUM(pop());
             long a = AS_NUM(pop());
             push(NUM_VAL((a ^ b)));
-            break;
+            DISPATCH();
         }
-        case OP_BIN_SHIFT_LEFT:
+        case OP_BIN_SHIFT_LEFT: op_OP_BIN_SHIFT_LEFT:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10274,9 +10931,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             long b = AS_NUM(pop());
             long a = AS_NUM(pop());
             push(NUM_VAL((a << b)));
-            break;
+            DISPATCH();
         }
-        case OP_BIN_SHIFT_RIGHT:
+        case OP_BIN_SHIFT_RIGHT: op_OP_BIN_SHIFT_RIGHT:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10287,16 +10944,16 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             long b = AS_NUM(pop());
             long a = AS_NUM(pop());
             push(NUM_VAL((a >> b)));
-            break;
+            DISPATCH();
         }
-        case OP_EQUAL:
+        case OP_EQUAL: op_OP_EQUAL:
         {
             Value b = pop();
             Value a = pop();
 
             bool test = checkIfValuesEqual(a, b);
             push(BOOL_VAL(test));
-            break;
+            DISPATCH();
             if (VALUE_TYPE(a) == VAL_OBJ && IS_INSTANCE(a) && !IS_NIL(AS_INSTANCE(a)->klass->equals))
             {
                 push(a);
@@ -10311,9 +10968,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             {
                 push(BOOL_VAL(valuesEqual(a, b)));
             }
-            break;
+            DISPATCH();
         }
-        case OP_NEGATE:
+        case OP_NEGATE: op_OP_NEGATE:
         {
             if (!IS_NUM(peek(0)))
             {
@@ -10321,36 +10978,79 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
             }
             *(vm.stackTop - 1) = NUM_VAL(-AS_NUM(peek(0)));
-            break;
+            DISPATCH();
         }
-        case OP_JUMP_IF_FALSE:
+        case OP_JUMP_IF_FALSE: op_OP_JUMP_IF_FALSE:
         {
             uint16_t offset = READ_SHORT();
             if (isFalsey(peek(0)))
                 frame->ip += offset;
-            break;
+            DISPATCH();
         }
-        case OP_JUMP:
+        case OP_JUMP: op_OP_JUMP:
         {
             uint16_t offset = READ_SHORT();
             frame->ip += offset;
-            break;
+            DISPATCH();
         }
-        case OP_LOOP:
+        case OP_LOOP: op_OP_LOOP:
         {
             uint16_t offset = READ_SHORT();
             frame->ip -= offset;
-            break;
+            DISPATCH();
         }
-        case OP_CALL:
+        case OP_CALL: op_OP_CALL:
         {
             int argC = READ_BYTE();
             if (!callValue(peek(argC), argC))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_CALL_KW:
+        case OP_TAIL_CALL: op_OP_TAIL_CALL:
+        {
+            int argC = READ_BYTE();
+            Value callee = peek(argC);
+            // Tail call optimization only applies to direct closure calls
+            // with matching arity, no generators, and no try-catch active.
+            if (IS_OBJ(callee) && OBJ_TYPE(callee) == OBJ_CLOSURE && !vm.isInTryCatch)
+            {
+                ObjClosure *closure = AS_CLOSURE(callee);
+                if (!closure->function->isGenerator &&
+                    closure->function->arity == argC &&
+                    closure->function->minArity == argC)
+                {
+                    // Profiler: record time for the frame we're about to reuse
+                    if (vm.profilerEnabled)
+                    {
+                        uint64_t end = nowNs();
+                        uint64_t start = frame->startTimeNs;
+                        if (start == 0) start = end;
+                        profilerAddSample(frame->closure->function, end - start);
+                    }
+                    closeUpvalues(frame->slots);
+                    // Shift arguments down to reuse the current frame's slot
+                    Value *dest = frame->slots;
+                    dest[0] = callee; // closure in slot 0
+                    Value *src = vm.stackTop - argC;
+                    for (int i = 0; i < argC; i++)
+                        dest[i + 1] = src[i];
+                    vm.stackTop = dest + argC + 1;
+                    // Reinitialize the frame with the new closure
+                    frame->closure = closure;
+                    frame->ip = closure->function->chunk.code;
+                    if (vm.profilerEnabled)
+                        frame->startTimeNs = 0;
+                    DISPATCH();
+                }
+            }
+            // Fallback: regular call + the return will happen naturally
+            if (!callValue(callee, argC))
+                return INTERPRET_RUNTIME_ERROR;
+            frame = &vm.frames[vm.frameCount - 1];
+            DISPATCH();
+        }
+        case OP_CALL_KW: op_OP_CALL_KW:
         {
             int positional = READ_BYTE();
             int keyword = READ_BYTE();
@@ -10358,18 +11058,33 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (!callValueKw(peek(rawArgCount), positional, keyword))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_INVOKE:
+        case OP_INVOKE: op_OP_INVOKE:
         {
+            uint8_t *cacheKey = frame->ip - 1;
             ObjString *methodName = READ_STRING();
             int argc = READ_BYTE();
-            if (!invoke(methodName, argc))
+            {
+                Value receiver = peek(argc);
+                if (IS_INSTANCE(receiver)) {
+                    ObjInstance *rcvInst = AS_INSTANCE(receiver);
+                    unsigned icIdx = ((uintptr_t)cacheKey >> 2) & (IC_SIZE - 1);
+                    struct InlineCacheEntry *ic = &vm.inlineCache[icIdx];
+                    if (ic->ip == cacheKey && ic->klass == rcvInst->klass) {
+                        if (!callValue(ic->method, argc))
+                            return INTERPRET_RUNTIME_ERROR;
+                        frame = &vm.frames[vm.frameCount - 1];
+                        DISPATCH();
+                    }
+                }
+            }
+            if (!invokeIC(methodName, argc, cacheKey))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_INVOKE_KW:
+        case OP_INVOKE_KW: op_OP_INVOKE_KW:
         {
             ObjString *methodName = READ_STRING();
             int positional = READ_BYTE();
@@ -10377,9 +11092,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (!invokeKw(methodName, positional, keyword))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_SUPER_INVOKE:
+        case OP_SUPER_INVOKE: op_OP_SUPER_INVOKE:
         {
             ObjString *method = READ_STRING();
             int argc = READ_BYTE();
@@ -10387,9 +11102,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (!invokeFromClass(super, method, argc))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_SUPER_INVOKE_KW:
+        case OP_SUPER_INVOKE_KW: op_OP_SUPER_INVOKE_KW:
         {
             ObjString *method = READ_STRING();
             int positional = READ_BYTE();
@@ -10398,9 +11113,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (!invokeFromClassKw(super, method, positional, keyword))
                 return INTERPRET_RUNTIME_ERROR;
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_CLOSURE:
+        case OP_CLOSURE: op_OP_CLOSURE:
         {
             ObjFunction *function = AS_FUN(READ_CONSTANT());
 
@@ -10416,9 +11131,38 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 else
                     closure->upvalues[i] = frame->closure->upvalues[index];
             }
-            break;
+            DISPATCH();
         }
-        case OP_YIELD:
+        case OP_AWAIT: op_OP_AWAIT:
+        {
+            /* await <value> — if the value is a Thread, join it (releasing
+               the GVL so the thread can run) and push the result.
+               If it's not a Thread, just leave it on the stack. */
+            Value val = peek(0);
+            if (IS_FOREIGN(val) && AS_FOREIGN(val)->type == TYPE_THREAD)
+            {
+                pop(); /* remove the thread from the stack */
+                DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(val);
+
+                DotKThread *saved = vmBeginBlockingIO();
+                pthread_join(t->handle, NULL);
+                vmEndBlockingIO(saved);
+
+                /* Restore frame pointer after state reload */
+                frame = &vm.frames[vm.frameCount - 1];
+
+                if (t->status == THREAD_ERROR)
+                {
+                    runtimeError("Awaited thread raised an error: %s",
+                                 t->errorMsg ? t->errorMsg->chars : "unknown");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                push(t->result);
+            }
+            /* else: not a Thread — value stays on the stack as-is */
+            DISPATCH();
+        }
+        case OP_YIELD: op_OP_YIELD:
         {
             Value yielded = pop();
             if (!gYieldTrapActive)
@@ -10431,7 +11175,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             gYieldTrapValue = yielded;
             return INTERPRET_OK;
         }
-        case OP_RETURN:
+        case OP_RETURN: op_OP_RETURN:
         {
             Value result = pop();
             /* profiler: record time spent in this function */
@@ -10466,9 +11210,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_OK;
 
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_RETURN_NIL:
+        case OP_RETURN_NIL: op_OP_RETURN_NIL:
         {
             Value result = NIL_VAL;
             if (vm.profilerEnabled)
@@ -10501,9 +11245,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_OK;
 
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_RETURN_THIS:
+        case OP_RETURN_THIS: op_OP_RETURN_THIS:
         {
             Value result = frame->slots[0];
             if (vm.profilerEnabled)
@@ -10532,9 +11276,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_OK;
 
             frame = &vm.frames[vm.frameCount - 1];
-            break;
+            DISPATCH();
         }
-        case OP_CONSTANT:
+        case OP_CONSTANT: op_OP_CONSTANT:
         {
             bool wide = isWide();
             Value constant = wide
@@ -10550,9 +11294,41 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 Value constant2 = frame->closure->function->chunk.constants.values[READ_BYTE()];
                 push(constant2);
             }
-            break;
+            // Superinstruction: OP_CONSTANT <a>; OP_ADD (number fast path)
+            // Stack before push: [..., X]. After push: [..., X, constant].
+            // We want X + constant, leaving result on stack.
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
+                     && *frame->ip == OP_ADD && IS_NUM(peek(1)))
+            {
+                frame->ip++;
+                double b = AS_NUM(constant);
+                double a = AS_NUM(peek(1));
+                pop(); // remove constant
+                *(vm.stackTop - 1) = NUM_VAL(a + b);
+            }
+            // Superinstruction: OP_CONSTANT <a>; OP_SUB (number fast path)
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
+                     && *frame->ip == OP_SUB && IS_NUM(peek(1)))
+            {
+                frame->ip++;
+                double b = AS_NUM(constant);
+                double a = AS_NUM(peek(1));
+                pop();
+                *(vm.stackTop - 1) = NUM_VAL(a - b);
+            }
+            // Superinstruction: OP_CONSTANT <a>; OP_LESS (number fast path)
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
+                     && *frame->ip == OP_LESS && IS_NUM(peek(1)))
+            {
+                frame->ip++;
+                double b = AS_NUM(constant);
+                double a = AS_NUM(peek(1));
+                pop();
+                *(vm.stackTop - 1) = BOOL_VAL(a < b);
+            }
+            DISPATCH();
         }
-        case OP_EXPORT:
+        case OP_EXPORT: op_OP_EXPORT:
         {
             ObjString *name = READ_STRING();
             if (vm.currentModuleExports == NULL)
@@ -10570,9 +11346,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             tableSet(&vm.currentModuleExports->exports, name, value);
             vm.currentModuleHasExplicitExports = true;
-            break;
+            DISPATCH();
         }
-        case OP_IMPORT:
+        case OP_IMPORT: op_OP_IMPORT:
         {
             Value file = pop();
             if (IS_STR(file))
@@ -10774,9 +11550,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("Import path must be a string, got '%s'.", valueTypeName(file));
                 return INTERPRET_RUNTIME_ERROR;
             }
-            break;
+            DISPATCH();
         }
-        case OP_IMPORT_ALL:
+        case OP_IMPORT_ALL: op_OP_IMPORT_ALL:
         {
             if (!IS_NAMESPACE(peek(0)))
             {
@@ -10812,9 +11588,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
 
             pop();
-            break;
+            DISPATCH();
         }
-        case OP_IMPORT_NAME:
+        case OP_IMPORT_NAME: op_OP_IMPORT_NAME:
         {
             if (!IS_NAMESPACE(peek(0)))
             {
@@ -10851,10 +11627,10 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             if (tableGet(&moduleNamespace->constGlobals, importedName, &_isConst))
                 tableSet(constGlobalsTable, aliasName, BOOL_VAL(true));
 
-            break;
+            DISPATCH();
         }
 
-        case OP_TRY:
+        case OP_TRY: op_OP_TRY:
         {
             Value *stop = vm.stackTop;
             int frameCount = vm.frameCount;
@@ -10890,9 +11666,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 push(BOOL_VAL(true));
             }
             vm.isInTryCatch = b4;
-            break;
+            DISPATCH();
         }
-        case OP_CATCH:
+        case OP_CATCH: op_OP_CATCH:
         {
             if (!IS_CLOSURE(peek(0)))
             {
@@ -10910,9 +11686,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 pop();
                 return INTERPRET_RUNTIME_ERROR;
             }
-            break;
+            DISPATCH();
         }
-        case OP_CONSTANT_LONG:
+        case OP_CONSTANT_LONG: op_OP_CONSTANT_LONG:
         {
             uint32_t constantIndex =
                 ((uint32_t)(READ_BYTE() & 0xff)) |
@@ -10920,25 +11696,25 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 ((uint32_t)(READ_BYTE() & 0xff) << 16);
             Value constant = frame->closure->function->chunk.constants.values[constantIndex];
             push(constant);
-            break;
+            DISPATCH();
         }
-        case OP_WIDE:
+        case OP_WIDE: op_OP_WIDE:
             vm.nextWideOp = 2;
-            break;
-        case OP_NOP:
+            DISPATCH();
+        case OP_NOP: op_OP_NOP:
             if (vm.nextWideOp == 1)
                 vm.nextWideOp = 0;
-            break;
-        case OP_DEFAULT_LOCAL:
+            DISPATCH();
+        case OP_DEFAULT_LOCAL: op_OP_DEFAULT_LOCAL:
         {
             uint8_t slot = READ_BYTE();
             uint16_t offset = READ_SHORT();
             if (!IS_UNDEF(frame->slots[slot]))
                 frame->ip += offset;
-            break;
+            DISPATCH();
         }
         default:
-            break;
+            DISPATCH();
         }
 
         if (vm.nextWideOp == 1)
@@ -10957,6 +11733,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 #undef READ_SHORT
 #undef READ_CONSTANT
 #undef READ_STRING
+#undef DISPATCH
 }
 
 InterpretResult interpret(const char *source, char *file, bool printExpressions, int argC, char **argV)

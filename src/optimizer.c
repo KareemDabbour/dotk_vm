@@ -23,6 +23,7 @@ static bool instructionSupportsWide(uint8_t inst)
     switch (inst)
     {
     case OP_CALL:
+    case OP_TAIL_CALL:
     case OP_DEF_GLOBAL:
     case OP_DEF_CONST_GLOBAL:
     case OP_GET_LOCAL:
@@ -77,6 +78,7 @@ static int instructionLength(Chunk *chunk, int offset, bool widePending, bool *c
     switch (inst)
     {
     case OP_CALL:
+    case OP_TAIL_CALL:
     case OP_DEF_GLOBAL:
     case OP_DEF_CONST_GLOBAL:
     case OP_GET_LOCAL:
