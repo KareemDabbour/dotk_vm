@@ -163,6 +163,13 @@ static void blackenObject(Obj *object)
         }
         break;
     }
+    case OBJ_TUPLE:
+    {
+        ObjTuple *tuple = (ObjTuple *)object;
+        for (int i = 0; i < tuple->count; i++)
+            markValue(tuple->items[i]);
+        break;
+    }
     case OBJ_BOUND_METHOD:
     {
         ObjBoundMethod *bound = (ObjBoundMethod *)object;
@@ -312,6 +319,16 @@ static void freeObject(Obj *object)
         FREE(ObjList, object);
         break;
     }
+    case OBJ_TUPLE:
+    {
+        ObjTuple *tuple = (ObjTuple *)object;
+#ifdef DEBUG_LOG_GC
+        fprintf(stderr, "%p freeing OBJ_TUPLE of %d elements\n", (void *)object, tuple->count);
+#endif
+        FREE_ARRAY(Value, tuple->items, tuple->capacity);
+        FREE(ObjTuple, object);
+        break;
+    }
     case OBJ_SLICE:
     {
         ObjSlice *slice = (ObjSlice *)object;
@@ -424,15 +441,32 @@ static void freeObject(Obj *object)
         ObjForeign *foreign = (ObjForeign *)object;
         if (foreign->ownsPtr && foreign->ptr)
         {
+            bool skipFreePtr = false;
             if (foreign->type == TYPE_THREAD)
             {
                 DotKThread *t = (DotKThread *)foreign->ptr;
-                if (t->args)
-                    free(t->args);
-                pthread_mutex_destroy(&t->mutex);
-                pthread_cond_destroy(&t->cond);
+                pthread_mutex_lock(&t->mutex);
+                bool isRunning = (t->status == THREAD_CREATED || t->status == THREAD_RUNNING);
+                bool joined = t->joined;
+                pthread_mutex_unlock(&t->mutex);
+
+                /* Running threads are rooted by vm.activeThreadRoots and should not reach here. */
+                if (isRunning)
+                {
+                    skipFreePtr = true;
+                }
+                else
+                {
+                    if (!joined && !t->usesWorkerPool)
+                        pthread_detach(t->handle);
+                    if (t->args)
+                        free(t->args);
+                    pthread_mutex_destroy(&t->mutex);
+                    pthread_cond_destroy(&t->cond);
+                }
             }
-            free(foreign->ptr);
+            if (!skipFreePtr)
+                free(foreign->ptr);
         }
 
         freeTable(&foreign->fields);
@@ -482,6 +516,9 @@ static void markRoots()
     if (vm.mainThread && vm.currentThread != vm.mainThread)
         markThreadRoots(vm.mainThread);
 
+    for (int i = 0; i < vm.activeThreadRootCount; i++)
+        markObj((Obj *)vm.activeThreadRoots[i]);
+
     markTable(&vm.globals);
     markTable(&vm.constGlobals);
     markTable(&vm.strings);
@@ -513,6 +550,7 @@ static void markRoots()
     markObj((Obj *)vm.nextDunderStr);
     markObj((Obj *)vm.stringClass);
     markObj((Obj *)vm.listClass);
+    markObj((Obj *)vm.tupleClass);
     markObj((Obj *)vm.mapClass);
     markObj((Obj *)vm.generatorClass);
     markObj((Obj *)vm.listIteratorClass);
@@ -625,8 +663,8 @@ void collectGarbage()
                 break;
             }
         }
-        fprintf(stderr, "[DOTK_DEBUG_GC] gc begin bytes=%zu objects=%zu strings=%d/%d importCount=%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu namespace=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
-                vm.bytesAllocated, objCount, vm.strings.count, vm.strings.capacity, vm.importCount, vm.nextGC,
+        fprintf(stderr, "[DOTK_DEBUG_GC] gc begin bytes=%zu objects=%zu strings=%d/%d nextGC=%zu types: str=%zu func=%zu clos=%zu list=%zu map=%zu namespace=%zu class=%zu inst=%zu upv=%zu foreign=%zu native=%zu bmethod=%zu bbuiltin=%zu slice=%zu other=%zu\n",
+                vm.bytesAllocated, objCount, vm.strings.count, vm.strings.capacity, vm.nextGC,
                 cnt_string, cnt_function, cnt_closure, cnt_list, cnt_map, cnt_namespace, cnt_class, cnt_instance, cnt_upvalue, cnt_foreign, cnt_native, cnt_bound_method, cnt_bound_builtin, cnt_slice, cnt_other);
     }
     markRoots();
@@ -638,11 +676,12 @@ void collectGarbage()
     /* Adaptive GC threshold: grow faster when live set is small, slower when large. */
     {
         size_t liveBytes = vm.bytesAllocated;
-        size_t minGC = 1024UL * 1024UL;  /* 1 MB floor */
+        size_t minGC = 1024UL * 1024UL; /* 1 MB floor */
         size_t nextGC = liveBytes < (1024UL * 1024UL * 64UL)
-            ? liveBytes * GC_HEAP_GROW_FACTOR
-            : liveBytes + liveBytes / 2;  /* 1.5x for large heaps */
-        if (nextGC < minGC) nextGC = minGC;
+                            ? liveBytes * GC_HEAP_GROW_FACTOR
+                            : liveBytes + liveBytes / 2; /* 1.5x for large heaps */
+        if (nextGC < minGC)
+            nextGC = minGC;
         vm.nextGC = nextGC;
     }
 #ifdef DEBUG_LOG_GC

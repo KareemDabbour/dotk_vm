@@ -24,6 +24,7 @@ class Socket{
         this.port = null;
         this.host = null;
         this.isClosed = true;
+        this._rxBuffer = "";
     }
     bindToPort(port){
         this.port = port;
@@ -78,6 +79,47 @@ class Socket{
     }
     receive(){
         return read(this.socket);
+    }
+    receiveTimeout(timeoutMs){
+        return readTimeout(this.socket, timeoutMs);
+    }
+    _tryPopLineFromBuffer(){
+        if (!this._rxBuffer || !this._rxBuffer.contains("\n")){
+            return null;
+        }
+
+        var parts = this._rxBuffer.split("\n");
+        var line = parts[0];
+        var rest = "";
+        for (var i = 1; i < len(parts); i += 1){
+            rest += parts[i];
+            if (i < len(parts) - 1) rest += "\n";
+        }
+        this._rxBuffer = rest;
+
+        if (line && len(line) > 0 && line[-1] == "\r"){
+            line = line[0:-1];
+        }
+        return line;
+    }
+    receiveLineTimeout(timeoutMs){
+        while (true){
+            var buffered = this._tryPopLineFromBuffer();
+            if (buffered != null) return buffered;
+
+            var chunk = this.receiveTimeout(timeoutMs);
+            if (chunk == null) return null;
+            if (chunk == ""){
+                if (this._rxBuffer && len(this._rxBuffer) > 0){
+                    var tail = this._rxBuffer;
+                    this._rxBuffer = "";
+                    return tail;
+                }
+                return "";
+            }
+
+            this._rxBuffer += chunk;
+        }
     }
     getSocketFd(){
         return this.socket;

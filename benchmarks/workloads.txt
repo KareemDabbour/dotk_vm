@@ -6,3 +6,5 @@
 ./tests/collections/02_map_basics.k
 ./tests/strings/02_split_replace_find.k
 ./tests/gc/03_gc_reachable_collections.k
+./benchmarks/async_pool_burst.k
+./benchmarks/coroutine_select_stress.k

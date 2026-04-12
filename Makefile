@@ -13,7 +13,7 @@ objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources))
 MODE ?= release
 
 CFLAGS_COMMON = -g
-LDFLAGS_COMMON = -lm -lsqlite3 -ldl #-lX11
+LDFLAGS_COMMON = -lm -lpthread -lsqlite3 -ldl #-lX11
 
 CFLAGS_RELEASE = -O3 -DNDEBUG -flto -march=native -fno-plt
 LDFLAGS_RELEASE = -flto
@@ -103,6 +103,12 @@ bench: all
 
 bench-long: all
 	python3 tools/bench_compare.py $(baseline_exec) ./$(exec) $(workloads_file) 25
+
+bench-pool: all
+	python3 tools/bench_pool_tuning.py ./$(exec)
+
+bench-pool-long: all
+	python3 tools/bench_pool_tuning.py ./$(exec) --iters 10 --tasks 1000 --loops 5000 --limits 8,16,32,64,128,256
 
 bench-legacy: save-legacy-baseline
 	python3 tools/bench_compare.py $(baseline_exec) ./$(exec) $(workloads_file) 5

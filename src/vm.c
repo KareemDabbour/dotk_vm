@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define TB_IMPL
 #include "include/vm.h"
 #include "include/builtin_module.h"
@@ -10,6 +11,7 @@
 #include "include/termbox2.h"
 #include <ctype.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <math.h>
 #include <regex.h>
 #include <stdarg.h>
@@ -23,6 +25,17 @@ Value prefixStr = NIL_VAL;
 FILE *file;
 bool printBytecodeGlobal = false;
 bool printExecStackGlobaL = false;
+
+static bool trackImportSource(char *source)
+{
+    ImportSourceNode *node = (ImportSourceNode *)malloc(sizeof(ImportSourceNode));
+    if (node == NULL)
+        return false;
+    node->source = source;
+    node->next = vm.importSources;
+    vm.importSources = node;
+    return true;
+}
 
 typedef enum
 {
@@ -59,6 +72,19 @@ static bool invoke(ObjString *name, int argc);
 static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
 static void setNativeMethod(Table *table, const char *name, NativeFn fn);
 static void *threadEntryPoint(void *arg);
+static void registerActiveThreadRoot(ObjForeign *threadObj);
+static void unregisterActiveThreadRoot(ObjForeign *threadObj);
+static bool ensureThreadJoined(DotKThread *t, const char *reason);
+static bool ensureThreadJoinedWithTimeout(DotKThread *t, const char *reason, int timeoutMs, bool *timedOut);
+static void vmSaveToThread(DotKThread *t);
+static void vmLoadFromThread(DotKThread *t);
+static void vmSwitchThread(DotKThread *next);
+static bool enqueueAsyncTask(DotKThread *task);
+static DotKThread *dequeueAsyncTask(bool *shouldStop);
+static void *asyncWorkerEntryPoint(void *arg);
+static bool initAsyncWorkerPool(void);
+static void shutdownAsyncWorkerPool(void);
+static int resolveAsyncQueueMax(int workerCount);
 static Value namedNativeVal(const char *name, NativeFn fn);
 static InterpretResult run(bool isRepl, int runUntilFrame);
 static bool runGeneratorNext(ObjGenerator *generator, Value *out, Value sendValue);
@@ -933,27 +959,56 @@ void runtimeError(const char *format, ...)
         {
             printFunc = false;
             int n = snprintf(trace + len, traceCap - len, "Error in:\n");
-            if (len + n >= traceCap) { traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, len, traceCap); n = snprintf(trace + len, traceCap - len, "Error in:\n"); }
+            if (len + n >= traceCap)
+            {
+                traceCap = GROW_CAPACITY(traceCap);
+                trace = GROW_ARRAY(char, trace, len, traceCap);
+                n = snprintf(trace + len, traceCap - len, "Error in:\n");
+            }
             len += n;
         }
 
         int n = snprintf(trace + len, traceCap - len, "  %s:%d:%d", pos.file, pos.line, pos.col);
-        if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, "  %s:%d:%d", pos.file, pos.line, pos.col); }
+        if (len + n >= traceCap)
+        {
+            int old = traceCap;
+            traceCap = GROW_CAPACITY(traceCap);
+            trace = GROW_ARRAY(char, trace, old, traceCap);
+            n = snprintf(trace + len, traceCap - len, "  %s:%d:%d", pos.file, pos.line, pos.col);
+        }
         len += n;
         if (function->name == NULL)
         {
             n = snprintf(trace + len, traceCap - len, " in script");
-            if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, " in script"); }
+            if (len + n >= traceCap)
+            {
+                int old = traceCap;
+                traceCap = GROW_CAPACITY(traceCap);
+                trace = GROW_ARRAY(char, trace, old, traceCap);
+                n = snprintf(trace + len, traceCap - len, " in script");
+            }
             len += n;
         }
         else if (printFunc)
         {
             n = snprintf(trace + len, traceCap - len, " in %s()", function->name->chars);
-            if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, " in %s()", function->name->chars); }
+            if (len + n >= traceCap)
+            {
+                int old = traceCap;
+                traceCap = GROW_CAPACITY(traceCap);
+                trace = GROW_ARRAY(char, trace, old, traceCap);
+                n = snprintf(trace + len, traceCap - len, " in %s()", function->name->chars);
+            }
             len += n;
         }
         n = snprintf(trace + len, traceCap - len, "\n");
-        if (len + n >= traceCap) { int old = traceCap; traceCap = GROW_CAPACITY(traceCap); trace = GROW_ARRAY(char, trace, old, traceCap); n = snprintf(trace + len, traceCap - len, "\n"); }
+        if (len + n >= traceCap)
+        {
+            int old = traceCap;
+            traceCap = GROW_CAPACITY(traceCap);
+            trace = GROW_ARRAY(char, trace, old, traceCap);
+            n = snprintf(trace + len, traceCap - len, "\n");
+        }
         len += n;
     }
     vm.lastErrorTrace = takeString(trace, len);
@@ -982,18 +1037,20 @@ void runtimeError(const char *format, ...)
 
 static bool isBuiltinClass(Value value)
 {
-    return IS_OBJ(value) && (IS_LIST(value) || IS_MAP(value) || IS_STR(value) || IS_GENERATOR(value));
+    return IS_OBJ(value) && (IS_LIST(value) || IS_TUPLE(value) || IS_MAP(value) || IS_STR(value) || IS_GENERATOR(value));
 }
 
 static bool isBuiltinClazz(ObjClass *clazz)
 {
-    return clazz == vm.listClass || clazz == vm.mapClass || clazz == vm.stringClass || clazz == vm.generatorClass;
+    return clazz == vm.listClass || clazz == vm.tupleClass || clazz == vm.mapClass || clazz == vm.stringClass || clazz == vm.generatorClass;
 }
 
 ObjClass *getVmClass(Value val)
 {
     if (IS_LIST(val))
         return vm.listClass;
+    if (IS_TUPLE(val))
+        return vm.tupleClass;
     if (IS_MAP(val))
         return vm.mapClass;
     if (IS_STR(val))
@@ -1049,6 +1106,14 @@ static uint32_t hashValueShallow(Value value)
             {
                 hash += hashValueShallow(list->items[i]);
             }
+            return hash;
+        }
+        case OBJ_TUPLE:
+        {
+            uint32_t hash = 0;
+            ObjTuple *tuple = AS_TUPLE(value);
+            for (int i = 0; i < tuple->count; i++)
+                hash += hashValueShallow(tuple->items[i]);
             return hash;
         }
         case OBJ_CLASS:
@@ -2706,6 +2771,8 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
         return NUM_VAL((double)AS_STR(argv[0])->len);
     if (IS_LIST(argv[0]))
         return NUM_VAL((double)AS_LIST(argv[0])->count);
+    if (IS_TUPLE(argv[0]))
+        return NUM_VAL((double)AS_TUPLE(argv[0])->count);
     if (IS_MAP(argv[0]))
         return NUM_VAL((double)AS_MAP(argv[0])->map.count);
     if (IS_INSTANCE(argv[0]) && !IS_NIL(AS_INSTANCE(argv[0])->klass->sizeFn))
@@ -2720,7 +2787,7 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
         *pushedValue = true;
         return NIL_VAL;
     }
-    runtimeError("'len()' expects a string or list as argument but got '%s'", valueTypeName(argv[0]));
+    runtimeError("'len()' expects a string, list, tuple, or map as argument but got '%s'", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -2754,12 +2821,12 @@ static Value sleepNative(int argc, Value *argv, bool *hasError, bool *pushedValu
         *hasError = true;
         return NIL_VAL;
     }
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("sleep", __FILE__, __LINE__);
     if (round(AS_NUM(argv[0])) == AS_NUM(argv[0]))
         sleep(AS_NUM(argv[0]));
     else
         usleep(AS_NUM(argv[0]) * 1000000);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "sleep", __FILE__, __LINE__);
     return NIL_VAL;
 }
 
@@ -2846,6 +2913,42 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             *len = (int)index;
             return buff;
         }
+        case OBJ_TUPLE:
+        {
+            ObjTuple *tuple = AS_TUPLE(val);
+            index = appendChar(buff, cap, 0, '(');
+            for (int i = 0; i < tuple->count; i++)
+            {
+                if (IS_TUPLE(tuple->items[i]) && AS_TUPLE(tuple->items[i]) == tuple)
+                {
+                    index = appendLiteral(buff, cap, index, "(...)");
+                }
+                else
+                {
+                    size_t remaining = index < cap ? cap - index : 0;
+                    valueToStringSized(tuple->items[i], buff + index, remaining, len);
+                    index += *len;
+                    if (cap > 0 && index >= cap)
+                        index = cap - 1;
+                }
+                if (i < tuple->count - 1)
+                {
+                    index = appendChar(buff, cap, index, ',');
+                    index = appendChar(buff, cap, index, ' ');
+                }
+            }
+            if (tuple->count == 1)
+                index = appendChar(buff, cap, index, ',');
+            index = appendChar(buff, cap, index, ')');
+            if (cap > 0)
+            {
+                if (index >= cap)
+                    index = cap - 1;
+                buff[index] = '\0';
+            }
+            *len = (int)index;
+            return buff;
+        }
         case OBJ_MAP:
         {
             ObjMap *map = AS_MAP(val);
@@ -2904,7 +3007,6 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
                 *len = (int)index;
                 FREE_ARRAY(char, str, strAlloc);
                 return buff;
-
             }
             index = appendFormat(buff, cap, 0, "%s f<%p>", FOREIGN_TYPES[obj->type], obj->ptr);
             *len = (int)index;
@@ -2918,31 +3020,44 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
             // Use toStr if available?
             if (!IS_NIL(AS_INSTANCE(val)->klass->toStr))
             {
-                // Make sure that the val is on the stack
-                Value stackTop = peek(0);
-                if (VALUE_TYPE(stackTop) != VAL_OBJ || AS_OBJ(stackTop) != AS_OBJ(val))
-                    push(val);
+                /* valueToString must not perturb VM stack/local-slot state. */
+                Value *savedTop = vm.stackTop;
 
                 int frameCount = vm.frameCount;
 
+                // Make sure that the receiver is on top for invoke().
+                bool pushedReceiver = false;
+                if (savedTop == vm.stack || !IS_OBJ(savedTop[-1]) || AS_OBJ(savedTop[-1]) != AS_OBJ(val))
+                {
+                    push(val);
+                    pushedReceiver = true;
+                }
+
                 if (!invoke(vm.toStr, 0))
                 {
+                    vm.stackTop = savedTop;
                     *len = 0;
                     return buff;
                 }
                 bool invokedNative = frameCount == vm.frameCount;
                 if (!invokedNative && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
                 {
+                    vm.stackTop = savedTop;
                     *len = 0;
                     return buff;
                 }
-                Value str = invokedNative ? peek(0) : pop();
+
+                Value str = peek(0);
                 if (!IS_STR(str))
                 {
+                    vm.stackTop = savedTop;
                     *len = 0;
                     return buff;
                 }
                 index = appendLiteral(buff, cap, 0, AS_STR(str)->chars);
+                vm.stackTop = savedTop;
+
+                (void)pushedReceiver;
                 *len = (int)index;
                 return buff;
             }
@@ -3330,6 +3445,14 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_LIST)
         return OBJ_VAL(copyList(AS_LIST(argv[0]))); // I want to copy the list
+    if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_TUPLE)
+    {
+        ObjTuple *tuple = AS_TUPLE(argv[0]);
+        ObjList *list = newListWithCapacity(tuple->count);
+        for (int i = 0; i < tuple->count; i++)
+            appendToList(list, tuple->items[i]);
+        return OBJ_VAL(list);
+    }
     if (VALUE_TYPE(argv[0]) == VAL_OBJ && AS_OBJ(argv[0])->type == OBJ_STRING)
     {
         ObjList *list = newList();
@@ -3344,7 +3467,7 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
     }
     if (VALUE_TYPE(argv[0]) == VAL_NIL)
         return OBJ_VAL(newList());
-    runtimeError("Expected a string or list but got '%s' for list()", valueTypeName(argv[0]));
+    runtimeError("Expected a string, list, or tuple but got '%s' for list()", valueTypeName(argv[0]));
     *hasError = true;
     return NIL_VAL;
 }
@@ -3480,6 +3603,9 @@ static Value closeFDNative(int argc, Value *argv, bool *hasError, bool *pushedVa
         return BOOL_VAL(false);
     }
     int sock = (int)AS_NUM(argv[0]);
+    // Best-effort wakeup for blocked recv/read in other threads on socket fds.
+    // For non-socket fds this may fail with ENOTSOCK, which we intentionally ignore.
+    shutdown(sock, SHUT_RDWR);
     if (close(sock) < 0)
         return BOOL_VAL(false);
 
@@ -3564,11 +3690,11 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("getaddrinfo", __FILE__, __LINE__);
     int gaiResult = getaddrinfo(host, NULL, &hints, &res);
     if (gaiResult != 0)
     {
-        vmEndBlockingIO(saved);
+        vmEndBlockingIO(saved, "getaddrinfo#failed", __FILE__, __LINE__);
         freeaddrinfo(res);
         runtimeError("Failed to get address info for host '%s'", host);
         *hasError = true;
@@ -3588,7 +3714,7 @@ static Value connectNative(int argc, Value *argv, bool *hasError, bool *pushedVa
     // }
 
     int connectResult = connect(sock, (struct sockaddr *)serv_addr, sizeof(*serv_addr));
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "connect", __FILE__, __LINE__);
     if (connectResult < 0)
     {
         freeaddrinfo(res);
@@ -3688,9 +3814,9 @@ static Value acceptNative(int argc, Value *argv, bool *hasError, bool *pushedVal
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
     socklen_t addrlen = sizeof(address);
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("accept", __FILE__, __LINE__);
     int newSock = accept(sock, (struct sockaddr *)&address, &addrlen);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "accept", __FILE__, __LINE__);
     if (newSock < 0)
     {
         runtimeError("Failed to accept connection");
@@ -3716,20 +3842,95 @@ static Value readNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     }
     int sock = (int)AS_NUM(argv[0]);
     char buffer[BUFFER_SIZE] = {0};
-    // int bytesRead;
-    // while ((bytesRead = recv(sock, buffer, BUFFER_SIZE - 1, 0)) > 0)
-    // {
-    //     buffer[bytesRead] = '\0';
-    // }
-    DotKThread *saved = vmBeginBlockingIO();
-    int valread = read(sock, buffer, BUFFER_SIZE);
-    vmEndBlockingIO(saved);
+    DotKThread *saved = vmBeginBlockingIO("read", __FILE__, __LINE__);
+    int valread;
+    do
+    {
+        valread = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+    } while (valread < 0 && errno == EINTR);
+    vmEndBlockingIO(saved, "read", __FILE__, __LINE__);
     if (valread < 0)
     {
-        runtimeError("Failed to read data");
+        runtimeError("Failed to read data (errno=%d)", errno);
         *hasError = true;
         return NIL_VAL;
     }
+    return OBJ_VAL(copyString(buffer, valread));
+}
+
+static Value readTimeoutNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
+{
+    if (argc != 2)
+    {
+        runtimeError("Expected 2 arguments but %d passed in for readTimeout(socket, timeoutMs)", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("Expected a number but got '%s' for readTimeout(socket, timeoutMs)", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[1]))
+    {
+        runtimeError("Expected a number but got '%s' for readTimeout(socket, timeoutMs)", valueTypeName(argv[1]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int sock = (int)AS_NUM(argv[0]);
+    int timeoutMs = (int)AS_NUM(argv[1]);
+    if (timeoutMs < 0)
+    {
+        runtimeError("readTimeout(socket, timeoutMs) requires timeoutMs >= 0");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    struct pollfd fds[1];
+    fds[0].fd = sock;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+
+    DotKThread *saved = vmBeginBlockingIO("readTimeout#poll", __FILE__, __LINE__);
+    int ret;
+    do
+    {
+        ret = poll(fds, 1, timeoutMs);
+    } while (ret < 0 && errno == EINTR);
+    vmEndBlockingIO(saved, "readTimeout#poll", __FILE__, __LINE__);
+
+    if (ret < 0)
+    {
+        runtimeError("Failed to poll socket (errno=%d)", errno);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (ret == 0)
+        return NIL_VAL;
+
+    if ((fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+        return OBJ_VAL(copyString("", 0));
+    if ((fds[0].revents & POLLIN) == 0)
+        return NIL_VAL;
+
+    char buffer[BUFFER_SIZE] = {0};
+    saved = vmBeginBlockingIO("readTimeout#recv", __FILE__, __LINE__);
+    int valread;
+    do
+    {
+        valread = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+    } while (valread < 0 && errno == EINTR);
+    vmEndBlockingIO(saved, "readTimeout#recv", __FILE__, __LINE__);
+
+    if (valread < 0)
+    {
+        runtimeError("Failed to read data (errno=%d)", errno);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
     return OBJ_VAL(copyString(buffer, valread));
 }
 
@@ -3758,9 +3959,9 @@ NATIVE_FN(pollNative)
     struct pollfd fds[1];
     fds[0].fd = sock;
     fds[0].events = POLLIN;
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("poll", __FILE__, __LINE__);
     int ret = poll(fds, 1, timeout);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "poll", __FILE__, __LINE__);
     if (ret < 0)
     {
         runtimeError("Failed to poll socket");
@@ -3793,9 +3994,9 @@ static Value readSizeNative(int argc, Value *argv, bool *hasError, bool *pushedV
     int sock = (int)AS_NUM(argv[0]);
     int size = (int)AS_NUM(argv[1]);
     char buffer[BUFFER_SIZE] = {0};
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("readSize", __FILE__, __LINE__);
     int valread = read(sock, buffer, size);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "readSize", __FILE__, __LINE__);
     if (valread < 0)
     {
         runtimeError("Failed to read data");
@@ -3898,9 +4099,9 @@ static Value sendNative(int argc, Value *argv, bool *hasError, bool *pushedValue
     int sock = (int)AS_NUM(argv[0]);
     char *data = AS_CSTR(argv[1]);
     int dataLen = strlen(data);
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("send", __FILE__, __LINE__);
     ssize_t sent = send(sock, data, dataLen, 0);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "send", __FILE__, __LINE__);
     if (sent != dataLen)
     {
         runtimeError("Failed to send data");
@@ -4288,8 +4489,7 @@ static bool loadDynamicModulePath(const char *path, bool reportError)
             .raiseError = runtimeError,
             .valueTypeName = valueTypeName,
             .setNativeMethod = setNativeMethod,
-            .setTableValue = tableSet
-        };
+            .setTableValue = tableSet};
 
         ret = initModule(&api);
         if (!ret && reportError)
@@ -4915,9 +5115,13 @@ static bool callValue(Value callee, int argC)
                 }
                 memset(t, 0, sizeof(DotKThread));
                 t->status = THREAD_CREATED;
+                t->joined = false;
+                t->cancelled = false;
+                t->usesWorkerPool = true;
                 t->closure = closure;
                 t->result = NIL_VAL;
                 t->errorMsg = NULL;
+                t->ownerObj = NULL;
                 t->openUpvalues = NULL;
                 t->isInTryCatch = false;
                 pthread_mutex_init(&t->mutex, NULL);
@@ -4938,7 +5142,7 @@ static bool callValue(Value callee, int argC)
 
                 /* Build child stack: sentinel slot + closure + args */
                 t->stackTop = t->stack;
-                *t->stackTop++ = NIL_VAL;          /* sentinel slot 0 */
+                *t->stackTop++ = NIL_VAL; /* sentinel slot 0 */
                 *t->stackTop++ = OBJ_VAL(closure);
                 if (callArgc > 0)
                 {
@@ -4962,21 +5166,19 @@ static bool callValue(Value callee, int argC)
 
                 ObjForeign *threadObj = newForeignObj(TYPE_THREAD, t, true);
                 threadObj->klass = vm.threadClass;
+                t->ownerObj = threadObj;
+                registerActiveThreadRoot(threadObj);
 
-                pthread_attr_t attr;
-                pthread_attr_init(&attr);
-                pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
-                if (pthread_create(&t->handle, &attr, threadEntryPoint, t) != 0)
+                if (!enqueueAsyncTask(t))
                 {
-                    pthread_attr_destroy(&attr);
+                    unregisterActiveThreadRoot(threadObj);
                     free(t->args);
                     pthread_mutex_destroy(&t->mutex);
                     pthread_cond_destroy(&t->cond);
                     free(t);
-                    runtimeError("Failed to create async thread.");
+                    runtimeError("Failed to queue async task.");
                     return false;
                 }
-                pthread_attr_destroy(&attr);
 
                 /* Replace closure + args on the caller's stack with the thread object */
                 vm.stackTop -= normalizedArgCount + 1;
@@ -5094,6 +5296,131 @@ static bool callValueKw(Value callee, int positionalCount, int keywordCount)
         }
     }
     runtimeError("Can only call functions and classes -- not '%s'", valueTypeName(callee));
+    return false;
+}
+
+static bool expandUnpackedCallArgsOnStack(int partCount, const uint8_t *parts, uint16_t rawSlotCount, int *positionalOut, int *keywordOut)
+{
+    Value *base = vm.stackTop - rawSlotCount - 1;
+    Value *rawValues = NULL;
+    if (rawSlotCount > 0)
+    {
+        rawValues = ALLOCATE(Value, rawSlotCount);
+        for (uint16_t i = 0; i < rawSlotCount; i++)
+            rawValues[i] = base[1 + i];
+    }
+
+    uint16_t rawIndex = 0;
+    int positionalCount = 0;
+    int keywordCount = 0;
+    Value *write = base + 1;
+
+    for (int i = 0; i < partCount; i++)
+    {
+        ArgPartKind part = (ArgPartKind)parts[i];
+        switch (part)
+        {
+        case ARG_PART_POSITIONAL:
+        {
+            if (rawIndex >= rawSlotCount)
+                goto malformed_unpack_payload;
+            if (write >= vm.stack + STACK_MAX)
+            {
+                runtimeError("Expanded call arguments exceed stack capacity.");
+                goto unpack_error;
+            }
+            *write++ = rawValues[rawIndex++];
+            positionalCount++;
+            break;
+        }
+        case ARG_PART_POSITIONAL_UNPACK:
+        {
+            if (rawIndex >= rawSlotCount)
+                goto malformed_unpack_payload;
+            Value expanded = rawValues[rawIndex++];
+            if (!IS_LIST(expanded))
+            {
+                runtimeError("Positional argument unpack expects a list but got '%s'", valueTypeName(expanded));
+                goto unpack_error;
+            }
+            ObjList *list = AS_LIST(expanded);
+            for (int j = 0; j < list->count; j++)
+            {
+                if (write >= vm.stack + STACK_MAX)
+                {
+                    runtimeError("Expanded call arguments exceed stack capacity.");
+                    goto unpack_error;
+                }
+                *write++ = list->items[j];
+                positionalCount++;
+            }
+            break;
+        }
+        case ARG_PART_KEYWORD:
+        {
+            if (rawIndex + 1 >= rawSlotCount)
+                goto malformed_unpack_payload;
+            if (write + 1 >= vm.stack + STACK_MAX)
+            {
+                runtimeError("Expanded call arguments exceed stack capacity.");
+                goto unpack_error;
+            }
+            *write++ = rawValues[rawIndex++];
+            *write++ = rawValues[rawIndex++];
+            keywordCount++;
+            break;
+        }
+        case ARG_PART_KEYWORD_UNPACK:
+        {
+            if (rawIndex >= rawSlotCount)
+                goto malformed_unpack_payload;
+            Value expanded = rawValues[rawIndex++];
+            if (!IS_MAP(expanded))
+            {
+                runtimeError("Keyword argument unpack expects a map but got '%s'", valueTypeName(expanded));
+                goto unpack_error;
+            }
+
+            Map *map = &AS_MAP(expanded)->map;
+            for (int j = 0; j < map->capacity; j++)
+            {
+                MapEntry *entry = &map->entries[j];
+                if (!entry->isUsed || entry->isTombstone)
+                    continue;
+
+                if (write + 1 >= vm.stack + STACK_MAX)
+                {
+                    runtimeError("Expanded call arguments exceed stack capacity.");
+                    goto unpack_error;
+                }
+
+                *write++ = entry->key;
+                *write++ = entry->value;
+                keywordCount++;
+            }
+            break;
+        }
+        default:
+            runtimeError("Unknown argument unpack payload type.");
+            goto unpack_error;
+        }
+    }
+
+    if (rawIndex != rawSlotCount)
+        goto malformed_unpack_payload;
+
+    vm.stackTop = write;
+    *positionalOut = positionalCount;
+    *keywordOut = keywordCount;
+    if (rawValues != NULL)
+        FREE_ARRAY(Value, rawValues, rawSlotCount);
+    return true;
+
+malformed_unpack_payload:
+    runtimeError("Malformed call unpack payload.");
+unpack_error:
+    if (rawValues != NULL)
+        FREE_ARRAY(Value, rawValues, rawSlotCount);
     return false;
 }
 
@@ -5620,6 +5947,417 @@ ObjClass *vmDefineClass(const char *name)
     return primativeClass((char *)name);
 }
 
+static void registerActiveThreadRoot(ObjForeign *threadObj)
+{
+    for (int i = 0; i < vm.activeThreadRootCount; i++)
+    {
+        if (vm.activeThreadRoots[i] == threadObj)
+            return;
+    }
+
+    if (vm.activeThreadRootCapacity < vm.activeThreadRootCount + 1)
+    {
+        int oldCapacity = vm.activeThreadRootCapacity;
+        int newCapacity = GROW_CAPACITY(oldCapacity);
+        ObjForeign **newRoots = (ObjForeign **)realloc(vm.activeThreadRoots, sizeof(ObjForeign *) * newCapacity);
+        if (newRoots == NULL)
+            exit(1);
+        vm.activeThreadRoots = newRoots;
+        vm.activeThreadRootCapacity = newCapacity;
+    }
+
+    vm.activeThreadRoots[vm.activeThreadRootCount++] = threadObj;
+}
+
+static void unregisterActiveThreadRoot(ObjForeign *threadObj)
+{
+    for (int i = 0; i < vm.activeThreadRootCount; i++)
+    {
+        if (vm.activeThreadRoots[i] == threadObj)
+        {
+            vm.activeThreadRootCount--;
+            vm.activeThreadRoots[i] = vm.activeThreadRoots[vm.activeThreadRootCount];
+            return;
+        }
+    }
+}
+
+static bool enqueueAsyncTask(DotKThread *task)
+{
+    pthread_mutex_lock(&vm.asyncTaskMutex);
+
+    if (vm.asyncPoolShutdown)
+    {
+        vm.asyncTasksRejected++;
+        pthread_mutex_unlock(&vm.asyncTaskMutex);
+        return false;
+    }
+
+    while (vm.asyncTaskQueueCount >= vm.asyncTaskQueueMax && !vm.asyncPoolShutdown)
+    {
+        DotKThread *saved = vmBeginBlockingIO("enqueueAsyncTask", __FILE__, __LINE__);
+        pthread_cond_wait(&vm.asyncTaskNotFullCond, &vm.asyncTaskMutex);
+        pthread_mutex_unlock(&vm.asyncTaskMutex);
+        vmEndBlockingIO(saved, "enqueueAsyncTask", __FILE__, __LINE__);
+        pthread_mutex_lock(&vm.asyncTaskMutex);
+    }
+
+    if (vm.asyncPoolShutdown)
+    {
+        vm.asyncTasksRejected++;
+        pthread_mutex_unlock(&vm.asyncTaskMutex);
+        return false;
+    }
+
+    if (vm.asyncTaskQueueCapacity < vm.asyncTaskQueueCount + 1)
+    {
+        int oldCapacity = vm.asyncTaskQueueCapacity;
+        int newCapacity = GROW_CAPACITY(oldCapacity);
+        if (newCapacity > vm.asyncTaskQueueMax)
+            newCapacity = vm.asyncTaskQueueMax;
+        DotKThread **newQueue = (DotKThread **)realloc(vm.asyncTaskQueue, sizeof(DotKThread *) * newCapacity);
+        if (newQueue == NULL)
+        {
+            vm.asyncTasksRejected++;
+            pthread_mutex_unlock(&vm.asyncTaskMutex);
+            return false;
+        }
+        vm.asyncTaskQueue = newQueue;
+        vm.asyncTaskQueueCapacity = newCapacity;
+    }
+
+    vm.asyncTaskQueue[vm.asyncTaskQueueCount++] = task;
+    vm.asyncTasksSubmitted++;
+    pthread_cond_signal(&vm.asyncTaskCond);
+    pthread_mutex_unlock(&vm.asyncTaskMutex);
+    return true;
+}
+
+static DotKThread *dequeueAsyncTask(bool *shouldStop)
+{
+    *shouldStop = false;
+
+    pthread_mutex_lock(&vm.asyncTaskMutex);
+    while (vm.asyncTaskQueueCount == 0 && !vm.asyncPoolShutdown)
+        pthread_cond_wait(&vm.asyncTaskCond, &vm.asyncTaskMutex);
+
+    if (vm.asyncPoolShutdown)
+    {
+        *shouldStop = true;
+        pthread_mutex_unlock(&vm.asyncTaskMutex);
+        return NULL;
+    }
+
+    DotKThread *task = vm.asyncTaskQueue[0];
+    vm.asyncTaskQueueCount--;
+    if (vm.asyncTaskQueueCount > 0)
+        memmove(&vm.asyncTaskQueue[0], &vm.asyncTaskQueue[1], sizeof(DotKThread *) * vm.asyncTaskQueueCount);
+    vm.asyncActiveWorkers++;
+    pthread_cond_signal(&vm.asyncTaskNotFullCond);
+
+    pthread_mutex_unlock(&vm.asyncTaskMutex);
+    return task;
+}
+
+static void *asyncWorkerEntryPoint(void *arg)
+{
+    (void)arg;
+
+    while (true)
+    {
+        bool shouldStop = false;
+        DotKThread *t = dequeueAsyncTask(&shouldStop);
+        if (shouldStop)
+            break;
+        if (t == NULL)
+            continue;
+
+        acquireGVL("asyncWorker", __FILE__, __LINE__);
+        vmSwitchThread(t);
+
+        pthread_mutex_lock(&t->mutex);
+        t->status = THREAD_RUNNING;
+        pthread_mutex_unlock(&t->mutex);
+
+        InterpretResult res = run(false, vm.frameCount);
+
+        pthread_mutex_lock(&t->mutex);
+        if (res == INTERPRET_RUNTIME_ERROR)
+        {
+            t->status = THREAD_ERROR;
+            t->result = NIL_VAL;
+            t->errorMsg = vm.lastError;
+        }
+        else
+        {
+            t->status = THREAD_FINISHED;
+            t->result = pop();
+            t->errorMsg = NULL;
+        }
+        pthread_cond_signal(&t->cond);
+        pthread_mutex_unlock(&t->mutex);
+
+        vmSaveToThread(t);
+        vm.currentThread = NULL;
+
+        pthread_mutex_lock(&vm.asyncTaskMutex);
+        if (vm.asyncActiveWorkers > 0)
+            vm.asyncActiveWorkers--;
+        vm.asyncTasksCompleted++;
+        pthread_mutex_unlock(&vm.asyncTaskMutex);
+
+        releaseGVL("asyncWorker", __FILE__, __LINE__);
+    }
+
+    return NULL;
+}
+
+static bool initAsyncWorkerPool(void)
+{
+    vm.asyncWorkers = NULL;
+    vm.asyncWorkerCount = 0;
+    vm.asyncPoolShutdown = false;
+    vm.asyncTaskQueue = NULL;
+    vm.asyncTaskQueueCount = 0;
+    vm.asyncTaskQueueCapacity = 0;
+    vm.asyncTaskQueueMax = 0;
+    vm.asyncActiveWorkers = 0;
+    vm.asyncTasksSubmitted = 0;
+    vm.asyncTasksCompleted = 0;
+    vm.asyncTasksRejected = 0;
+    pthread_mutex_init(&vm.asyncTaskMutex, NULL);
+    pthread_cond_init(&vm.asyncTaskCond, NULL);
+    pthread_cond_init(&vm.asyncTaskNotFullCond, NULL);
+
+    int workers = 0;
+    const char *envWorkers = getenv("DOTK_ASYNC_WORKERS");
+    if (envWorkers != NULL && envWorkers[0] != '\0')
+        workers = atoi(envWorkers);
+
+    if (workers <= 0)
+    {
+        long cpuCount = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cpuCount < 1)
+            cpuCount = 1;
+        if (cpuCount > 8)
+            cpuCount = 2;
+        workers = (int)cpuCount;
+    }
+
+    vm.asyncTaskQueueMax = resolveAsyncQueueMax(workers);
+
+    vm.asyncWorkers = (pthread_t *)malloc(sizeof(pthread_t) * workers);
+    if (vm.asyncWorkers == NULL)
+        return false;
+
+    for (int i = 0; i < workers; i++)
+    {
+        if (pthread_create(&vm.asyncWorkers[i], NULL, asyncWorkerEntryPoint, NULL) != 0)
+        {
+            vm.asyncPoolShutdown = true;
+            pthread_cond_broadcast(&vm.asyncTaskCond);
+            pthread_cond_broadcast(&vm.asyncTaskNotFullCond);
+            for (int j = 0; j < i; j++)
+                pthread_join(vm.asyncWorkers[j], NULL);
+            free(vm.asyncWorkers);
+            vm.asyncWorkers = NULL;
+            vm.asyncWorkerCount = 0;
+            return false;
+        }
+        vm.asyncWorkerCount++;
+    }
+
+    return true;
+}
+
+static void shutdownAsyncWorkerPool(void)
+{
+    pthread_mutex_lock(&vm.asyncTaskMutex);
+    vm.asyncPoolShutdown = true;
+    vm.asyncTasksRejected += (uint64_t)vm.asyncTaskQueueCount;
+
+    for (int i = 0; i < vm.asyncTaskQueueCount; i++)
+    {
+        DotKThread *t = vm.asyncTaskQueue[i];
+        pthread_mutex_lock(&t->mutex);
+        t->status = THREAD_ERROR;
+        t->result = NIL_VAL;
+        t->errorMsg = NULL;
+        pthread_cond_signal(&t->cond);
+        pthread_mutex_unlock(&t->mutex);
+    }
+    vm.asyncTaskQueueCount = 0;
+
+    pthread_cond_broadcast(&vm.asyncTaskCond);
+    pthread_cond_broadcast(&vm.asyncTaskNotFullCond);
+    pthread_mutex_unlock(&vm.asyncTaskMutex);
+
+    for (int i = 0; i < vm.asyncWorkerCount; i++)
+        pthread_join(vm.asyncWorkers[i], NULL);
+
+    free(vm.asyncWorkers);
+    vm.asyncWorkers = NULL;
+    vm.asyncWorkerCount = 0;
+
+    free(vm.asyncTaskQueue);
+    vm.asyncTaskQueue = NULL;
+    vm.asyncTaskQueueCapacity = 0;
+
+    pthread_cond_destroy(&vm.asyncTaskCond);
+    pthread_cond_destroy(&vm.asyncTaskNotFullCond);
+    pthread_mutex_destroy(&vm.asyncTaskMutex);
+}
+
+static int resolveAsyncQueueMax(int workerCount)
+{
+    int queueMax = 0;
+    const char *envQueueMax = getenv("DOTK_ASYNC_QUEUE_MAX");
+    if (envQueueMax != NULL && envQueueMax[0] != '\0')
+        queueMax = atoi(envQueueMax);
+
+    if (queueMax <= 0)
+        queueMax = workerCount * 256;
+    if (queueMax < 16)
+        queueMax = 16;
+    if (queueMax > 65536)
+        queueMax = 65536;
+    return queueMax;
+}
+
+static bool ensureThreadJoined(DotKThread *t, const char *reason)
+{
+    return ensureThreadJoinedWithTimeout(t, reason, -1, NULL);
+}
+
+static bool ensureThreadJoinedWithTimeout(DotKThread *t, const char *reason, int timeoutMs, bool *timedOut)
+{
+    if (timedOut)
+        *timedOut = false;
+
+    if (vm.currentThread == t)
+    {
+        runtimeError("A thread cannot join itself.");
+        return false;
+    }
+
+    pthread_mutex_lock(&t->mutex);
+    bool alreadyJoined = t->joined;
+    pthread_mutex_unlock(&t->mutex);
+
+    if (!alreadyJoined)
+    {
+        if (t->usesWorkerPool)
+        {
+            DotKThread *saved = vmBeginBlockingIO(reason, __FILE__, __LINE__);
+            int waitResult = 0;
+
+            pthread_mutex_lock(&t->mutex);
+            if (timeoutMs < 0)
+            {
+                while (t->status == THREAD_CREATED || t->status == THREAD_RUNNING)
+                    pthread_cond_wait(&t->cond, &t->mutex);
+            }
+            else
+            {
+                struct timespec ts;
+                if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+                {
+                    pthread_mutex_unlock(&t->mutex);
+                    vmEndBlockingIO(saved, reason, __FILE__, __LINE__);
+                    runtimeError("Failed to compute join timeout deadline.");
+                    return false;
+                }
+
+                ts.tv_sec += timeoutMs / 1000;
+                ts.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+                if (ts.tv_nsec >= 1000000000L)
+                {
+                    ts.tv_sec += 1;
+                    ts.tv_nsec -= 1000000000L;
+                }
+
+                while (t->status == THREAD_CREATED || t->status == THREAD_RUNNING)
+                {
+                    waitResult = pthread_cond_timedwait(&t->cond, &t->mutex, &ts);
+                    if (waitResult == ETIMEDOUT)
+                        break;
+                }
+            }
+
+            bool stillRunning = (t->status == THREAD_CREATED || t->status == THREAD_RUNNING);
+            if (!stillRunning)
+                t->joined = true;
+            pthread_mutex_unlock(&t->mutex);
+            vmEndBlockingIO(saved, reason, __FILE__, __LINE__);
+
+            if (stillRunning)
+            {
+                if (timedOut)
+                    *timedOut = true;
+                return true;
+            }
+        }
+        else
+        {
+            DotKThread *saved = vmBeginBlockingIO(reason, __FILE__, __LINE__);
+            int joinResult;
+            if (timeoutMs < 0)
+            {
+                joinResult = pthread_join(t->handle, NULL);
+            }
+            else
+            {
+#ifdef __linux__
+                struct timespec ts;
+                if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+                {
+                    vmEndBlockingIO(saved, reason, __FILE__, __LINE__);
+                    runtimeError("Failed to compute join timeout deadline.");
+                    return false;
+                }
+
+                ts.tv_sec += timeoutMs / 1000;
+                ts.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+                if (ts.tv_nsec >= 1000000000L)
+                {
+                    ts.tv_sec += 1;
+                    ts.tv_nsec -= 1000000000L;
+                }
+
+                joinResult = pthread_timedjoin_np(t->handle, NULL, &ts);
+#else
+                vmEndBlockingIO(saved, reason, __FILE__, __LINE__);
+                runtimeError("join(timeout) is not supported on this platform.");
+                return false;
+#endif
+            }
+            vmEndBlockingIO(saved, reason, __FILE__, __LINE__);
+
+            if (joinResult == ETIMEDOUT)
+            {
+                if (timedOut)
+                    *timedOut = true;
+                return true;
+            }
+
+            if (joinResult != 0)
+            {
+                runtimeError("Failed to join thread: %s", strerror(joinResult));
+                return false;
+            }
+
+            pthread_mutex_lock(&t->mutex);
+            t->joined = true;
+            pthread_mutex_unlock(&t->mutex);
+        }
+    }
+
+    if (t->ownerObj)
+        unregisterActiveThreadRoot(t->ownerObj);
+
+    return true;
+}
+
 /* ---- Thread helpers: save/restore VM <-> DotKThread ---- */
 
 /* Save the live VM state into the given DotKThread. */
@@ -5669,18 +6407,18 @@ static void vmSwitchThread(DotKThread *next)
 
 /* ---- Blocking I/O helpers ---- */
 
-DotKThread *vmBeginBlockingIO(void)
+DotKThread *vmBeginBlockingIO(const char *reason, const char *file, int line)
 {
     DotKThread *caller = vm.currentThread;
     if (caller)
         vmSaveToThread(caller);
-    releaseGVL();
+    releaseGVL(reason, file, line);
     return caller;
 }
 
-void vmEndBlockingIO(DotKThread *saved)
+void vmEndBlockingIO(DotKThread *saved, const char *reason, const char *file, int line)
 {
-    acquireGVL();
+    acquireGVL(reason, file, line);
     if (saved)
     {
         vmLoadFromThread(saved);
@@ -5695,7 +6433,7 @@ static void *threadEntryPoint(void *arg)
     DotKThread *t = (DotKThread *)arg;
 
     /* Block until the GVL is available */
-    acquireGVL();
+    acquireGVL("threadEntryPoint", __FILE__, __LINE__);
 
     /* Load our state into the VM */
     vmSwitchThread(t);
@@ -5728,7 +6466,7 @@ static void *threadEntryPoint(void *arg)
     vmSaveToThread(t);
     vm.currentThread = NULL;
 
-    releaseGVL();
+    releaseGVL("threadEntryPoint", __FILE__, __LINE__);
     return NULL;
 }
 
@@ -5771,9 +6509,13 @@ NATIVE_FN(threadInitNative)
     }
     memset(t, 0, sizeof(DotKThread));
     t->status = THREAD_CREATED;
+    t->joined = false;
+    t->cancelled = false;
+    t->usesWorkerPool = false;
     t->closure = closure;
     t->result = NIL_VAL;
     t->errorMsg = NULL;
+    t->ownerObj = NULL;
     t->openUpvalues = NULL;
     t->isInTryCatch = false;
     pthread_mutex_init(&t->mutex, NULL);
@@ -5795,13 +6537,13 @@ NATIVE_FN(threadInitNative)
        Frame 0 is a sentinel so frameCount never hits 0 inside run()
        (which would discard the return value).  Frame 1 is the real call. */
     t->stackTop = t->stack;
-    *t->stackTop++ = NIL_VAL;       /* sentinel slot 0 */
+    *t->stackTop++ = NIL_VAL; /* sentinel slot 0 */
     *t->stackTop++ = OBJ_VAL(closure);
     for (int i = 0; i < callArgc; i++)
         *t->stackTop++ = argv[1 + i];
 
     /* Sentinel frame 0 — never actually executes */
-    t->frames[0].closure = closure;   /* placeholder */
+    t->frames[0].closure = closure; /* placeholder */
     t->frames[0].ip = closure->function->chunk.code;
     t->frames[0].slots = t->stack;
     t->frames[0].startTimeNs = 0;
@@ -5816,6 +6558,8 @@ NATIVE_FN(threadInitNative)
     /* Wrap in a foreign object */
     ObjForeign *threadObj = newForeignObj(TYPE_THREAD, t, true);
     threadObj->klass = vm.threadClass;
+    t->ownerObj = threadObj;
+    registerActiveThreadRoot(threadObj);
 
     /* Spawn — child blocks on GVL until main releases it */
     pthread_attr_t attr;
@@ -5824,6 +6568,7 @@ NATIVE_FN(threadInitNative)
     if (pthread_create(&t->handle, &attr, threadEntryPoint, t) != 0)
     {
         pthread_attr_destroy(&attr);
+        unregisterActiveThreadRoot(threadObj);
         free(t->args);
         pthread_mutex_destroy(&t->mutex);
         pthread_cond_destroy(&t->cond);
@@ -5848,9 +6593,45 @@ NATIVE_FN(threadJoinNative)
     }
     DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
 
-    DotKThread *saved = vmBeginBlockingIO();
-    pthread_join(t->handle, NULL);
-    vmEndBlockingIO(saved);
+    int timeoutMs = -1;
+    if (argc > 1)
+    {
+        runtimeError("join([timeoutMs]) expects at most 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (argc == 1)
+    {
+        if (!IS_NUM(argv[0]))
+        {
+            runtimeError("join([timeoutMs]) expects a number for timeoutMs but got '%s'", valueTypeName(argv[0]));
+            *hasError = true;
+            return NIL_VAL;
+        }
+        double timeoutVal = AS_NUM(argv[0]);
+        if (timeoutVal < 0)
+        {
+            runtimeError("join([timeoutMs]) expects timeoutMs >= 0 but got '%g'", timeoutVal);
+            *hasError = true;
+            return NIL_VAL;
+        }
+        timeoutMs = (int)timeoutVal;
+    }
+
+    bool timedOut = false;
+    bool joined = (timeoutMs < 0)
+                      ? ensureThreadJoined(t, "thread.join")
+                      : ensureThreadJoinedWithTimeout(t, "thread.join", timeoutMs, &timedOut);
+
+    if (!joined)
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (timedOut)
+        return NIL_VAL;
 
     if (t->status == THREAD_ERROR)
     {
@@ -5861,6 +6642,208 @@ NATIVE_FN(threadJoinNative)
     }
 
     return t->result;
+}
+
+NATIVE_FN(awaitTimeoutNative)
+{
+    if (argc != 2)
+    {
+        runtimeError("awaitTimeout(thread, timeoutMs) expects 2 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_FOREIGN(argv[0]) || AS_FOREIGN(argv[0])->type != TYPE_THREAD)
+    {
+        runtimeError("awaitTimeout(thread, timeoutMs) expects a Thread as first argument but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_NUM(argv[1]))
+    {
+        runtimeError("awaitTimeout(thread, timeoutMs) expects a number for timeoutMs but got '%s'", valueTypeName(argv[1]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    double timeoutVal = AS_NUM(argv[1]);
+    if (timeoutVal < 0)
+    {
+        runtimeError("awaitTimeout(thread, timeoutMs) expects timeoutMs >= 0 but got '%g'", timeoutVal);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(argv[0]);
+    bool timedOut = false;
+    if (!ensureThreadJoinedWithTimeout(t, "awaitTimeout", (int)timeoutVal, &timedOut))
+    {
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (timedOut)
+        return NIL_VAL;
+
+    if (t->status == THREAD_ERROR)
+    {
+        runtimeError("Awaited thread raised an error: %s",
+                     t->errorMsg ? t->errorMsg->chars : "unknown");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return t->result;
+}
+
+NATIVE_FN(coSpawnNative)
+{
+    if (argc < 1)
+    {
+        runtimeError("co_spawn(callable, ...args) expects at least 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    if (!IS_CLOSURE(argv[0]))
+    {
+        runtimeError("co_spawn(callable, ...args) expects a function as first argument but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    ObjClosure *closure = AS_CLOSURE(argv[0]);
+    int callArgc = argc - 1;
+    if (callArgc != closure->function->arity)
+    {
+        runtimeError("co_spawn function expects %d arguments but %d were given.", closure->function->arity, callArgc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *t = (DotKThread *)malloc(sizeof(DotKThread));
+    if (!t)
+    {
+        runtimeError("Failed to allocate coroutine task.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    memset(t, 0, sizeof(DotKThread));
+    t->status = THREAD_CREATED;
+    t->joined = false;
+    t->cancelled = false;
+    t->usesWorkerPool = true;
+    t->closure = closure;
+    t->result = NIL_VAL;
+    t->errorMsg = NULL;
+    t->ownerObj = NULL;
+    t->openUpvalues = NULL;
+    t->isInTryCatch = false;
+    pthread_mutex_init(&t->mutex, NULL);
+    pthread_cond_init(&t->cond, NULL);
+
+    t->argCount = callArgc;
+    if (callArgc > 0)
+    {
+        t->args = (Value *)malloc(sizeof(Value) * callArgc);
+        if (t->args == NULL)
+        {
+            pthread_mutex_destroy(&t->mutex);
+            pthread_cond_destroy(&t->cond);
+            free(t);
+            runtimeError("Failed to allocate coroutine task arguments.");
+            *hasError = true;
+            return NIL_VAL;
+        }
+        for (int i = 0; i < callArgc; i++)
+            t->args[i] = argv[1 + i];
+    }
+    else
+    {
+        t->args = NULL;
+    }
+
+    t->stackTop = t->stack;
+    *t->stackTop++ = NIL_VAL;
+    *t->stackTop++ = OBJ_VAL(closure);
+    for (int i = 0; i < callArgc; i++)
+        *t->stackTop++ = argv[1 + i];
+
+    t->frames[0].closure = closure;
+    t->frames[0].ip = closure->function->chunk.code;
+    t->frames[0].slots = t->stack;
+    t->frames[0].startTimeNs = 0;
+
+    t->frames[1].closure = closure;
+    t->frames[1].ip = closure->function->chunk.code;
+    t->frames[1].slots = t->stack + 1;
+    t->frames[1].startTimeNs = 0;
+    t->frameCount = 2;
+
+    ObjForeign *taskObj = newForeignObj(TYPE_THREAD, t, true);
+    taskObj->klass = vm.threadClass;
+    t->ownerObj = taskObj;
+    registerActiveThreadRoot(taskObj);
+
+    if (!enqueueAsyncTask(t))
+    {
+        unregisterActiveThreadRoot(taskObj);
+        free(t->args);
+        pthread_mutex_destroy(&t->mutex);
+        pthread_cond_destroy(&t->cond);
+        free(t);
+        runtimeError("Failed to schedule coroutine task; async queue is unavailable.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return OBJ_VAL(taskObj);
+}
+
+NATIVE_FN(coYieldNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("co_yield() expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *saved = vmBeginBlockingIO("co_yield", __FILE__, __LINE__);
+    usleep(0);
+    vmEndBlockingIO(saved, "co_yield", __FILE__, __LINE__);
+    return NIL_VAL;
+}
+
+NATIVE_FN(coSleepNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("co_sleep(seconds) expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("co_sleep(seconds) expects a number but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (AS_NUM(argv[0]) < 0)
+    {
+        runtimeError("co_sleep(seconds) expects seconds >= 0 but got '%g'", AS_NUM(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *saved = vmBeginBlockingIO("co_sleep", __FILE__, __LINE__);
+    if (round(AS_NUM(argv[0])) == AS_NUM(argv[0]))
+        sleep((unsigned int)AS_NUM(argv[0]));
+    else
+        usleep((useconds_t)(AS_NUM(argv[0]) * 1000000));
+    vmEndBlockingIO(saved, "co_sleep", __FILE__, __LINE__);
+    return NIL_VAL;
 }
 
 NATIVE_FN(threadIsAliveNative)
@@ -5879,6 +6862,236 @@ NATIVE_FN(threadIsAliveNative)
     pthread_mutex_unlock(&t->mutex);
 
     return BOOL_VAL(alive);
+}
+
+NATIVE_FN(threadDoneNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("done() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    bool done = (t->status == THREAD_FINISHED || t->status == THREAD_ERROR);
+    pthread_mutex_unlock(&t->mutex);
+
+    return BOOL_VAL(done);
+}
+
+NATIVE_FN(threadTryResultNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("tryResult() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    DotKThreadStatus status = t->status;
+    Value result = t->result;
+    ObjString *errorMsg = t->errorMsg;
+    pthread_mutex_unlock(&t->mutex);
+
+    if (status == THREAD_CREATED || status == THREAD_RUNNING)
+        return NIL_VAL;
+
+    if (status == THREAD_ERROR)
+    {
+        runtimeError("Thread raised an error: %s",
+                     errorMsg ? errorMsg->chars : "unknown");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    return result;
+}
+
+NATIVE_FN(threadCancelNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("cancel() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    bool canCancel = (t->status == THREAD_CREATED || t->status == THREAD_RUNNING);
+    bool wasCancelled = t->cancelled;
+    if (canCancel)
+        t->cancelled = true;
+    pthread_mutex_unlock(&t->mutex);
+
+    if (!canCancel)
+        return BOOL_VAL(false);
+    return BOOL_VAL(!wasCancelled);
+}
+
+NATIVE_FN(threadIsCancelledNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("isCancelled() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+
+    pthread_mutex_lock(&t->mutex);
+    bool cancelled = t->cancelled;
+    pthread_mutex_unlock(&t->mutex);
+
+    return BOOL_VAL(cancelled);
+}
+
+NATIVE_FN(threadCheckCancelledNative)
+{
+    Value self = argv[-1];
+    if (!IS_FOREIGN(self) || AS_FOREIGN(self)->type != TYPE_THREAD)
+    {
+        runtimeError("checkCancelled() can only be called on a Thread.");
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(self);
+    pthread_mutex_lock(&t->mutex);
+    bool cancelled = t->cancelled;
+    pthread_mutex_unlock(&t->mutex);
+
+    return BOOL_VAL(cancelled);
+}
+
+NATIVE_FN(threadCurrentThreadNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("Thread.currentThread() expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *t = vm.currentThread;
+    if (t == NULL)
+        return NIL_VAL;
+
+    if (t->ownerObj == NULL)
+    {
+        ObjForeign *threadObj = newForeignObj(TYPE_THREAD, t, false);
+        threadObj->klass = vm.threadClass;
+        t->ownerObj = threadObj;
+        registerActiveThreadRoot(threadObj);
+    }
+
+    return OBJ_VAL(t->ownerObj);
+}
+
+NATIVE_FN(threadPoolStatsNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("Thread.poolStats() expects 0 arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int workerCount;
+    int queueDepth;
+    int queueCapacity;
+    int queueMax;
+    int activeWorkers;
+    bool shutdown;
+    uint64_t submitted;
+    uint64_t completed;
+    uint64_t rejected;
+
+    pthread_mutex_lock(&vm.asyncTaskMutex);
+    workerCount = vm.asyncWorkerCount;
+    queueDepth = vm.asyncTaskQueueCount;
+    queueCapacity = vm.asyncTaskQueueCapacity;
+    queueMax = vm.asyncTaskQueueMax;
+    activeWorkers = vm.asyncActiveWorkers;
+    shutdown = vm.asyncPoolShutdown;
+    submitted = vm.asyncTasksSubmitted;
+    completed = vm.asyncTasksCompleted;
+    rejected = vm.asyncTasksRejected;
+    pthread_mutex_unlock(&vm.asyncTaskMutex);
+
+    ObjInstance *stats = newInstance(vm.baseObj);
+    push(OBJ_VAL(stats));
+    tableSet(&stats->fields, copyString("workerCount", 11), NUM_VAL((double)workerCount));
+    tableSet(&stats->fields, copyString("queueDepth", 10), NUM_VAL((double)queueDepth));
+    tableSet(&stats->fields, copyString("queueCapacity", 13), NUM_VAL((double)queueCapacity));
+    tableSet(&stats->fields, copyString("queueMax", 8), NUM_VAL((double)queueMax));
+    tableSet(&stats->fields, copyString("activeWorkers", 13), NUM_VAL((double)activeWorkers));
+    tableSet(&stats->fields, copyString("submitted", 9), NUM_VAL((double)submitted));
+    tableSet(&stats->fields, copyString("completed", 9), NUM_VAL((double)completed));
+    tableSet(&stats->fields, copyString("rejected", 8), NUM_VAL((double)rejected));
+    tableSet(&stats->fields, copyString("shutdown", 8), BOOL_VAL(shutdown));
+
+    return pop();
+}
+
+NATIVE_FN(threadSetPoolQueueLimitNative)
+{
+    if (argc != 1)
+    {
+        runtimeError("Thread.setPoolQueueLimit(maxPending) expects 1 argument %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (!IS_NUM(argv[0]))
+    {
+        runtimeError("Thread.setPoolQueueLimit(maxPending) expects a number but got '%s'", valueTypeName(argv[0]));
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    int maxPending = (int)AS_NUM(argv[0]);
+    if (maxPending < 1)
+    {
+        runtimeError("Thread.setPoolQueueLimit(maxPending) expects maxPending >= 1 but got %d", maxPending);
+        *hasError = true;
+        return NIL_VAL;
+    }
+    if (maxPending > 65536)
+        maxPending = 65536;
+
+    pthread_mutex_lock(&vm.asyncTaskMutex);
+    vm.asyncTaskQueueMax = maxPending;
+    pthread_cond_broadcast(&vm.asyncTaskNotFullCond);
+    pthread_mutex_unlock(&vm.asyncTaskMutex);
+    return NUM_VAL((double)maxPending);
+}
+
+NATIVE_FN(checkCancelledNative)
+{
+    if (argc != 0)
+    {
+        runtimeError("checkCancelled() expects no arguments %d were passed in", argc);
+        *hasError = true;
+        return NIL_VAL;
+    }
+
+    DotKThread *t = vm.currentThread;
+    if (t == NULL)
+        return BOOL_VAL(false);
+
+    pthread_mutex_lock(&t->mutex);
+    bool cancelled = t->cancelled;
+    pthread_mutex_unlock(&t->mutex);
+
+    return BOOL_VAL(cancelled);
 }
 
 NATIVE_FN(threadResultNative)
@@ -5923,9 +7136,9 @@ static Value inputNative(int argc, Value *argv, bool *hasError, bool *pushedValu
     }
 
     char input[STR_BUFF] = {0};
-    DotKThread *saved = vmBeginBlockingIO();
+    DotKThread *saved = vmBeginBlockingIO("input", __FILE__, __LINE__);
     char *ret = fgets(input, STR_BUFF, stdin);
-    vmEndBlockingIO(saved);
+    vmEndBlockingIO(saved, "input", __FILE__, __LINE__);
     if (ret == NULL)
         return OBJ_VAL(copyString("", 0));
     size_t slen = strlen(input);
@@ -6918,11 +8131,28 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         return NIL_VAL;
     }
     char *str = AS_CSTR(peek(argc));
-    char result[STR_BUFF] = {0}; // ALLOCATE(char, STR_BUFF);
-    int len = 0;
+    size_t resultCap = STR_BUFF;
+    if (resultCap < 64)
+        resultCap = 64;
+    char *result = ALLOCATE(char, resultCap);
+    size_t len = 0;
     int i = 0;
     int numFormats = 0;
-    char item[STR_BUFF] = {0};
+    result[0] = '\0';
+
+#define ENSURE_RESULT_CAP(extra)                                  \
+    do                                                            \
+    {                                                             \
+        size_t needed = len + (size_t)(extra) + 1;                \
+        if (needed > resultCap)                                   \
+        {                                                         \
+            size_t oldCap = resultCap;                            \
+            while (resultCap < needed)                            \
+                resultCap = GROW_CAPACITY((int)resultCap);        \
+            result = GROW_ARRAY(char, result, oldCap, resultCap); \
+        }                                                         \
+    } while (0)
+
     while (str[i])
     {
         if (str[i] == '$' && str[i + 1] == '{')
@@ -6931,40 +8161,64 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
             if (str[i + 1] != '}')
             {
                 char index[100] = {0};
-                char *temp = str + i + 1;
-                while (*temp != '}')
-                    temp++;
-                strncpy(index, str + i + 1, temp - str - i - 1);
-                i += temp - str - i - 1;
+                int start = i + 1;
+                int endPos = start;
+                while (str[endPos] && str[endPos] != '}')
+                    endPos++;
+                if (str[endPos] != '}')
+                {
+                    FREE_ARRAY(char, result, resultCap);
+                    runtimeError("Unclosed format placeholder in string.format().");
+                    *hasError = true;
+                    return NIL_VAL;
+                }
+
+                int indexLen = endPos - start;
+                if (indexLen <= 0 || indexLen >= (int)sizeof(index))
+                {
+                    FREE_ARRAY(char, result, resultCap);
+                    runtimeError("Invalid indexed placeholder in string.format().");
+                    *hasError = true;
+                    return NIL_VAL;
+                }
+
+                memcpy(index, str + start, (size_t)indexLen);
+                index[indexLen] = '\0';
+
                 char *end;
                 long int num = strtol(index, &end, 10);
-                if (end == str)
+                if (end == index || *end != '\0')
                 {
+                    FREE_ARRAY(char, result, resultCap);
                     runtimeError("Expected a number but got '%s' for indexed format with string.format()", str);
                     *hasError = true;
                     return NIL_VAL;
                 }
                 if (num < 0 || num >= argc)
                 {
+                    FREE_ARRAY(char, result, resultCap);
                     runtimeError("Index out of range for string.format(). Expected a number between 0 & %d but got %ld", argc - 1, num);
-                    // free(result);
                     *hasError = true;
                     return NIL_VAL;
                 }
-                int a;
-                valueToString(argv[num], item, &a);
-                for (int k = 0; k < a; k++)
-                    result[len++] = item[k];
+
+                ObjString *piece = valueToObjStringDynamic(argv[num]);
+                ENSURE_RESULT_CAP(piece->len);
+                memcpy(result + len, piece->chars, (size_t)piece->len);
+                len += (size_t)piece->len;
+                result[len] = '\0';
+                i = endPos;
             }
             else if (str[i + 1] == '}')
             {
                 if (numFormats >= argc)
                     numFormats = argc - 1;
 
-                int a;
-                valueToString(argv[numFormats], item, &a);
-                for (int k = 0; k < a; k++)
-                    result[len++] = item[k];
+                ObjString *piece = valueToObjStringDynamic(argv[numFormats]);
+                ENSURE_RESULT_CAP(piece->len);
+                memcpy(result + len, piece->chars, (size_t)piece->len);
+                len += (size_t)piece->len;
+                result[len] = '\0';
 
                 numFormats++;
             }
@@ -6972,12 +8226,16 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         }
         else
         {
+            ENSURE_RESULT_CAP(1);
             result[len++] = str[i];
+            result[len] = '\0';
         }
         i++;
     }
-    result[len] = '\0';
-    return OBJ_VAL(copyString(result, (int)strlen(result)));
+
+    ObjString *out = takeString(result, (int)len);
+#undef ENSURE_RESULT_CAP
+    return OBJ_VAL(out);
 }
 
 static Value strHashNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -9174,6 +10432,11 @@ static void initCoreModule()
     defineNative("len", lenNative);
     defineNative("instanceof", instanceOf);
     defineNative("ord", ordNative);
+    defineNative("awaitTimeout", awaitTimeoutNative);
+    defineNative("checkCancelled", checkCancelledNative);
+    defineNative("co_spawn", coSpawnNative);
+    defineNative("co_yield", coYieldNative);
+    defineNative("co_sleep", coSleepNative);
 
     defineNative("fork", forkNative);
     defineNative("wait", waitNative);
@@ -9210,6 +10473,7 @@ static void initCoreModule()
     defineNative("listen", listenNative);
     defineNative("accept", acceptNative);
     defineNative("read", readNative);
+    defineNative("readTimeout", readTimeoutNative);
     defineNative("poll", pollNative);
     defineNative("send", sendNative);
     defineNative("sendFile", sendFileWithFileDescriptorNative);
@@ -9294,6 +10558,10 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&listClass->methods, "filter", removeIfNative);
     setNativeMethod(&listClass->methods, "_iter_", listIterNative);
 
+    vm.tupleClass = NULL;
+    ObjClass *tupleClass = primativeClass("Tuple");
+    vm.tupleClass = tupleClass;
+
     vm.mapClass = NULL;
     ObjClass *mapClass = primativeClass("HashMap");
     vm.mapClass = mapClass;
@@ -9354,8 +10622,16 @@ static void initPrimitiveClassesModule()
     threadClass->initializer = namedNativeVal("init", threadInitNative);
     tableSet(&threadClass->methods, copyString("init", 4), threadClass->initializer);
     setNativeMethod(&threadClass->methods, "join", threadJoinNative);
+    setNativeMethod(&threadClass->methods, "cancel", threadCancelNative);
     setNativeMethod(&threadClass->methods, "isAlive", threadIsAliveNative);
+    setNativeMethod(&threadClass->methods, "isCancelled", threadIsCancelledNative);
+    setNativeMethod(&threadClass->methods, "checkCancelled", threadCheckCancelledNative);
+    setNativeMethod(&threadClass->methods, "done", threadDoneNative);
     setNativeMethod(&threadClass->methods, "result", threadResultNative);
+    setNativeMethod(&threadClass->methods, "tryResult", threadTryResultNative);
+    vmDefineClassStaticMethod(threadClass, "currentThread", threadCurrentThreadNative);
+    vmDefineClassStaticMethod(threadClass, "poolStats", threadPoolStatsNative);
+    vmDefineClassStaticMethod(threadClass, "setPoolQueueLimit", threadSetPoolQueueLimitNative);
 }
 
 void registerBuiltinPrimitiveClassesModule()
@@ -9420,7 +10696,7 @@ void initVM(bool printBytecode, bool printExecStack)
     // {
     //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
     // }
-    acquireGVL();
+    acquireGVL("MAIN", __FILE__, __LINE__);
     printBytecodeGlobal = printBytecode;
     printExecStackGlobaL = printExecStack;
     srand(time(NULL));
@@ -9436,6 +10712,18 @@ void initVM(bool printBytecode, bool printExecStack)
     pthread_mutex_init(&vm.mainThread->mutex, NULL);
     pthread_cond_init(&vm.mainThread->cond, NULL);
     vm.currentThread = vm.mainThread;
+    vm.activeThreadRoots = NULL;
+    vm.activeThreadRootCount = 0;
+    vm.activeThreadRootCapacity = 0;
+    vm.asyncWorkers = NULL;
+    vm.asyncWorkerCount = 0;
+    vm.asyncPoolShutdown = false;
+    vm.asyncTaskQueue = NULL;
+    vm.asyncTaskQueueCount = 0;
+    vm.asyncTaskQueueCapacity = 0;
+
+    if (!initAsyncWorkerPool())
+        fprintf(stderr, "[WARN] async worker pool initialization failed; async calls may fail.\n");
 
     vm.objects = NULL;
     vm.bytesAllocated = 0;
@@ -9445,7 +10733,6 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.grayCapacity = 0;
     vm.grayStack = NULL;
 
-    vm.importCount = 0;
     vm.importSources = NULL;
 
     vm.profilerEntries = NULL;
@@ -9549,6 +10836,7 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.threadClass = NULL;
     vm.stringClass = NULL;
     vm.listClass = NULL;
+    vm.tupleClass = NULL;
     vm.mapClass = NULL;
     vm.generatorClass = NULL;
     vm.listIteratorClass = NULL;
@@ -9595,15 +10883,24 @@ void vmEnableDebugger(bool enabled)
 
 void freeVM()
 {
-    releaseGVL();
+    releaseGVL("MAIN", __FILE__, __LINE__);
+
+    shutdownAsyncWorkerPool();
+
     freeTable(&vm.globals);
     freeTable(&vm.constGlobals);
     freeTable(&vm.strings);
     freeTable(&vm.imports);
     freeTable(&vm.importFuncs);
-    // for (int i = 0; i < vm.importCount; i++)
-    //     free(vm.importSources[i]);
-    FREE_ARRAY(char *, vm.importSources, vm.importCount);
+    ImportSourceNode *srcNode = vm.importSources;
+    while (srcNode != NULL)
+    {
+        ImportSourceNode *next = srcNode->next;
+        free(srcNode->source);
+        free(srcNode);
+        srcNode = next;
+    }
+    vm.importSources = NULL;
     vm.initStr = NULL;
     vm.toStr = NULL;
     vm.strDunderStr = NULL;
@@ -9632,6 +10929,7 @@ void freeVM()
     vm.threadClass = NULL;
     vm.stringClass = NULL;
     vm.listClass = NULL;
+    vm.tupleClass = NULL;
     vm.mapClass = NULL;
     vm.generatorClass = NULL;
     vm.listIteratorClass = NULL;
@@ -9649,6 +10947,11 @@ void freeVM()
     vm.callGraphEntries = NULL;
     vm.callGraphEntryCount = 0;
     vm.callGraphEntryCapacity = 0;
+
+    free(vm.activeThreadRoots);
+    vm.activeThreadRoots = NULL;
+    vm.activeThreadRootCount = 0;
+    vm.activeThreadRootCapacity = 0;
 
     /* Free main thread */
     if (vm.mainThread)
@@ -9817,22 +11120,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 #define READ_STRING_SHORT() AS_STR(READ_CONSTANT_SHORT())
 
 #ifdef DOTK_USE_COMPUTED_GOTO
-#define DISPATCH()                                                          \
-    do {                                                                    \
-        if (unlikely(vm.nextWideOp == 1)) {                                \
-            runtimeError("OP_WIDE was used on an invalide opcode.");       \
-            return INTERPRET_RUNTIME_ERROR;                                \
-        } else if (unlikely(vm.nextWideOp == 2)) {                        \
-            vm.nextWideOp--;                                               \
-        }                                                                   \
-        if (unlikely((printExecStackGlobaL                                 \
-                      && vm.currentThread == vm.mainThread)                \
-                     || gDebuggerEnabled))                                  \
-            goto loop_top;                                                  \
-        if (unlikely(vm.profilerEnabled && frame->startTimeNs == 0))       \
-            frame->startTimeNs = nowNs();                                  \
-        inst = READ_BYTE();                                                \
-        goto *dispatch_table[inst];                                        \
+#define DISPATCH()                                                                                     \
+    do                                                                                                 \
+    {                                                                                                  \
+        if (unlikely(vm.nextWideOp == 1))                                                              \
+        {                                                                                              \
+            runtimeError("OP_WIDE was used on an invalide opcode.");                                   \
+            return INTERPRET_RUNTIME_ERROR;                                                            \
+        }                                                                                              \
+        else if (unlikely(vm.nextWideOp == 2))                                                         \
+        {                                                                                              \
+            vm.nextWideOp--;                                                                           \
+        }                                                                                              \
+        if (unlikely((printExecStackGlobaL && vm.currentThread == vm.mainThread) || gDebuggerEnabled)) \
+            goto loop_top;                                                                             \
+        if (unlikely(vm.profilerEnabled && frame->startTimeNs == 0))                                   \
+            frame->startTimeNs = nowNs();                                                              \
+        inst = READ_BYTE();                                                                            \
+        goto *dispatch_table[inst];                                                                    \
     } while (0)
 #else
 #define DISPATCH() break
@@ -9854,7 +11159,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
     for (;;)
     {
 #ifdef DOTK_USE_COMPUTED_GOTO
-    loop_top: ;
+    loop_top:;
 #endif
         // #if DEBUG_TRACE_EXEC
         if (unlikely(printExecStackGlobaL))
@@ -9897,100 +11202,106 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         uint8_t inst;
 #ifdef DOTK_USE_COMPUTED_GOTO
         static const void *dispatch_table[] = {
-            [OP_CONSTANT]          = &&op_OP_CONSTANT,
-            [OP_CONSTANT_LONG]     = &&op_OP_CONSTANT_LONG,
-            [OP_NIL]               = &&op_OP_NIL,
-            [OP_TRUE]              = &&op_OP_TRUE,
-            [OP_FALSE]             = &&op_OP_FALSE,
-            [OP_POP]               = &&op_OP_POP,
-            [OP_DUP]               = &&op_OP_DUP,
-            [OP_CALL]              = &&op_OP_CALL,
-            [OP_CALL_KW]           = &&op_OP_CALL_KW,
-            [OP_DEF_GLOBAL]        = &&op_OP_DEF_GLOBAL,
-            [OP_DEF_CONST_GLOBAL]  = &&op_OP_DEF_CONST_GLOBAL,
-            [OP_GET_LOCAL]         = &&op_OP_GET_LOCAL,
-            [OP_SET_LOCAL]         = &&op_OP_SET_LOCAL,
-            [OP_GET_GLOBAL]        = &&op_OP_GET_GLOBAL,
-            [OP_SET_GLOBAL]        = &&op_OP_SET_GLOBAL,
-            [OP_GET_UPVALUE]       = &&op_OP_GET_UPVALUE,
-            [OP_SET_UPVALUE]       = &&op_OP_SET_UPVALUE,
-            [OP_JUMP_IF_FALSE]     = &&op_OP_JUMP_IF_FALSE,
-            [OP_CLOSE_UPVALUE]     = &&op_OP_CLOSE_UPVALUE,
-            [OP_JUMP]              = &&op_OP_JUMP,
-            [OP_LOOP]              = &&op_OP_LOOP,
-            [OP_EQUAL]             = &&op_OP_EQUAL,
-            [OP_LESS]              = &&op_OP_LESS,
-            [OP_BIN_SHIFT_LEFT]    = &&op_OP_BIN_SHIFT_LEFT,
-            [OP_GREATER]           = &&op_OP_GREATER,
-            [OP_BIN_SHIFT_RIGHT]   = &&op_OP_BIN_SHIFT_RIGHT,
-            [OP_BIN_OR]            = &&op_OP_BIN_OR,
-            [OP_BIN_AND]           = &&op_OP_BIN_AND,
-            [OP_BIN_XOR]           = &&op_OP_BIN_XOR,
-            [OP_ADD]               = &&op_OP_ADD,
-            [OP_SUB]               = &&op_OP_SUB,
-            [OP_MULT]              = &&op_OP_MULT,
-            [OP_POW]               = &&op_OP_POW,
-            [OP_MOD]               = &&op_OP_MOD,
-            [OP_DIV]               = &&op_OP_DIV,
-            [OP_INT_DIV]           = &&op_OP_INT_DIV,
-            [OP_NOT]               = &&op_OP_NOT,
-            [OP_NEGATE]            = &&op_OP_NEGATE,
-            [OP_PRINT]             = &&op_OP_PRINT,
-            [OP_CLOSURE]           = &&op_OP_CLOSURE,
-            [OP_YIELD]             = &&op_OP_YIELD,
-            [OP_RETURN]            = &&op_OP_RETURN,
-            [OP_RETURN_NIL]        = &&op_OP_RETURN_NIL,
-            [OP_RETURN_THIS]       = &&op_OP_RETURN_THIS,
-            [OP_CLASS]             = &&op_OP_CLASS,
-            [OP_METHOD]            = &&op_OP_METHOD,
-            [OP_INVOKE]            = &&op_OP_INVOKE,
-            [OP_INVOKE_KW]         = &&op_OP_INVOKE_KW,
-            [OP_INHERIT]           = &&op_OP_INHERIT,
-            [OP_SET_PROPERTY]      = &&op_OP_SET_PROPERTY,
-            [OP_GET_PROPERTY]      = &&op_OP_GET_PROPERTY,
-            [OP_GET_SUPER]         = &&op_OP_GET_SUPER,
-            [OP_SUPER_INVOKE]      = &&op_OP_SUPER_INVOKE,
-            [OP_SUPER_INVOKE_KW]   = &&op_OP_SUPER_INVOKE_KW,
-            [OP_BUILD_LIST]        = &&op_OP_BUILD_LIST,
-            [OP_BUILD_DEFAULT_LIST]= &&op_OP_BUILD_DEFAULT_LIST,
-            [OP_INDEX_SUBSCR]      = &&op_OP_INDEX_SUBSCR,
-            [OP_STORE_SUBSCR]      = &&op_OP_STORE_SUBSCR,
-            [OP_STORE_SUBSCR_ADD]  = &&op_OP_STORE_SUBSCR_ADD,
-            [OP_STORE_SUBSCR_SUB]  = &&op_OP_STORE_SUBSCR_SUB,
+            [OP_CONSTANT] = &&op_OP_CONSTANT,
+            [OP_CONSTANT_LONG] = &&op_OP_CONSTANT_LONG,
+            [OP_NIL] = &&op_OP_NIL,
+            [OP_TRUE] = &&op_OP_TRUE,
+            [OP_FALSE] = &&op_OP_FALSE,
+            [OP_POP] = &&op_OP_POP,
+            [OP_DUP] = &&op_OP_DUP,
+            [OP_CALL] = &&op_OP_CALL,
+            [OP_CALL_KW] = &&op_OP_CALL_KW,
+            [OP_CALL_UNPACK] = &&op_OP_CALL_UNPACK,
+            [OP_DEF_GLOBAL] = &&op_OP_DEF_GLOBAL,
+            [OP_DEF_CONST_GLOBAL] = &&op_OP_DEF_CONST_GLOBAL,
+            [OP_GET_LOCAL] = &&op_OP_GET_LOCAL,
+            [OP_SET_LOCAL] = &&op_OP_SET_LOCAL,
+            [OP_GET_GLOBAL] = &&op_OP_GET_GLOBAL,
+            [OP_SET_GLOBAL] = &&op_OP_SET_GLOBAL,
+            [OP_GET_UPVALUE] = &&op_OP_GET_UPVALUE,
+            [OP_SET_UPVALUE] = &&op_OP_SET_UPVALUE,
+            [OP_JUMP_IF_FALSE] = &&op_OP_JUMP_IF_FALSE,
+            [OP_CLOSE_UPVALUE] = &&op_OP_CLOSE_UPVALUE,
+            [OP_JUMP] = &&op_OP_JUMP,
+            [OP_LOOP] = &&op_OP_LOOP,
+            [OP_EQUAL] = &&op_OP_EQUAL,
+            [OP_LESS] = &&op_OP_LESS,
+            [OP_BIN_SHIFT_LEFT] = &&op_OP_BIN_SHIFT_LEFT,
+            [OP_GREATER] = &&op_OP_GREATER,
+            [OP_BIN_SHIFT_RIGHT] = &&op_OP_BIN_SHIFT_RIGHT,
+            [OP_BIN_OR] = &&op_OP_BIN_OR,
+            [OP_BIN_AND] = &&op_OP_BIN_AND,
+            [OP_BIN_XOR] = &&op_OP_BIN_XOR,
+            [OP_ADD] = &&op_OP_ADD,
+            [OP_SUB] = &&op_OP_SUB,
+            [OP_MULT] = &&op_OP_MULT,
+            [OP_POW] = &&op_OP_POW,
+            [OP_MOD] = &&op_OP_MOD,
+            [OP_DIV] = &&op_OP_DIV,
+            [OP_INT_DIV] = &&op_OP_INT_DIV,
+            [OP_NOT] = &&op_OP_NOT,
+            [OP_NEGATE] = &&op_OP_NEGATE,
+            [OP_PRINT] = &&op_OP_PRINT,
+            [OP_CLOSURE] = &&op_OP_CLOSURE,
+            [OP_YIELD] = &&op_OP_YIELD,
+            [OP_RETURN] = &&op_OP_RETURN,
+            [OP_RETURN_NIL] = &&op_OP_RETURN_NIL,
+            [OP_RETURN_THIS] = &&op_OP_RETURN_THIS,
+            [OP_CLASS] = &&op_OP_CLASS,
+            [OP_METHOD] = &&op_OP_METHOD,
+            [OP_INVOKE] = &&op_OP_INVOKE,
+            [OP_INVOKE_KW] = &&op_OP_INVOKE_KW,
+            [OP_INHERIT] = &&op_OP_INHERIT,
+            [OP_SET_PROPERTY] = &&op_OP_SET_PROPERTY,
+            [OP_GET_PROPERTY] = &&op_OP_GET_PROPERTY,
+            [OP_GET_SUPER] = &&op_OP_GET_SUPER,
+            [OP_SUPER_INVOKE] = &&op_OP_SUPER_INVOKE,
+            [OP_SUPER_INVOKE_KW] = &&op_OP_SUPER_INVOKE_KW,
+            [OP_BUILD_LIST] = &&op_OP_BUILD_LIST,
+            [OP_BUILD_TUPLE] = &&op_OP_BUILD_TUPLE,
+            [OP_BUILD_DEFAULT_LIST] = &&op_OP_BUILD_DEFAULT_LIST,
+            [OP_UNPACK] = &&op_OP_UNPACK,
+            [OP_INDEX_SUBSCR] = &&op_OP_INDEX_SUBSCR,
+            [OP_STORE_SUBSCR] = &&op_OP_STORE_SUBSCR,
+            [OP_STORE_SUBSCR_ADD] = &&op_OP_STORE_SUBSCR_ADD,
+            [OP_STORE_SUBSCR_SUB] = &&op_OP_STORE_SUBSCR_SUB,
             [OP_STORE_SUBSCR_MULT] = &&op_OP_STORE_SUBSCR_MULT,
-            [OP_STORE_SUBSCR_DIV]  = &&op_OP_STORE_SUBSCR_DIV,
+            [OP_STORE_SUBSCR_DIV] = &&op_OP_STORE_SUBSCR_DIV,
             [OP_STORE_SUBSCR_INT_DIV] = &&op_OP_STORE_SUBSCR_INT_DIV,
-            [OP_WIDE]              = &&op_OP_WIDE,
-            [OP_STATIC_VAR]        = &&op_OP_STATIC_VAR,
-            [OP_EXPORT]            = &&op_OP_EXPORT,
-            [OP_IMPORT]            = &&op_OP_IMPORT,
-            [OP_IMPORT_NAME]       = &&op_OP_IMPORT_NAME,
-            [OP_IMPORT_ALL]        = &&op_OP_IMPORT_ALL,
-            [OP_BUILD_SLICE]       = &&op_OP_BUILD_SLICE,
-            [OP_BUILD_MAP]         = &&op_OP_BUILD_MAP,
-            [OP_TRY]               = &&op_OP_TRY,
-            [OP_CATCH]             = &&op_OP_CATCH,
-            [OP_NOP]               = &&op_OP_NOP,
-            [OP_DEFAULT_LOCAL]     = &&op_OP_DEFAULT_LOCAL,
-            [OP_TAIL_CALL]         = &&op_OP_TAIL_CALL,
-            [OP_AWAIT]             = &&op_OP_AWAIT,
+            [OP_WIDE] = &&op_OP_WIDE,
+            [OP_STATIC_VAR] = &&op_OP_STATIC_VAR,
+            [OP_EXPORT] = &&op_OP_EXPORT,
+            [OP_IMPORT] = &&op_OP_IMPORT,
+            [OP_IMPORT_NAME] = &&op_OP_IMPORT_NAME,
+            [OP_IMPORT_ALL] = &&op_OP_IMPORT_ALL,
+            [OP_BUILD_SLICE] = &&op_OP_BUILD_SLICE,
+            [OP_BUILD_MAP] = &&op_OP_BUILD_MAP,
+            [OP_TRY] = &&op_OP_TRY,
+            [OP_CATCH] = &&op_OP_CATCH,
+            [OP_NOP] = &&op_OP_NOP,
+            [OP_DEFAULT_LOCAL] = &&op_OP_DEFAULT_LOCAL,
+            [OP_TAIL_CALL] = &&op_OP_TAIL_CALL,
+            [OP_AWAIT] = &&op_OP_AWAIT,
         };
         inst = READ_BYTE();
         goto *dispatch_table[inst];
 #endif
         switch (inst
 #ifndef DOTK_USE_COMPUTED_GOTO
-            = READ_BYTE()
+                = READ_BYTE()
 #endif
         )
         {
-        case OP_NIL: op_OP_NIL:
+        case OP_NIL:
+        op_OP_NIL:
             push(NIL_VAL);
             DISPATCH();
-        case OP_FALSE: op_OP_FALSE:
+        case OP_FALSE:
+        op_OP_FALSE:
             push(BOOL_VAL(false));
             DISPATCH();
-        case OP_POP: op_OP_POP:
+        case OP_POP:
+        op_OP_POP:
             if (vm.nextWideOp == 0 && *frame->ip == OP_POP)
             {
                 frame->ip++;
@@ -10009,16 +11320,20 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 pop();
             }
             DISPATCH();
-        case OP_DUP: op_OP_DUP:
+        case OP_DUP:
+        op_OP_DUP:
             push(peek(0));
             DISPATCH();
-        case OP_SUB: op_OP_SUB:
+        case OP_SUB:
+        op_OP_SUB:
             BIN_OP(NUM_VAL, -);
             DISPATCH();
-        case OP_DIV: op_OP_DIV:
+        case OP_DIV:
+        op_OP_DIV:
             BIN_OP(NUM_VAL, /);
             DISPATCH();
-        case OP_INT_DIV: op_OP_INT_DIV:
+        case OP_INT_DIV:
+        op_OP_INT_DIV:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10030,11 +11345,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((long)a / (long)b));
             DISPATCH();
         }
-        case OP_MULT: op_OP_MULT:
+        case OP_MULT:
+        op_OP_MULT:
             BIN_OP(NUM_VAL, *);
             DISPATCH();
 
-        case OP_MOD: op_OP_MOD:
+        case OP_MOD:
+        op_OP_MOD:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10046,7 +11363,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL(fmod(a, b)));
             DISPATCH();
         }
-        case OP_POW: op_OP_POW:
+        case OP_POW:
+        op_OP_POW:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10058,10 +11376,12 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL(pow(a, b)));
             DISPATCH();
         }
-        case OP_NOT: op_OP_NOT:
+        case OP_NOT:
+        op_OP_NOT:
             push(BOOL_VAL(isFalsey(pop())));
             DISPATCH();
-        case OP_GREATER: op_OP_GREATER:
+        case OP_GREATER:
+        op_OP_GREATER:
         {
             Value b = pop();
             Value a = pop();
@@ -10106,7 +11426,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             // BIN_OP(BOOL_VAL, >);
             DISPATCH();
         }
-        case OP_LESS: op_OP_LESS:
+        case OP_LESS:
+        op_OP_LESS:
         {
             Value b = pop();
             Value a = pop();
@@ -10155,17 +11476,21 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             // BIN_OP(BOOL_VAL, <);
             DISPATCH();
         }
-        case OP_CLASS: op_OP_CLASS:
+        case OP_CLASS:
+        op_OP_CLASS:
             push(OBJ_VAL(newClass(READ_STRING())));
             DISPATCH();
-        case OP_TRUE: op_OP_TRUE:
+        case OP_TRUE:
+        op_OP_TRUE:
             push(BOOL_VAL(true));
             DISPATCH();
-        case OP_METHOD: op_OP_METHOD:
+        case OP_METHOD:
+        op_OP_METHOD:
             if (!defineMethod(READ_STRING()))
                 return INTERPRET_RUNTIME_ERROR;
             DISPATCH();
-        case OP_BUILD_SLICE: op_OP_BUILD_SLICE:
+        case OP_BUILD_SLICE:
+        op_OP_BUILD_SLICE:
         {
             if (!IS_NUM(peek(0)))
             {
@@ -10189,7 +11514,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(OBJ_VAL(slice));
             DISPATCH();
         }
-        case OP_BUILD_MAP: op_OP_BUILD_MAP:
+        case OP_BUILD_MAP:
+        op_OP_BUILD_MAP:
         {
             ObjMap *map = newMap();
             uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
@@ -10209,7 +11535,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
             DISPATCH();
         }
-        case OP_BUILD_LIST: op_OP_BUILD_LIST:
+        case OP_BUILD_LIST:
+        op_OP_BUILD_LIST:
         {
             ObjList *list = newList();
             uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
@@ -10229,7 +11556,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(OBJ_VAL(list));
             DISPATCH();
         }
-        case OP_BUILD_DEFAULT_LIST: op_OP_BUILD_DEFAULT_LIST:
+        case OP_BUILD_TUPLE:
+        op_OP_BUILD_TUPLE:
+        {
+            uint16_t itemCount = isWide() ? READ_SHORT() : READ_BYTE();
+            ObjTuple *tuple = newTupleWithCount(itemCount);
+
+            push(OBJ_VAL(tuple));
+            for (int i = itemCount; i > 0; i--)
+                tuple->items[itemCount - i] = peek(i);
+            pop();
+            while (itemCount-- > 0)
+                pop();
+
+            push(OBJ_VAL(tuple));
+            DISPATCH();
+        }
+        case OP_BUILD_DEFAULT_LIST:
+        op_OP_BUILD_DEFAULT_LIST:
         {
             bool hasDefault = (bool)READ_BYTE();
             Value defaultValue = NIL_VAL;
@@ -10249,7 +11593,187 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(OBJ_VAL(list));
             DISPATCH();
         }
-        case OP_INDEX_SUBSCR: op_OP_INDEX_SUBSCR:
+        case OP_UNPACK:
+        op_OP_UNPACK:
+        {
+            uint8_t targetCount = READ_BYTE();
+            uint8_t starIndexPlusOne = READ_BYTE();
+            int starIndex = starIndexPlusOne == 0 ? -1 : (int)starIndexPlusOne - 1;
+            Value source = pop();
+
+            if (starIndex >= (int)targetCount)
+            {
+                runtimeError("Invalid unpack target metadata.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            if (IS_LIST(source) || IS_TUPLE(source))
+            {
+                int sourceCount = IS_LIST(source) ? AS_LIST(source)->count : AS_TUPLE(source)->count;
+                Value *items = IS_LIST(source) ? AS_LIST(source)->items : AS_TUPLE(source)->items;
+
+                if (starIndex < 0)
+                {
+                    if (sourceCount != targetCount)
+                    {
+                        runtimeError("Unpack expected %d values but got %d.", (int)targetCount, sourceCount);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    for (int i = 0; i < sourceCount; i++)
+                        push(items[i]);
+                    DISPATCH();
+                }
+
+                int required = (int)targetCount - 1;
+                if (sourceCount < required)
+                {
+                    runtimeError("Unpack expected at least %d values but got %d.", required, sourceCount);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                for (int i = 0; i < starIndex; i++)
+                    push(items[i]);
+
+                int tailCount = (int)targetCount - starIndex - 1;
+                int restCount = sourceCount - required;
+                ObjList *rest = newListWithCapacity(restCount);
+                push(OBJ_VAL(rest));
+                for (int i = starIndex; i < starIndex + restCount; i++)
+                    appendToList(rest, items[i]);
+                pop();
+                push(OBJ_VAL(rest));
+
+                for (int i = 0; i < tailCount; i++)
+                {
+                    int srcIndex = sourceCount - tailCount + i;
+                    push(items[srcIndex]);
+                }
+                DISPATCH();
+            }
+
+            if (IS_STR(source))
+            {
+                ObjString *str = AS_STR(source);
+                int sourceCount = str->len;
+
+                if (starIndex < 0)
+                {
+                    if (sourceCount != targetCount)
+                    {
+                        runtimeError("Unpack expected %d values but got %d.", (int)targetCount, sourceCount);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    for (int i = 0; i < sourceCount; i++)
+                        push(OBJ_VAL(copyString(str->chars + i, 1)));
+                    DISPATCH();
+                }
+
+                int required = (int)targetCount - 1;
+                if (sourceCount < required)
+                {
+                    runtimeError("Unpack expected at least %d values but got %d.", required, sourceCount);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                for (int i = 0; i < starIndex; i++)
+                    push(OBJ_VAL(copyString(str->chars + i, 1)));
+
+                int tailCount = (int)targetCount - starIndex - 1;
+                int restCount = sourceCount - required;
+                ObjList *rest = newListWithCapacity(restCount);
+                push(OBJ_VAL(rest));
+                for (int i = starIndex; i < starIndex + restCount; i++)
+                    appendToList(rest, OBJ_VAL(copyString(str->chars + i, 1)));
+                pop();
+                push(OBJ_VAL(rest));
+
+                for (int i = 0; i < tailCount; i++)
+                {
+                    int srcIndex = sourceCount - tailCount + i;
+                    push(OBJ_VAL(copyString(str->chars + srcIndex, 1)));
+                }
+                DISPATCH();
+            }
+
+            ObjList *materialized = newList();
+            push(OBJ_VAL(materialized));
+
+            int oldFrameCount = vm.frameCount;
+            push(source);
+            if (!invoke(vm.iterStr, 0))
+                return INTERPRET_RUNTIME_ERROR;
+            if (oldFrameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+                return INTERPRET_RUNTIME_ERROR;
+
+            Value iterator = pop();
+            while (true)
+            {
+                oldFrameCount = vm.frameCount;
+                push(iterator);
+                if (!invoke(vm.nextStr, 0))
+                    return INTERPRET_RUNTIME_ERROR;
+                if (oldFrameCount != vm.frameCount && run(false, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
+                    return INTERPRET_RUNTIME_ERROR;
+
+                Value next = pop();
+                if (IS_NIL(next))
+                    break;
+                appendToList(materialized, next);
+            }
+
+            int sourceCount = materialized->count;
+            Value *items = materialized->items;
+
+            if (starIndex < 0)
+            {
+                if (sourceCount != targetCount)
+                {
+                    runtimeError("Unpack expected %d values but got %d.", (int)targetCount, sourceCount);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                for (int i = 0; i < sourceCount; i++)
+                    push(items[i]);
+
+                Value *rootSlot = vm.stackTop - targetCount - 1;
+                for (int i = 0; i < targetCount; i++)
+                    rootSlot[i] = rootSlot[i + 1];
+                vm.stackTop--;
+                DISPATCH();
+            }
+
+            int required = (int)targetCount - 1;
+            if (sourceCount < required)
+            {
+                runtimeError("Unpack expected at least %d values but got %d.", required, sourceCount);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+
+            for (int i = 0; i < starIndex; i++)
+                push(items[i]);
+
+            int tailCount = (int)targetCount - starIndex - 1;
+            int restCount = sourceCount - required;
+            ObjList *rest = newListWithCapacity(restCount);
+            push(OBJ_VAL(rest));
+            for (int i = starIndex; i < starIndex + restCount; i++)
+                appendToList(rest, items[i]);
+            pop();
+            push(OBJ_VAL(rest));
+
+            for (int i = 0; i < tailCount; i++)
+            {
+                int srcIndex = sourceCount - tailCount + i;
+                push(items[srcIndex]);
+            }
+
+            Value *rootSlot = vm.stackTop - targetCount - 1;
+            for (int i = 0; i < targetCount; i++)
+                rootSlot[i] = rootSlot[i + 1];
+            vm.stackTop--;
+            DISPATCH();
+        }
+        case OP_INDEX_SUBSCR:
+        op_OP_INDEX_SUBSCR:
         {
             Value indexVal = pop();
             Value listVal = pop();
@@ -10281,7 +11805,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 break;
             }
-            if (!IS_LIST(listVal))
+            if (!IS_LIST(listVal) && !IS_TUPLE(listVal))
             {
                 if (IS_INSTANCE(listVal))
                 {
@@ -10312,30 +11836,51 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("'%s' is not subscriptable", valueTypeName(listVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
-            ObjList *list = AS_LIST(listVal);
+            int seqCount = IS_LIST(listVal) ? AS_LIST(listVal)->count : AS_TUPLE(listVal)->count;
+            Value *seqItems = IS_LIST(listVal) ? AS_LIST(listVal)->items : AS_TUPLE(listVal)->items;
             bool hadError = false;
             if (IS_NUM(indexVal))
             {
-                hadError = indexByNum(indexVal, list);
+                int index = (int)AS_NUM(indexVal);
+                if (index < 0)
+                    index = seqCount + index;
+                if (index < 0 || index >= seqCount)
+                {
+                    runtimeError("%s index out of range. Sequence has size %d. However, %d was provided", IS_LIST(listVal) ? "List" : "Tuple", seqCount, (int)AS_NUM(indexVal));
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                push(seqItems[index]);
             }
             else if (IS_SLICE(indexVal))
             {
+                if (IS_TUPLE(listVal))
+                {
+                    runtimeError("Tuple slicing is not supported yet.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                ObjList *list = AS_LIST(listVal);
                 indexBySlice(indexVal, list);
             }
             else
             {
-                runtimeError("Expected number or slice as list index but got '%s'", valueTypeName(indexVal));
+                runtimeError("Expected number or slice as sequence index but got '%s'", valueTypeName(indexVal));
                 return INTERPRET_RUNTIME_ERROR;
             }
             if (hadError)
                 return INTERPRET_RUNTIME_ERROR;
             DISPATCH();
         }
-        case OP_STORE_SUBSCR: op_OP_STORE_SUBSCR:
+        case OP_STORE_SUBSCR:
+        op_OP_STORE_SUBSCR:
         {
             Value itemVal = pop();
             Value indexVal = pop();
             Value listVal = pop();
+            if (IS_TUPLE(listVal))
+            {
+                runtimeError("Tuple is immutable and does not support item assignment.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
             if (!IS_LIST(listVal))
             {
                 if (IS_INSTANCE(listVal))
@@ -10392,11 +11937,16 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(itemVal);
             DISPATCH();
         }
-        case OP_STORE_SUBSCR_ADD: op_OP_STORE_SUBSCR_ADD:
-        case OP_STORE_SUBSCR_SUB: op_OP_STORE_SUBSCR_SUB:
-        case OP_STORE_SUBSCR_MULT: op_OP_STORE_SUBSCR_MULT:
-        case OP_STORE_SUBSCR_DIV: op_OP_STORE_SUBSCR_DIV:
-        case OP_STORE_SUBSCR_INT_DIV: op_OP_STORE_SUBSCR_INT_DIV:
+        case OP_STORE_SUBSCR_ADD:
+        op_OP_STORE_SUBSCR_ADD:
+        case OP_STORE_SUBSCR_SUB:
+        op_OP_STORE_SUBSCR_SUB:
+        case OP_STORE_SUBSCR_MULT:
+        op_OP_STORE_SUBSCR_MULT:
+        case OP_STORE_SUBSCR_DIV:
+        op_OP_STORE_SUBSCR_DIV:
+        case OP_STORE_SUBSCR_INT_DIV:
+        op_OP_STORE_SUBSCR_INT_DIV:
         {
             Value rhsVal = pop();
             Value indexVal = pop();
@@ -10491,7 +12041,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(resultVal);
             DISPATCH();
         }
-        case OP_INHERIT: op_OP_INHERIT:
+        case OP_INHERIT:
+        op_OP_INHERIT:
         {
             Value superclass = peek(1);
             if (!IS_CLASS(superclass))
@@ -10521,7 +12072,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             pop();
             DISPATCH();
         }
-        case OP_GET_SUPER: op_OP_GET_SUPER:
+        case OP_GET_SUPER:
+        op_OP_GET_SUPER:
         {
             ObjString *name = READ_STRING();
             ObjClass *super = AS_CLASS(pop());
@@ -10529,7 +12081,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
             DISPATCH();
         }
-        case OP_DEF_GLOBAL: op_OP_DEF_GLOBAL:
+        case OP_DEF_GLOBAL:
+        op_OP_DEF_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -10552,7 +12105,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             pop();
             DISPATCH();
         }
-        case OP_DEF_CONST_GLOBAL: op_OP_DEF_CONST_GLOBAL:
+        case OP_DEF_CONST_GLOBAL:
+        op_OP_DEF_CONST_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -10569,7 +12123,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             pop();
             DISPATCH();
         }
-        case OP_STATIC_VAR: op_OP_STATIC_VAR:
+        case OP_STATIC_VAR:
+        op_OP_STATIC_VAR:
         {
             ObjClass *c = AS_CLASS(peek(1));
 
@@ -10577,7 +12132,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             pop();
             DISPATCH();
         }
-        case OP_GET_LOCAL: op_OP_GET_LOCAL:
+        case OP_GET_LOCAL:
+        op_OP_GET_LOCAL:
         {
             bool wide = isWide();
             uint16_t slot = wide ? READ_SHORT() : READ_BYTE();
@@ -10599,13 +12155,15 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_SET_LOCAL: op_OP_SET_LOCAL:
+        case OP_SET_LOCAL:
+        op_OP_SET_LOCAL:
         {
             uint16_t slot = isWide() ? READ_SHORT() : READ_BYTE();
             frame->slots[slot] = peek(0);
             DISPATCH();
         }
-        case OP_GET_GLOBAL: op_OP_GET_GLOBAL:
+        case OP_GET_GLOBAL:
+        op_OP_GET_GLOBAL:
         {
             ObjString *name = READ_STRING();
 
@@ -10618,7 +12176,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(value);
             DISPATCH();
         }
-        case OP_SET_GLOBAL: op_OP_SET_GLOBAL:
+        case OP_SET_GLOBAL:
+        op_OP_SET_GLOBAL:
         {
             Table *globalsTable = frameGlobalsTable(frame);
             Table *constGlobalsTable = frameConstGlobalsTable(frame);
@@ -10633,7 +12192,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             tableSet(globalsTable, name, peek(0));
             DISPATCH();
         }
-        case OP_GET_PROPERTY: op_OP_GET_PROPERTY:
+        case OP_GET_PROPERTY:
+        op_OP_GET_PROPERTY:
         {
             ObjClass *klass;
             ObjString *name = READ_STRING();
@@ -10721,7 +12281,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
             DISPATCH();
         }
-        case OP_SET_PROPERTY: op_OP_SET_PROPERTY:
+        case OP_SET_PROPERTY:
+        op_OP_SET_PROPERTY:
         {
             if (!IS_INSTANCE(peek(1)) && !IS_CLASS(peek(1)) && !IS_FOREIGN(peek(1)))
             {
@@ -10759,7 +12320,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(value);
             DISPATCH();
         }
-        case OP_GET_UPVALUE: op_OP_GET_UPVALUE:
+        case OP_GET_UPVALUE:
+        op_OP_GET_UPVALUE:
         {
             uint8_t slot = READ_BYTE();
             push(*frame->closure->upvalues[slot]->location);
@@ -10773,23 +12335,24 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_SET_UPVALUE: op_OP_SET_UPVALUE:
+        case OP_SET_UPVALUE:
+        op_OP_SET_UPVALUE:
         {
             uint8_t slot = READ_BYTE();
             *frame->closure->upvalues[slot]->location = peek(0);
             DISPATCH();
         }
-        case OP_CLOSE_UPVALUE: op_OP_CLOSE_UPVALUE:
+        case OP_CLOSE_UPVALUE:
+        op_OP_CLOSE_UPVALUE:
         {
             closeUpvalues(vm.stackTop - 1);
             pop();
             DISPATCH();
         }
-        case OP_PRINT: op_OP_PRINT:
+        case OP_PRINT:
+        op_OP_PRINT:
         {
             Value val = peek(0);
-            if ((vm.stackTop - vm.stack) <= 1)
-                push(val);
             if (IS_OBJ(val) && AS_OBJ(val)->type == OBJ_INSTANCE && !IS_NIL(AS_INSTANCE(val)->klass->toStr))
             {
                 *(frame->ip)--;
@@ -10809,7 +12372,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             printf("\n");
             DISPATCH();
         }
-        case OP_ADD: op_OP_ADD:
+        case OP_ADD:
+        op_OP_ADD:
         {
             if (IS_STR(peek(1)))
             {
@@ -10881,7 +12445,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_BIN_AND: op_OP_BIN_AND:
+        case OP_BIN_AND:
+        op_OP_BIN_AND:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10894,7 +12459,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((a & b)));
             DISPATCH();
         }
-        case OP_BIN_OR: op_OP_BIN_OR:
+        case OP_BIN_OR:
+        op_OP_BIN_OR:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10907,7 +12473,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((a | b)));
             DISPATCH();
         }
-        case OP_BIN_XOR: op_OP_BIN_XOR:
+        case OP_BIN_XOR:
+        op_OP_BIN_XOR:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10920,7 +12487,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((a ^ b)));
             DISPATCH();
         }
-        case OP_BIN_SHIFT_LEFT: op_OP_BIN_SHIFT_LEFT:
+        case OP_BIN_SHIFT_LEFT:
+        op_OP_BIN_SHIFT_LEFT:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10933,7 +12501,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((a << b)));
             DISPATCH();
         }
-        case OP_BIN_SHIFT_RIGHT: op_OP_BIN_SHIFT_RIGHT:
+        case OP_BIN_SHIFT_RIGHT:
+        op_OP_BIN_SHIFT_RIGHT:
         {
             if (!IS_NUM(peek(0)) || !IS_NUM(peek(1)))
             {
@@ -10946,7 +12515,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(NUM_VAL((a >> b)));
             DISPATCH();
         }
-        case OP_EQUAL: op_OP_EQUAL:
+        case OP_EQUAL:
+        op_OP_EQUAL:
         {
             Value b = pop();
             Value a = pop();
@@ -10970,7 +12540,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_NEGATE: op_OP_NEGATE:
+        case OP_NEGATE:
+        op_OP_NEGATE:
         {
             if (!IS_NUM(peek(0)))
             {
@@ -10980,26 +12551,30 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             *(vm.stackTop - 1) = NUM_VAL(-AS_NUM(peek(0)));
             DISPATCH();
         }
-        case OP_JUMP_IF_FALSE: op_OP_JUMP_IF_FALSE:
+        case OP_JUMP_IF_FALSE:
+        op_OP_JUMP_IF_FALSE:
         {
             uint16_t offset = READ_SHORT();
             if (isFalsey(peek(0)))
                 frame->ip += offset;
             DISPATCH();
         }
-        case OP_JUMP: op_OP_JUMP:
+        case OP_JUMP:
+        op_OP_JUMP:
         {
             uint16_t offset = READ_SHORT();
             frame->ip += offset;
             DISPATCH();
         }
-        case OP_LOOP: op_OP_LOOP:
+        case OP_LOOP:
+        op_OP_LOOP:
         {
             uint16_t offset = READ_SHORT();
             frame->ip -= offset;
             DISPATCH();
         }
-        case OP_CALL: op_OP_CALL:
+        case OP_CALL:
+        op_OP_CALL:
         {
             int argC = READ_BYTE();
             if (!callValue(peek(argC), argC))
@@ -11007,7 +12582,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_TAIL_CALL: op_OP_TAIL_CALL:
+        case OP_TAIL_CALL:
+        op_OP_TAIL_CALL:
         {
             int argC = READ_BYTE();
             Value callee = peek(argC);
@@ -11025,7 +12601,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     {
                         uint64_t end = nowNs();
                         uint64_t start = frame->startTimeNs;
-                        if (start == 0) start = end;
+                        if (start == 0)
+                            start = end;
                         profilerAddSample(frame->closure->function, end - start);
                     }
                     closeUpvalues(frame->slots);
@@ -11050,7 +12627,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_CALL_KW: op_OP_CALL_KW:
+        case OP_CALL_KW:
+        op_OP_CALL_KW:
         {
             int positional = READ_BYTE();
             int keyword = READ_BYTE();
@@ -11060,18 +12638,48 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_INVOKE: op_OP_INVOKE:
+        case OP_CALL_UNPACK:
+        op_OP_CALL_UNPACK:
+        {
+            int partCount = READ_BYTE();
+            uint16_t rawSlotCount = READ_SHORT();
+            const uint8_t *parts = frame->ip;
+            frame->ip += partCount;
+
+            int positional = 0;
+            int keyword = 0;
+            if (!expandUnpackedCallArgsOnStack(partCount, parts, rawSlotCount, &positional, &keyword))
+                return INTERPRET_RUNTIME_ERROR;
+
+            int expandedRawCount = positional + (keyword * 2);
+            if (keyword > 0)
+            {
+                if (!callValueKw(peek(expandedRawCount), positional, keyword))
+                    return INTERPRET_RUNTIME_ERROR;
+            }
+            else
+            {
+                if (!callValue(peek(expandedRawCount), positional))
+                    return INTERPRET_RUNTIME_ERROR;
+            }
+            frame = &vm.frames[vm.frameCount - 1];
+            DISPATCH();
+        }
+        case OP_INVOKE:
+        op_OP_INVOKE:
         {
             uint8_t *cacheKey = frame->ip - 1;
             ObjString *methodName = READ_STRING();
             int argc = READ_BYTE();
             {
                 Value receiver = peek(argc);
-                if (IS_INSTANCE(receiver)) {
+                if (IS_INSTANCE(receiver))
+                {
                     ObjInstance *rcvInst = AS_INSTANCE(receiver);
                     unsigned icIdx = ((uintptr_t)cacheKey >> 2) & (IC_SIZE - 1);
                     struct InlineCacheEntry *ic = &vm.inlineCache[icIdx];
-                    if (ic->ip == cacheKey && ic->klass == rcvInst->klass) {
+                    if (ic->ip == cacheKey && ic->klass == rcvInst->klass)
+                    {
                         if (!callValue(ic->method, argc))
                             return INTERPRET_RUNTIME_ERROR;
                         frame = &vm.frames[vm.frameCount - 1];
@@ -11084,7 +12692,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_INVOKE_KW: op_OP_INVOKE_KW:
+        case OP_INVOKE_KW:
+        op_OP_INVOKE_KW:
         {
             ObjString *methodName = READ_STRING();
             int positional = READ_BYTE();
@@ -11094,7 +12703,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_SUPER_INVOKE: op_OP_SUPER_INVOKE:
+        case OP_SUPER_INVOKE:
+        op_OP_SUPER_INVOKE:
         {
             ObjString *method = READ_STRING();
             int argc = READ_BYTE();
@@ -11104,7 +12714,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_SUPER_INVOKE_KW: op_OP_SUPER_INVOKE_KW:
+        case OP_SUPER_INVOKE_KW:
+        op_OP_SUPER_INVOKE_KW:
         {
             ObjString *method = READ_STRING();
             int positional = READ_BYTE();
@@ -11115,7 +12726,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_CLOSURE: op_OP_CLOSURE:
+        case OP_CLOSURE:
+        op_OP_CLOSURE:
         {
             ObjFunction *function = AS_FUN(READ_CONSTANT());
 
@@ -11133,7 +12745,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_AWAIT: op_OP_AWAIT:
+        case OP_AWAIT:
+        op_OP_AWAIT:
         {
             /* await <value> — if the value is a Thread, join it (releasing
                the GVL so the thread can run) and push the result.
@@ -11144,9 +12757,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 pop(); /* remove the thread from the stack */
                 DotKThread *t = (DotKThread *)AS_FOREIGN_PTR(val);
 
-                DotKThread *saved = vmBeginBlockingIO();
-                pthread_join(t->handle, NULL);
-                vmEndBlockingIO(saved);
+                if (!ensureThreadJoined(t, "await thread"))
+                    return INTERPRET_RUNTIME_ERROR;
 
                 /* Restore frame pointer after state reload */
                 frame = &vm.frames[vm.frameCount - 1];
@@ -11162,7 +12774,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             /* else: not a Thread — value stays on the stack as-is */
             DISPATCH();
         }
-        case OP_YIELD: op_OP_YIELD:
+        case OP_YIELD:
+        op_OP_YIELD:
         {
             Value yielded = pop();
             if (!gYieldTrapActive)
@@ -11175,7 +12788,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             gYieldTrapValue = yielded;
             return INTERPRET_OK;
         }
-        case OP_RETURN: op_OP_RETURN:
+        case OP_RETURN:
+        op_OP_RETURN:
         {
             Value result = pop();
             /* profiler: record time spent in this function */
@@ -11212,7 +12826,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_RETURN_NIL: op_OP_RETURN_NIL:
+        case OP_RETURN_NIL:
+        op_OP_RETURN_NIL:
         {
             Value result = NIL_VAL;
             if (vm.profilerEnabled)
@@ -11247,7 +12862,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_RETURN_THIS: op_OP_RETURN_THIS:
+        case OP_RETURN_THIS:
+        op_OP_RETURN_THIS:
         {
             Value result = frame->slots[0];
             if (vm.profilerEnabled)
@@ -11278,7 +12894,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             frame = &vm.frames[vm.frameCount - 1];
             DISPATCH();
         }
-        case OP_CONSTANT: op_OP_CONSTANT:
+        case OP_CONSTANT:
+        op_OP_CONSTANT:
         {
             bool wide = isWide();
             Value constant = wide
@@ -11297,8 +12914,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             // Superinstruction: OP_CONSTANT <a>; OP_ADD (number fast path)
             // Stack before push: [..., X]. After push: [..., X, constant].
             // We want X + constant, leaving result on stack.
-            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
-                     && *frame->ip == OP_ADD && IS_NUM(peek(1)))
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant) && *frame->ip == OP_ADD && IS_NUM(peek(1)))
             {
                 frame->ip++;
                 double b = AS_NUM(constant);
@@ -11307,8 +12923,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 *(vm.stackTop - 1) = NUM_VAL(a + b);
             }
             // Superinstruction: OP_CONSTANT <a>; OP_SUB (number fast path)
-            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
-                     && *frame->ip == OP_SUB && IS_NUM(peek(1)))
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant) && *frame->ip == OP_SUB && IS_NUM(peek(1)))
             {
                 frame->ip++;
                 double b = AS_NUM(constant);
@@ -11317,8 +12932,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 *(vm.stackTop - 1) = NUM_VAL(a - b);
             }
             // Superinstruction: OP_CONSTANT <a>; OP_LESS (number fast path)
-            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant)
-                     && *frame->ip == OP_LESS && IS_NUM(peek(1)))
+            else if (!wide && vm.nextWideOp == 0 && IS_NUM(constant) && *frame->ip == OP_LESS && IS_NUM(peek(1)))
             {
                 frame->ip++;
                 double b = AS_NUM(constant);
@@ -11328,7 +12942,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_EXPORT: op_OP_EXPORT:
+        case OP_EXPORT:
+        op_OP_EXPORT:
         {
             ObjString *name = READ_STRING();
             if (vm.currentModuleExports == NULL)
@@ -11348,7 +12963,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.currentModuleHasExplicitExports = true;
             DISPATCH();
         }
-        case OP_IMPORT: op_OP_IMPORT:
+        case OP_IMPORT:
+        op_OP_IMPORT:
         {
             Value file = pop();
             if (IS_STR(file))
@@ -11497,17 +13113,12 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
                 }
 
-                /* Grow importSources safely: avoid incrementing vm.importCount until
-                   realloc succeeds to prevent losing the old pointer on OOM. */
-                char **tmp = (char **)realloc(vm.importSources, sizeof(char *) * (vm.importCount + 1));
-                if (tmp == NULL)
+                if (!trackImportSource(source))
                 {
                     free(source);
                     runtimeError("Out of memory while importing '%s'", filePath->chars);
                     return INTERPRET_RUNTIME_ERROR;
                 }
-                vm.importSources = tmp;
-                vm.importSources[vm.importCount++] = source;
 
                 ObjNamespace *previousModuleExports = vm.currentModuleExports;
                 ObjNamespace *previousLoadingModule = vm.currentLoadingModule;
@@ -11552,7 +13163,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_IMPORT_ALL: op_OP_IMPORT_ALL:
+        case OP_IMPORT_ALL:
+        op_OP_IMPORT_ALL:
         {
             if (!IS_NAMESPACE(peek(0)))
             {
@@ -11590,7 +13202,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             pop();
             DISPATCH();
         }
-        case OP_IMPORT_NAME: op_OP_IMPORT_NAME:
+        case OP_IMPORT_NAME:
+        op_OP_IMPORT_NAME:
         {
             if (!IS_NAMESPACE(peek(0)))
             {
@@ -11630,7 +13243,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             DISPATCH();
         }
 
-        case OP_TRY: op_OP_TRY:
+        case OP_TRY:
+        op_OP_TRY:
         {
             Value *stop = vm.stackTop;
             int frameCount = vm.frameCount;
@@ -11668,7 +13282,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.isInTryCatch = b4;
             DISPATCH();
         }
-        case OP_CATCH: op_OP_CATCH:
+        case OP_CATCH:
+        op_OP_CATCH:
         {
             if (!IS_CLOSURE(peek(0)))
             {
@@ -11688,7 +13303,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             DISPATCH();
         }
-        case OP_CONSTANT_LONG: op_OP_CONSTANT_LONG:
+        case OP_CONSTANT_LONG:
+        op_OP_CONSTANT_LONG:
         {
             uint32_t constantIndex =
                 ((uint32_t)(READ_BYTE() & 0xff)) |
@@ -11698,14 +13314,17 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             push(constant);
             DISPATCH();
         }
-        case OP_WIDE: op_OP_WIDE:
+        case OP_WIDE:
+        op_OP_WIDE:
             vm.nextWideOp = 2;
             DISPATCH();
-        case OP_NOP: op_OP_NOP:
+        case OP_NOP:
+        op_OP_NOP:
             if (vm.nextWideOp == 1)
                 vm.nextWideOp = 0;
             DISPATCH();
-        case OP_DEFAULT_LOCAL: op_OP_DEFAULT_LOCAL:
+        case OP_DEFAULT_LOCAL:
+        op_OP_DEFAULT_LOCAL:
         {
             uint8_t slot = READ_BYTE();
             uint16_t offset = READ_SHORT();

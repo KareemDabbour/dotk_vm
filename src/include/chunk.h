@@ -14,6 +14,7 @@ typedef enum
     OP_DUP,
     OP_CALL,
     OP_CALL_KW,
+    OP_CALL_UNPACK,
     OP_DEF_GLOBAL,
     OP_DEF_CONST_GLOBAL,
     OP_GET_LOCAL,
@@ -60,7 +61,9 @@ typedef enum
     OP_SUPER_INVOKE,
     OP_SUPER_INVOKE_KW,
     OP_BUILD_LIST,
+    OP_BUILD_TUPLE,
     OP_BUILD_DEFAULT_LIST,
+    OP_UNPACK,
     OP_INDEX_SUBSCR,
     OP_STORE_SUBSCR,
     OP_STORE_SUBSCR_ADD,
@@ -83,6 +86,14 @@ typedef enum
     OP_TAIL_CALL,
     OP_AWAIT
 } OpCode;
+
+typedef enum
+{
+    ARG_PART_POSITIONAL = 0,
+    ARG_PART_POSITIONAL_UNPACK = 1,
+    ARG_PART_KEYWORD = 2,
+    ARG_PART_KEYWORD_UNPACK = 3,
+} ArgPartKind;
 
 typedef struct
 {

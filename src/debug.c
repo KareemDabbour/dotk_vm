@@ -149,6 +149,51 @@ static int callKwInst(const char *name, Chunk *chunk, int offset)
     return offset + 3;
 }
 
+static int callUnpackInst(const char *name, Chunk *chunk, int offset)
+{
+    uint8_t partCount = chunk->code[offset + 1];
+    uint16_t rawSlots = (uint16_t)(chunk->code[offset + 2] << 8) | (uint16_t)chunk->code[offset + 3];
+    printf("%-16s (%d parts, %d raw slots)", name, partCount, rawSlots);
+    if (partCount > 0)
+    {
+        printf(" [");
+        for (uint8_t i = 0; i < partCount; i++)
+        {
+            const char *partName = "?";
+            switch ((ArgPartKind)chunk->code[offset + 4 + i])
+            {
+            case ARG_PART_POSITIONAL:
+                partName = "arg";
+                break;
+            case ARG_PART_POSITIONAL_UNPACK:
+                partName = "*arg";
+                break;
+            case ARG_PART_KEYWORD:
+                partName = "kw";
+                break;
+            case ARG_PART_KEYWORD_UNPACK:
+                partName = "**kw";
+                break;
+            }
+            printf("%s%s", i == 0 ? "" : ", ", partName);
+        }
+        printf("]");
+    }
+    printf("\n");
+    return offset + 4 + partCount;
+}
+
+static int unpackInst(const char *name, Chunk *chunk, int offset)
+{
+    uint8_t targetCount = chunk->code[offset + 1];
+    uint8_t starIndexPlusOne = chunk->code[offset + 2];
+    if (starIndexPlusOne == 0)
+        printf("%-16s (%d targets)\n", name, targetCount);
+    else
+        printf("%-16s (%d targets, * at %d)\n", name, targetCount, (int)starIndexPlusOne - 1);
+    return offset + 3;
+}
+
 int disassembleInst(Chunk *chunk, int offset)
 {
     printf("%04d ", offset);
@@ -327,16 +372,22 @@ int disassembleInst(Chunk *chunk, int offset)
         return byteInst("OP_SET_UPVALUE", chunk, offset);
     case OP_BUILD_LIST:
         return byteInst("OP_BUILD_LIST", chunk, offset);
+    case OP_BUILD_TUPLE:
+        return byteInst("OP_BUILD_TUPLE", chunk, offset);
     case OP_BUILD_MAP:
         return byteInst("OP_BUILD_MAP", chunk, offset);
     case OP_BUILD_DEFAULT_LIST:
         return byteInst("OP_BUILD_DEFAULT_LIST", chunk, offset);
+    case OP_UNPACK:
+        return unpackInst("OP_UNPACK", chunk, offset);
     case OP_CALL:
         return byteInst("OP_CALL", chunk, offset);
     case OP_TAIL_CALL:
         return byteInst("OP_TAIL_CALL", chunk, offset);
     case OP_CALL_KW:
         return callKwInst("OP_CALL_KW", chunk, offset);
+    case OP_CALL_UNPACK:
+        return callUnpackInst("OP_CALL_UNPACK", chunk, offset);
     case OP_INVOKE:
         return invokeInst("OP_INVOKE", chunk, offset);
     case OP_INVOKE_KW:

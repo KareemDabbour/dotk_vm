@@ -66,27 +66,27 @@ static void sigSegvHandler(int signum)
 
 extern pthread_mutex_t GVL;
 
-static void acquireGVL()
+static void acquireGVL(const char *reason, const char *file, int line)
 {
 #ifdef DEBUG_LOG_THREAD
     pthread_t tid = pthread_self();
-    printf("thread %lu locking GVL...\n", (unsigned long)tid);
+    printf("thread %lu locking GVL for %s at %s:%d...\n", (unsigned long)tid, reason, file, line);
 #endif
     pthread_mutex_lock(&GVL);
 #ifdef DEBUG_LOG_THREAD
-    printf("thread %lu locked GVL\n", (unsigned long)tid);
+    printf("thread %lu locked GVL for %s at %s:%d\n", (unsigned long)tid, reason, file, line);
 #endif
 }
 
-static void releaseGVL()
+static void releaseGVL(const char *reason, const char *file, int line)
 {
 #ifdef DEBUG_LOG_THREAD
     pthread_t tid = pthread_self();
-    printf("thread %lu unlocking GVL...\n", (unsigned long)tid);
+    printf("thread %lu unlocking GVL at %s:%d...\n", (unsigned long)tid, file, line);
 #endif
     pthread_mutex_unlock(&GVL);
 #ifdef DEBUG_LOG_THREAD
-    printf("thread %lu unlocked GVL\n", (unsigned long)tid);
+    printf("thread %lu unlocked GVL at %s:%d\n", (unsigned long)tid, file, line);
 #endif
 }
 

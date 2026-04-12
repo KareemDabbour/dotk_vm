@@ -18,12 +18,13 @@
 #define IS_NATIVE(value) isObjType(value, OBJ_NATIVE)
 #define IS_GENERATOR(value) isObjType(value, OBJ_GENERATOR)
 #define IS_LIST(value) isObjType(value, OBJ_LIST)
+#define IS_TUPLE(value) isObjType(value, OBJ_TUPLE)
 #define IS_MAP(value) isObjType(value, OBJ_MAP)
 #define IS_NAMESPACE(value) isObjType(value, OBJ_NAMESPACE)
 #define IS_SLICE(value) isObjType(value, OBJ_SLICE)
 #define IS_FOREIGN(value) isObjType(value, OBJ_FOREIGN)
 #define IS_FOREIGN_TYPE(value, f_type) (IS_FOREIGN(value) && (AS_FOREIGN(value))->type == f_type)
-#define IS_BUILTIN(value) isObjType(value, OBJ_MAP) || isObjType(value, OBJ_LIST) || isObjType(value, OBJ_STRING)
+#define IS_BUILTIN(value) isObjType(value, OBJ_MAP) || isObjType(value, OBJ_LIST) || isObjType(value, OBJ_TUPLE) || isObjType(value, OBJ_STRING)
 
 #define AS_CLASS(value) ((ObjClass *)AS_OBJ(value))
 #define AS_INSTANCE(value) ((ObjInstance *)AS_OBJ(value))
@@ -36,6 +37,7 @@
 #define AS_NATIVE(value) (((ObjNative *)AS_OBJ(value))->function)
 #define AS_GENERATOR(value) ((ObjGenerator *)AS_OBJ(value))
 #define AS_LIST(value) ((ObjList *)AS_OBJ(value))
+#define AS_TUPLE(value) ((ObjTuple *)AS_OBJ(value))
 #define AS_MAP(value) ((ObjMap *)AS_OBJ(value))
 #define AS_NAMESPACE(value) ((ObjNamespace *)AS_OBJ(value))
 #define AS_SLICE(value) ((ObjSlice *)AS_OBJ(value))
@@ -50,6 +52,7 @@ typedef enum
     OBJ_NAMESPACE,
     OBJ_FUNCTION,
     OBJ_LIST,
+    OBJ_TUPLE,
     OBJ_SLICE,
     OBJ_CLOSURE,
     OBJ_NATIVE,
@@ -61,13 +64,14 @@ typedef enum
     OBJ_FOREIGN
 } ObjType;
 
-static const char *OBJECT_TYPES[15] = {
+static const char *OBJECT_TYPES[16] = {
     "CLASS",
     "STRING",
     "MAP",
     "NAMESPACE",
     "FUNCTION",
     "LIST",
+    "TUPLE",
     "SLICE",
     "CLOSURE",
     "NATIVE",
@@ -231,6 +235,14 @@ typedef struct _ObjList
     Value *items;
 } ObjList;
 
+typedef struct _ObjTuple
+{
+    Obj obj;
+    int count;
+    int capacity;
+    Value *items;
+} ObjTuple;
+
 typedef struct _ObjMap
 {
     Obj obj;
@@ -280,6 +292,7 @@ ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount);
 ObjFunction *newFunction();
 ObjList *newList();
 ObjList *newListWithCapacity(int capacity);
+ObjTuple *newTupleWithCount(int count);
 ObjMap *newMap();
 ObjNamespace *newNamespace();
 ObjSlice *newSlice(int start, int end, int step);

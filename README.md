@@ -519,6 +519,111 @@ Out of the box, DotK provides:
 - built-in modules for file I/O, SQL, and HTTP (`file` is preloaded; others are import-on-demand)
 - native module loading via `import` or `loadLib(path)`
 
+### Threading and Async/Await
+
+DotK supports both `async` functions and explicit threads.
+
+`async fn` behavior:
+
+- calling an `async fn` starts work immediately and returns a thread-like handle
+- `await value` behaves as:
+	- if `value` is a thread/async handle, wait for completion and return its result
+	- otherwise, return `value` unchanged (identity await)
+
+Explicit threads:
+
+- `Thread(fn, ...args)` runs `fn(...args)` in a background thread
+- `t.join()` waits until completion and returns the thread result
+- `t.join(timeoutMs)` returns `null` on timeout, otherwise returns the result
+
+Thread lifecycle APIs:
+
+- `t.isAlive()` whether the thread is currently running
+- `t.done()` whether execution has completed
+- `t.tryResult()` returns `null` until done; once done, returns result (or raises thread error)
+
+Cancellation APIs (cooperative):
+
+- `t.cancel()` requests cancellation and returns whether the request was newly set
+- `t.isCancelled()` checks if cancellation was requested
+- `Thread.currentThread()` returns the calling thread object when available
+- `t.checkCancelled()` checks cancellation status from a thread object
+
+Recommended module-level helpers:
+
+```py
+from modules.threading import awaitTimeout, currentThread, checkCancelled
+
+async fn slow() {
+		sleep(1)
+		return 9
+}
+
+var t = slow()
+print(type(awaitTimeout(t, 0)) == "null")
+print(awaitTimeout(t, 2000))
+
+fn worker() {
+		var me = currentThread()
+		while (true) {
+				if (me.checkCancelled()) {
+						return "cancelled"
+				}
+		}
+}
+```
+
+Socket timeout helpers for async/thread loops:
+
+- `Socket.receiveTimeout(timeoutMs)` returns:
+	- `null` on timeout
+	- `""` when the connection is closed
+	- a chunk string when data is available
+- `Socket.receiveLineTimeout(timeoutMs)` returns one buffered line at a time (without trailing `\n`; trims trailing `\r` when present)
+
+Async execution model:
+
+- async closures are executed by a VM worker pool (bounded queue)
+- explicit `Thread(...)` remains a dedicated thread path
+- pool controls and stats are available via `modules.threading`:
+	- `setPoolQueueLimit(maxPending)`
+	- `poolStats()`
+
+### Concurrency Changes (Phases Implemented)
+
+Recent runtime changes implemented in this repository:
+
+- Phase 1 (safety baseline):
+	- idempotent join/await behavior
+	- self-join protection
+	- active-thread rooting improvements for GC safety
+- Phase 2 (ergonomics):
+	- timeout waits via `Thread.join(timeoutMs)`
+	- module helper `awaitTimeout(thread, timeoutMs)`
+- Phase 3 (cancellation and status):
+	- `Thread.cancel()`, `Thread.isCancelled()`, `Thread.done()`, `Thread.tryResult()`
+	- `Thread.currentThread()` and `thread.checkCancelled()`
+	- module wrappers in `modules/threading.k`
+- Phase 4 (I/O reliability):
+	- EINTR-safe socket reads and improved timeout behavior
+	- `Socket.receiveTimeout(...)` and `Socket.receiveLineTimeout(...)`
+- Phase 5 (throughput and observability):
+	- async worker-pool execution path
+	- pool queue backpressure
+	- `poolStats()` and `setPoolQueueLimit(...)`
+
+For executable examples, see tests under `tests/core` including:
+
+- `11_async_await.k`
+- `14_thread_join_timeout.k`
+- `16_thread_done_try_result.k`
+- `17_thread_cancel_cooperative.k`
+- `18_thread_current_thread_api.k`
+- `20_async_pool_many_tasks.k`
+- `21_thread_pool_stats_api.k`
+- `22_async_pool_backpressure.k`
+- `23_async_pool_shutdown_stress.k`
+
 ### `lang.k` Standard Helpers
 
 The repository includes a standard helper file at [lang.k](lang.k) that is commonly imported from scripts:

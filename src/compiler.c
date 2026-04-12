@@ -131,6 +131,8 @@ static void markInitialized();
 static void declaration();
 static ParseRule *getRule(TokenType type);
 static void parsePrecedence(Precedence precedence);
+static void emitByte(uint8_t byte);
+static void emitBytes(uint8_t byte1, uint16_t byte2);
 static uint16_t parseVariable(const char *errMsg, bool isConst);
 static uint16_t declareVariableFromToken(Token name, bool isConst);
 static bool emitModuleSpecifier(Token *implicitAlias);
@@ -139,6 +141,21 @@ static int resolveUpValue(Compiler *compiler, Token *name);
 static void beginScope();
 static void endScope();
 static Token synthToken(const char *text);
+static bool looksLikeUnpackAssignmentStart();
+static void unpackAssignmentStatementAfterLeftParen();
+
+typedef struct
+{
+    Token name;
+    uint16_t global;
+    bool isRest;
+} UnpackTarget;
+
+typedef struct
+{
+    uint8_t setOp;
+    uint16_t arg;
+} UnpackAssignTarget;
 // static void optimizeFunction(ObjFunction *fn);
 
 static inline Chunk *currentChunk()
@@ -208,6 +225,127 @@ static bool match(TokenType type)
         return false;
     advance();
     return true;
+}
+
+static bool looksLikeUnpackAssignmentStart()
+{
+    if (!check(TOKEN_LEFT_PAREN))
+        return false;
+
+    const char *p = parser.current.start;
+    int depth = 0;
+
+    while (*p)
+    {
+        char c = *p;
+        if (c == '(')
+        {
+            depth++;
+            p++;
+            continue;
+        }
+        if (c == ')')
+        {
+            depth--;
+            p++;
+            if (depth == 0)
+            {
+                while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+                    p++;
+                return *p == '=';
+            }
+            continue;
+        }
+        p++;
+    }
+
+    return false;
+}
+
+static void unpackAssignmentStatementAfterLeftParen()
+{
+    UnpackAssignTarget targets[UINT8_COUNT];
+    int targetCount = 0;
+    int restIndex = -1;
+    bool hadConstError = false;
+
+    if (check(TOKEN_RIGHT_PAREN))
+        error("Unpack assignment needs at least one target.");
+
+    while (!check(TOKEN_RIGHT_PAREN) && !check(TOKEN_EOF))
+    {
+        bool isRest = match(TOKEN_STAR);
+        consume(TOKEN_IDENTIFIER, isRest ? "Expect identifier after '*' in unpack assignment target." : "Expect identifier in unpack assignment target.");
+        Token name = parser.prev;
+
+        if (targetCount == UINT8_COUNT)
+            error("Too many unpack assignment targets.");
+
+        if (isRest)
+        {
+            if (restIndex != -1)
+                error("Only one '*' unpack target is allowed.");
+            restIndex = targetCount;
+        }
+
+        uint8_t setOp;
+        int arg = resolveLocal(current, &name);
+        bool isConst = false;
+        if (arg != -1)
+        {
+            setOp = OP_SET_LOCAL;
+            isConst = current->locals[arg].isConst;
+        }
+        else if ((arg = resolveUpValue(current, &name)) != -1)
+        {
+            setOp = OP_SET_UPVALUE;
+            isConst = current->upValues[arg].isConst;
+        }
+        else
+        {
+            arg = identifierConst(&name);
+            setOp = OP_SET_GLOBAL;
+        }
+
+        if (isConst)
+        {
+            error("Can't assign to a constant.");
+            hadConstError = true;
+        }
+
+        targets[targetCount].setOp = setOp;
+        targets[targetCount].arg = (uint16_t)arg;
+        targetCount++;
+
+        if (!match(TOKEN_COMMA))
+            break;
+
+        if (isRest && !check(TOKEN_RIGHT_PAREN))
+            error("'*' unpack target must be the last target.");
+    }
+
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after unpack assignment targets.");
+    consume(TOKEN_EQUAL, "Expect '=' after unpack assignment targets.");
+    expression();
+
+    if (hadConstError)
+    {
+        match(TOKEN_SEMICOLON);
+        emitByte(OP_POP);
+        return;
+    }
+
+    emitByte(OP_UNPACK);
+    emitByte((uint8_t)targetCount);
+    emitByte(restIndex >= 0 ? (uint8_t)(restIndex + 1) : (uint8_t)0);
+
+    for (int i = targetCount - 1; i >= 0; i--)
+    {
+        emitBytes(targets[i].setOp, targets[i].arg);
+        emitByte(OP_POP);
+    }
+
+    match(TOKEN_SEMICOLON);
 }
 
 static void emitByte(uint8_t byte)
@@ -342,7 +480,20 @@ static ObjFunction *endCompiler()
     ObjFunction *func = current->function;
 
     if (!parser.hadError && gCompilerOptimizationLevel > 0)
-        optimizeFunction(func, gCompilerOptimizationLevel);
+    {
+        int optLevel = gCompilerOptimizationLevel;
+        // O2 passes remain unstable for stdlib compilation units; keep stdlib at O1.
+        if (optLevel >= 2 && parser.file != NULL)
+        {
+            const char *stdlibName = "stdlib.k";
+            size_t fileLen = strlen(parser.file);
+            size_t stdlibLen = strlen(stdlibName);
+            if (fileLen >= stdlibLen && strcmp(parser.file + (fileLen - stdlibLen), stdlibName) == 0)
+                optLevel = 1;
+        }
+
+        optimizeFunction(func, optLevel);
+    }
 
     if (!parser.hadError)
     {
@@ -652,7 +803,55 @@ typedef struct
 {
     uint8_t positional;
     uint8_t keyword;
+    uint8_t partCount;
+    uint16_t rawSlotCount;
+    bool hasUnpack;
+    uint8_t parts[UINT8_COUNT];
 } ArgInfo;
+
+static bool addArgPart(ArgInfo *info, ArgPartKind part, uint16_t rawSlots)
+{
+    if (info->partCount >= UINT8_COUNT)
+    {
+        error("Can't have more than 255 argument parts");
+        return false;
+    }
+    if (info->rawSlotCount > UINT16_MAX - rawSlots)
+    {
+        error("Call argument payload is too large");
+        return false;
+    }
+    info->parts[info->partCount++] = (uint8_t)part;
+    info->rawSlotCount += rawSlots;
+    return true;
+}
+
+static void emitCallFromArgInfo(ArgInfo args, bool isSelf)
+{
+    if (args.hasUnpack)
+    {
+        emitByte(OP_CALL_UNPACK);
+        emitByte(args.partCount);
+        emitByte((uint8_t)(args.rawSlotCount >> 8));
+        emitByte((uint8_t)(args.rawSlotCount & 0xFF));
+        for (uint8_t i = 0; i < args.partCount; i++)
+            emitByte(args.parts[i]);
+        return;
+    }
+
+    if (args.keyword > 0)
+    {
+        emitByte(OP_CALL_KW);
+        emitByte(args.positional);
+        emitByte(args.keyword);
+    }
+    else
+    {
+        current->lastCallOffset = currentChunk()->size;
+        current->lastCallIsSelf = isSelf;
+        emitBytes(OP_CALL, args.positional);
+    }
+}
 
 static void addFunctionParamName(ObjFunction *function, Token *paramName)
 {
@@ -698,15 +897,53 @@ static void setFunctionLocalName(ObjFunction *function, int slotIndex, Token *lo
 
 static ArgInfo argList()
 {
-    ArgInfo info = {.positional = 0, .keyword = 0};
+    ArgInfo info = {
+        .positional = 0,
+        .keyword = 0,
+        .partCount = 0,
+        .rawSlotCount = 0,
+        .hasUnpack = false,
+    };
     bool hasKeywordArgs = false;
     if (!check(TOKEN_RIGHT_PAREN))
     {
         do
         {
+            if (match(TOKEN_STAR))
+            {
+                if (hasKeywordArgs)
+                    error("Positional arguments must come before keyword arguments.");
+
+                expression();
+                info.hasUnpack = true;
+                if (!addArgPart(&info, ARG_PART_POSITIONAL_UNPACK, 1))
+                    break;
+                continue;
+            }
+
+            if (match(TOKEN_STAR_STAR))
+            {
+                hasKeywordArgs = true;
+                expression();
+                info.hasUnpack = true;
+                if (!addArgPart(&info, ARG_PART_KEYWORD_UNPACK, 1))
+                    break;
+                continue;
+            }
+
             if (match(TOKEN_AT))
             {
                 hasKeywordArgs = true;
+
+                if (match(TOKEN_STAR_STAR))
+                {
+                    expression();
+                    info.hasUnpack = true;
+                    if (!addArgPart(&info, ARG_PART_KEYWORD_UNPACK, 1))
+                        break;
+                    continue;
+                }
+
                 consume(TOKEN_IDENTIFIER, "Expect keyword argument name after '@'.");
                 Token keywordName = parser.prev;
                 if (!match(TOKEN_EQUAL) && !match(TOKEN_DOUBLE_COLON))
@@ -718,6 +955,8 @@ static ArgInfo argList()
                 if (info.keyword == 255)
                     error("Can't have more than 255 keyword arguments");
                 info.keyword++;
+                if (!addArgPart(&info, ARG_PART_KEYWORD, 2))
+                    break;
                 continue;
             }
 
@@ -728,6 +967,8 @@ static ArgInfo argList()
             if (info.positional == 255)
                 error("Can't have more than 255 arguments");
             info.positional++;
+            if (!addArgPart(&info, ARG_PART_POSITIONAL, 1))
+                break;
         } while (match(TOKEN_COMMA));
     }
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments");
@@ -742,10 +983,7 @@ static void call(bool canAssign)
     {
         Chunk *chunk = currentChunk();
         int sz = chunk->size;
-        if (sz >= 2
-            && chunk->code[sz - 2] == OP_GET_GLOBAL
-            && current->type == TYPE_FUNCTION
-            && current->function->name != NULL)
+        if (sz >= 2 && chunk->code[sz - 2] == OP_GET_GLOBAL && current->type == TYPE_FUNCTION && current->function->name != NULL)
         {
             uint16_t constIdx = chunk->code[sz - 1];
             Value nameVal = chunk->constants.values[constIdx];
@@ -755,18 +993,7 @@ static void call(bool canAssign)
     }
 
     ArgInfo args = argList();
-    if (args.keyword > 0)
-    {
-        emitByte(OP_CALL_KW);
-        emitByte(args.positional);
-        emitByte(args.keyword);
-    }
-    else
-    {
-        current->lastCallOffset = currentChunk()->size;
-        current->lastCallIsSelf = isSelf;
-        emitBytes(OP_CALL, args.positional);
-    }
+    emitCallFromArgInfo(args, isSelf);
 }
 
 static void dot(bool canAssign)
@@ -782,6 +1009,14 @@ static void dot(bool canAssign)
     else if (canAssign && match(TOKEN_LEFT_PAREN))
     {
         ArgInfo args = argList();
+
+        if (args.hasUnpack)
+        {
+            error("Argument unpacking in method calls is not supported yet.");
+            emitBytes(OP_INVOKE, name);
+            emitByte(args.positional);
+            return;
+        }
 
         emitBytes(args.keyword > 0 ? OP_INVOKE_KW : OP_INVOKE, name);
         emitByte(args.positional);
@@ -852,8 +1087,32 @@ static void literal(bool canAssign)
 
 static void grouping(bool canAssign)
 {
+    int itemCount = 0;
+
+    if (match(TOKEN_RIGHT_PAREN))
+    {
+        emitBytes(OP_BUILD_TUPLE, (uint8_t)0);
+        return;
+    }
+
     expression();
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
+    itemCount = 1;
+
+    if (!match(TOKEN_COMMA))
+    {
+        consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression");
+        return;
+    }
+
+    while (!check(TOKEN_RIGHT_PAREN))
+    {
+        expression();
+        itemCount++;
+        if (!match(TOKEN_COMMA))
+            break;
+    }
+    consume(TOKEN_RIGHT_PAREN, "Expect ')' after tuple expression");
+    emitBytes(OP_BUILD_TUPLE, (uint8_t)itemCount);
 }
 
 static void expression()
@@ -887,10 +1146,7 @@ static void returnStatement()
         // and it was a self-recursive call, patch it to OP_TAIL_CALL.
         {
             Chunk *chunk = currentChunk();
-            if (current->lastCallOffset >= 0
-                && current->lastCallOffset == chunk->size - 2
-                && chunk->code[current->lastCallOffset] == OP_CALL
-                && current->lastCallIsSelf)
+            if (current->lastCallOffset >= 0 && current->lastCallOffset == chunk->size - 2 && chunk->code[current->lastCallOffset] == OP_CALL && current->lastCallIsSelf)
             {
                 chunk->code[current->lastCallOffset] = OP_TAIL_CALL;
             }
@@ -962,8 +1218,7 @@ static void yieldExpr(bool canAssign)
     }
 
     current->hasYield = true;
-    if (check(TOKEN_SEMICOLON) || check(TOKEN_RIGHT_PAREN) || check(TOKEN_RIGHT_BRACE)
-        || check(TOKEN_EOF) || check(TOKEN_COMMA))
+    if (check(TOKEN_SEMICOLON) || check(TOKEN_RIGHT_PAREN) || check(TOKEN_RIGHT_BRACE) || check(TOKEN_EOF) || check(TOKEN_COMMA))
         emitByte(OP_NIL);
     else
         parsePrecedence(PREC_ASSIGNMENT);
@@ -1101,17 +1356,7 @@ static void function(FunctionType type)
     {
         consume(TOKEN_LEFT_PAREN, "Expect ')' after parameters.");
         ArgInfo args = argList();
-        if (args.keyword > 0)
-        {
-            emitByte(OP_CALL_KW);
-            emitByte(args.positional);
-            emitByte(args.keyword);
-        }
-        else
-        {
-            current->lastCallOffset = currentChunk()->size;
-            emitBytes(OP_CALL, args.positional);
-        }
+        emitCallFromArgInfo(args, false);
     }
 
     for (int i = 0; i < function->upValueCount; i++)
@@ -1167,6 +1412,16 @@ static void super_(bool canAssign)
     if (match(TOKEN_LEFT_PAREN))
     {
         ArgInfo args = argList();
+
+        if (args.hasUnpack)
+        {
+            error("Argument unpacking in super calls is not supported yet.");
+            namedVariable(synthToken("super"), false);
+            emitBytes(OP_SUPER_INVOKE, name);
+            emitByte(args.positional);
+            return;
+        }
+
         namedVariable(synthToken("super"), false);
         emitBytes(args.keyword > 0 ? OP_SUPER_INVOKE_KW : OP_SUPER_INVOKE, name);
         emitByte(args.positional);
@@ -1253,6 +1508,66 @@ static void funDeclaration()
 
 static void varDeclaration()
 {
+    if (match(TOKEN_LEFT_PAREN))
+    {
+        UnpackTarget targets[UINT8_COUNT];
+        int targetCount = 0;
+        int restIndex = -1;
+        int firstLocal = current->localCount;
+
+        if (check(TOKEN_RIGHT_PAREN))
+            error("Unpack declaration needs at least one target.");
+
+        while (!check(TOKEN_RIGHT_PAREN) && !check(TOKEN_EOF))
+        {
+            bool isRest = match(TOKEN_STAR);
+            consume(TOKEN_IDENTIFIER, isRest ? "Expect identifier after '*' in unpack target." : "Expect identifier in unpack target.");
+
+            if (targetCount == UINT8_COUNT)
+                error("Too many unpack targets.");
+
+            if (isRest)
+            {
+                if (restIndex != -1)
+                    error("Only one '*' unpack target is allowed.");
+                restIndex = targetCount;
+            }
+
+            targets[targetCount].name = parser.prev;
+            targets[targetCount].isRest = isRest;
+            targets[targetCount].global = declareVariableFromToken(parser.prev, false);
+            targetCount++;
+
+            if (!match(TOKEN_COMMA))
+                break;
+
+            if (isRest && !check(TOKEN_RIGHT_PAREN))
+                error("'*' unpack target must be the last target.");
+        }
+
+        consume(TOKEN_RIGHT_PAREN, "Expect ')' after unpack declaration targets.");
+        consume(TOKEN_EQUAL, "Expect '=' after unpack declaration targets.");
+
+        expression();
+        emitByte(OP_UNPACK);
+        emitByte((uint8_t)targetCount);
+        emitByte(restIndex >= 0 ? (uint8_t)(restIndex + 1) : (uint8_t)0);
+
+        if (current->scopeDepth > 0)
+        {
+            for (int i = firstLocal; i < current->localCount; i++)
+                current->locals[i].depth = current->scopeDepth;
+        }
+        else
+        {
+            for (int i = targetCount - 1; i >= 0; i--)
+                emitBytes(OP_DEF_GLOBAL, targets[i].global);
+        }
+
+        match(TOKEN_SEMICOLON);
+        return;
+    }
+
     uint16_t global = parseVariable("Expect variable name", false);
 
     if (match(TOKEN_EQUAL))
@@ -1805,6 +2120,11 @@ static void statement()
         breakStatement();
     else if (match(TOKEN_TRY))
         enterTryCatch();
+    else if (check(TOKEN_LEFT_PAREN) && looksLikeUnpackAssignmentStart())
+    {
+        consume(TOKEN_LEFT_PAREN, "Expect '(' to start unpack assignment.");
+        unpackAssignmentStatementAfterLeftParen();
+    }
     else if (match(TOKEN_LEFT_BRACE))
     {
         beginScope();

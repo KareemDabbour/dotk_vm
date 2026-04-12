@@ -30,7 +30,8 @@ typedef struct _CallFrame
 } CallFrame;
 
 /* Per-thread execution state for the GVL-based threading model. */
-typedef enum {
+typedef enum
+{
     THREAD_CREATED,
     THREAD_RUNNING,
     THREAD_FINISHED,
@@ -41,6 +42,9 @@ typedef struct DotKThread
 {
     pthread_t handle;
     DotKThreadStatus status;
+    bool joined;
+    bool cancelled;
+    bool usesWorkerPool;
 
     /* Per-thread VM state (swapped into global vm when running) */
     CallFrame frames[FRAMES_MAX];
@@ -58,11 +62,18 @@ typedef struct DotKThread
     /* Result after completion */
     Value result;
     ObjString *errorMsg;
+    ObjForeign *ownerObj;
 
     /* Synchronization */
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } DotKThread;
+
+typedef struct ImportSourceNode
+{
+    char *source;
+    struct ImportSourceNode *next;
+} ImportSourceNode;
 
 typedef struct _VM
 {
@@ -71,6 +82,23 @@ typedef struct _VM
        currentThread always points to whoever is active. */
     DotKThread *mainThread;
     DotKThread *currentThread;
+    ObjForeign **activeThreadRoots;
+    int activeThreadRootCount;
+    int activeThreadRootCapacity;
+    pthread_t *asyncWorkers;
+    int asyncWorkerCount;
+    bool asyncPoolShutdown;
+    DotKThread **asyncTaskQueue;
+    int asyncTaskQueueCount;
+    int asyncTaskQueueCapacity;
+    int asyncTaskQueueMax;
+    int asyncActiveWorkers;
+    uint64_t asyncTasksSubmitted;
+    uint64_t asyncTasksCompleted;
+    uint64_t asyncTasksRejected;
+    pthread_mutex_t asyncTaskMutex;
+    pthread_cond_t asyncTaskCond;
+    pthread_cond_t asyncTaskNotFullCond;
     CallFrame frames[FRAMES_MAX];
     int frameCount;
     Value stack[STACK_MAX];
@@ -107,6 +135,7 @@ typedef struct _VM
     ObjString *clazzStr;
     ObjClass *stringClass;
     ObjClass *listClass;
+    ObjClass *tupleClass;
     ObjClass *mapClass;
     ObjClass *generatorClass;
     ObjClass *listIteratorClass;
@@ -148,8 +177,7 @@ typedef struct _VM
     int grayCount;
     int grayCapacity;
     Obj **grayStack;
-    int importCount;
-    char **importSources;
+    ImportSourceNode *importSources;
     bool gcDisabled;
     bool isInTryCatch;
     bool isRepl;
@@ -157,10 +185,11 @@ typedef struct _VM
     ObjString *lastErrorTrace;
     /* Monomorphic inline cache for method dispatch */
 #define IC_SIZE 1024
-    struct InlineCacheEntry {
-        uint8_t *ip;        /* bytecode IP that produced this entry */
-        ObjClass *klass;    /* cached class pointer */
-        Value method;       /* cached method value */
+    struct InlineCacheEntry
+    {
+        uint8_t *ip;     /* bytecode IP that produced this entry */
+        ObjClass *klass; /* cached class pointer */
+        Value method;    /* cached method value */
     } inlineCache[IC_SIZE];
 } VM;
 
@@ -199,8 +228,8 @@ void vmEnableDebugger(bool enabled);
 /* Blocking I/O helpers: save thread state + release GVL, reacquire + restore.
    Must be used in matched pairs around any blocking syscall in native functions.
    Returns an opaque handle that must be passed to vmEndBlockingIO(). */
-DotKThread *vmBeginBlockingIO(void);
-void vmEndBlockingIO(DotKThread *saved);
+DotKThread *vmBeginBlockingIO(const char *reason, const char *file, int line);
+void vmEndBlockingIO(DotKThread *saved, const char *reason, const char *file, int line);
 
 // This is so I can use the equal override in classes for the builtin Map class
 void markMap(Map *map);

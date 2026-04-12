@@ -112,6 +112,19 @@ bool valuesEqual(Value a, Value b)
         }
         return true;
     }
+    if (IS_TUPLE(a) && IS_TUPLE(b))
+    {
+        ObjTuple *aT = AS_TUPLE(a);
+        ObjTuple *bT = AS_TUPLE(b);
+        if (aT->count != bT->count)
+            return false;
+        for (int i = 0; i < aT->count; i++)
+        {
+            if (!valuesEqual(aT->items[i], bT->items[i]))
+                return false;
+        }
+        return true;
+    }
     if (IS_FOREIGN(a) && IS_FOREIGN(b))
         return AS_FOREIGN_PTR(a) == AS_FOREIGN_PTR(b);
 
@@ -148,6 +161,19 @@ bool valuesEqual(Value a, Value b)
             for (int i = 0; i < aL->count; i++)
             {
                 if (!valuesEqual(aL->items[i], bL->items[i]))
+                    return false;
+            }
+            return true;
+        }
+        if (IS_TUPLE(a) && IS_TUPLE(b))
+        {
+            ObjTuple *aT = AS_TUPLE(a);
+            ObjTuple *bT = AS_TUPLE(b);
+            if (aT->count != bT->count)
+                return false;
+            for (int i = 0; i < aT->count; i++)
+            {
+                if (!valuesEqual(aT->items[i], bT->items[i]))
                     return false;
             }
             return true;

@@ -80,6 +80,24 @@ ObjList *newListWithCapacity(int capacity)
     return list;
 }
 
+ObjTuple *newTupleWithCount(int count)
+{
+    ObjTuple *tuple = ALLOCATE_OBJ(ObjTuple, OBJ_TUPLE);
+    tuple->count = count;
+    tuple->capacity = count;
+    if (count > 0)
+    {
+        tuple->items = ALLOCATE(Value, count);
+        for (int i = 0; i < count; i++)
+            tuple->items[i] = NIL_VAL;
+    }
+    else
+    {
+        tuple->items = NULL;
+    }
+    return tuple;
+}
+
 ObjSlice *newSlice(int start, int end, int step)
 {
     ObjSlice *slice = ALLOCATE_OBJ(ObjSlice, OBJ_SLICE);
@@ -383,6 +401,24 @@ static void printList(ObjList *list, int depth)
     }
     printf("]");
 }
+
+static void printTuple(ObjTuple *tuple, int depth)
+{
+    printf("(");
+    for (int i = 0; i < tuple->count; i++)
+    {
+        if (IS_OBJ(tuple->items[i]) && AS_OBJ(tuple->items[i]) == &tuple->obj)
+            printf("(...)");
+        else
+            printValue(tuple->items[i], depth - 1);
+
+        if (i < tuple->count - 1)
+            printf(", ");
+    }
+    if (tuple->count == 1)
+        printf(",");
+    printf(")");
+}
 static void printSlice(ObjSlice *slice)
 {
     printf("Slice[%d:%d@%d]", slice->start, slice->end, slice->step);
@@ -538,6 +574,9 @@ void printObj(Value value, int depth)
     case OBJ_LIST:
         printList(AS_LIST(value), depth);
         break;
+    case OBJ_TUPLE:
+        printTuple(AS_TUPLE(value), depth);
+        break;
     case OBJ_SLICE:
         printSlice(AS_SLICE(value));
         break;
@@ -556,12 +595,12 @@ void printObj(Value value, int depth)
         if (o->klass != NULL)
         {
             if (depth > 0)
-            {                                    
+            {
                 if (o == NULL)
                 {
                     printf("%s@f<%p>::{}", FOREIGN_TYPES[o->type], o->ptr);
                     break;
-                }   
+                }
                 printf("%s@f<%p>:{", o->klass->name->chars, o);
 
                 printTable(o->fields, depth);
@@ -572,7 +611,7 @@ void printObj(Value value, int depth)
                 printf("%s@%p", o->klass->name->chars, (void *)o);
         }
         else
-        printf("%s f<%p>", FOREIGN_TYPES[o->type], o->ptr);
+            printf("%s f<%p>", FOREIGN_TYPES[o->type], o->ptr);
         break;
     }
     default:
