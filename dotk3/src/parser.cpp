@@ -35,10 +35,37 @@ std::vector<std::string> typeArguments(const std::string &type) {
     }
     arguments.push_back(type.substr(start, close - start)); return arguments;
 }
+std::string typeText(const TypeAst &type) {
+    if (!type) return {};
+    auto join = [](const std::vector<TypeAst> &items, const char *separator, bool wrapAlternatives) {
+        std::string result;
+        for (size_t index = 0; index < items.size(); index++) {
+            if (index) result += separator;
+            bool wrap = wrapAlternatives && (items[index]->kind == TypeKind::Union || items[index]->kind == TypeKind::Function);
+            result += wrap ? '(' + typeText(items[index]) + ')' : typeText(items[index]);
+        }
+        return result;
+    };
+    switch (type->kind) {
+    case TypeKind::Named: return type->items.empty() ? type->name : type->name + '[' + join(type->items, ",", false) + ']';
+    case TypeKind::Nullable: {
+        bool wrap = type->inner->kind == TypeKind::Union || type->inner->kind == TypeKind::Function;
+        return (wrap ? '(' + typeText(type->inner) + ')' : typeText(type->inner)) + '?';
+    }
+    case TypeKind::Union: return join(type->items, "|", false);
+    case TypeKind::Intersection: return '(' + join(type->items, "&", true) + ')';
+    case TypeKind::Function: return "fn(" + join(type->items, ",", false) + ")->" + typeText(type->inner);
+    case TypeKind::Wildcard:
+        if (type->bound == WildcardBound::None) return "?";
+        return std::string("? ") + (type->bound == WildcardBound::Extends ? "extends " : "super ") + typeText(type->inner);
+    }
+    return {};
+}
 namespace {
 class Parser {
     std::vector<Token> tokens;
     size_t position = 0;
+    bool speculativeTypes = false;
     const Token &peek(size_t distance = 0) const { return tokens.at(std::min(position + distance, tokens.size() - 1)); }
     bool at(const std::string &text) const { return (peek().kind == TokenKind::Name || peek().kind == TokenKind::Symbol) && peek().text == text; }
     bool take(const std::string &text) { if (!at(text)) return false; position++; return true; }
@@ -50,7 +77,7 @@ class Parser {
         if (peek().kind != TokenKind::Name) throw Error(peek().span, "Expected identifier");
         for (const char *keyword : {"let", "var", "fn", "if", "else", "while", "for", "in", "return", "yield", "throw", "defer",
                         "break", "continue", "try", "catch", "finally", "import", "from", "as", "export", "record", "struct", "class", "trait", "impl", "implements", "enum", "match",
-                        "true", "false", "null", "and", "or", "not", "static", "extends", "super", "constructor", "public", "protected", "private"})
+                        "true", "false", "null", "and", "or", "not", "is", "static", "extends", "super", "constructor", "public", "protected", "private"})
             if (peek().text == keyword) throw Error(peek().span, "Reserved word cannot be an identifier");
         return tokens[position++];
     }
@@ -65,25 +92,71 @@ class Parser {
         result->kind = std::move(kind); result->span = std::move(span); result->text = std::move(text);
         return result;
     }
-    std::string typeAtom() {
-        std::string result;
-        if (take("(")) { result = typeName(); consume(")"); }
-        else {
-            result = name().text;
-            while (take(".")) result += '.' + name().text;
-            if (take("[")) {
-                result += '['; result += typeName();
-                while (take(",")) { result += ','; result += typeName(); }
-                consume("]"); result += ']';
-            }
-        }
-        if (take("?")) result += '?';
-        return result;
+    std::string typeName(TypeAst *out = nullptr) {
+        TypeAst type = typeExpr(); if (out) *out = type;
+        return typeText(type);
     }
-    std::string typeName() {
-        std::string result = typeAtom(); bool intersection = false;
-        while (take("&")) { newlines(); result += '&' + typeAtom(); intersection = true; }
-        return intersection ? '(' + result + ')' : result;
+    static std::shared_ptr<TypeExpr> typeNode(TypeKind kind, const Span &span) {
+        auto result = std::make_shared<TypeExpr>(); result->kind = kind; result->span = span; return result;
+    }
+    void closeAngle() {
+        if (take(">")) return;
+        if (!speculativeTypes && at(">=")) { tokens[position].text = "="; tokens[position].span.offset++; tokens[position].span.column++; return; }
+        throw Error(peek().span, "Expected '>'");
+    }
+    TypeAst typeArgument() {
+        if (!at("?")) return typeExpr();
+        auto wildcard = typeNode(TypeKind::Wildcard, peek().span); position++;
+        if (take("extends")) { wildcard->bound = WildcardBound::Extends; wildcard->inner = typeExpr(); }
+        else if (take("super")) { wildcard->bound = WildcardBound::Super; wildcard->inner = typeExpr(); }
+        return wildcard;
+    }
+    std::vector<TypeAst> typeArgumentList() {
+        std::vector<TypeAst> arguments;
+        do { arguments.push_back(typeArgument()); } while (take(","));
+        closeAngle(); return arguments;
+    }
+    TypeAst typeAtom() {
+        Span span = peek().span; TypeAst base;
+        if (take("(")) { base = typeExpr(); consume(")"); }
+        else if (at("fn") && peek(1).text == "(") {
+            position += 2; auto function = typeNode(TypeKind::Function, span);
+            if (!at(")")) do { function->items.push_back(typeExpr()); } while (take(","));
+            consume(")"); consume("->"); function->inner = typeExpr(); base = function;
+        } else {
+            auto named = typeNode(TypeKind::Named, span); named->name = name().text;
+            while (take(".")) named->name += '.' + name().text;
+            if (take("[")) {
+                do { named->items.push_back(typeExpr()); } while (take(","));
+                consume("]");
+            } else if (take("<")) named->items = typeArgumentList();
+            base = named;
+        }
+        if (!take("?")) return base;
+        auto nullable = typeNode(TypeKind::Nullable, span); nullable->inner = base; return nullable;
+    }
+    TypeAst typeIntersection() {
+        Span span = peek().span; std::vector<TypeAst> members{typeAtom()};
+        while (take("&")) { newlines(); members.push_back(typeAtom()); }
+        if (members.size() == 1) return members[0];
+        auto result = typeNode(TypeKind::Intersection, span); result->items = std::move(members); return result;
+    }
+    TypeAst typeExpr() {
+        Span span = peek().span; std::vector<TypeAst> members{typeIntersection()};
+        while (take("|")) { newlines(); members.push_back(typeIntersection()); }
+        if (members.size() == 1) return members[0];
+        auto result = typeNode(TypeKind::Union, span); result->items = std::move(members); return result;
+    }
+    std::vector<TypeParam> typeParameters() {
+        std::vector<TypeParam> result;
+        if (!take("<")) return result;
+        do {
+            Token identifier = name(); TypeParam parameter; parameter.name = identifier.text;
+            if (take("extends")) parameter.bound = typeExpr();
+            for (const auto &previous : result) if (previous.name == parameter.name) throw Error(identifier.span, "Duplicate type parameter");
+            result.push_back(std::move(parameter));
+        } while (take(","));
+        closeAngle(); return result;
     }
     std::vector<Parameter> parameters() {
         std::vector<Parameter> result;
@@ -92,7 +165,7 @@ class Parser {
             newlines(); Parameter parameter;
             parameter.rest = take("*");
             Token identifier = name(); parameter.name = identifier.text;
-            if (take(":")) parameter.type = typeName();
+            if (take(":")) parameter.type = typeName(&parameter.typeExpr);
             if (take("=")) parameter.defaultValue = expression();
             for (const auto &previous : result)
                 if (previous.name == parameter.name) throw Error(identifier.span, "Duplicate parameter");
@@ -105,8 +178,9 @@ class Parser {
     }
     Ast function(const Span &span, std::string identifier = "") {
         Ast result = node("function", span, std::move(identifier));
+        result->typeParams = typeParameters();
         result->parameters = parameters();
-        if (take("->")) result->type = typeName();
+        if (take("->")) result->type = typeName(&result->typeExpr);
         if (take("=>")) {
             Ast body = node("block", span), returned = node("return", span);
             body->needsScope = false;
@@ -144,25 +218,30 @@ class Parser {
         if (take("let") || take("var")) {
             bool mutableBinding = tokens[position - 1].text == "var";
             result = node("binding", start.span, name().text); result->mutableBinding = mutableBinding;
-            if (take(":")) result->type = typeName();
+            if (take(":")) result->type = typeName(&result->typeExpr);
             consume("="); result->children.push_back(expression());
         } else if (at("fn") && peek(1).kind == TokenKind::Name) {
             consume("fn"); result = function(start.span, name().text);
+        } else if (at("type") && peek(1).kind == TokenKind::Name && (peek(2).text == "<" || peek(2).text == "=")) {
+            consume("type"); result = node("type_alias", start.span, name().text);
+            result->typeParams = typeParameters(); consume("=");
+            result->type = typeName(&result->typeExpr);
         }
         else if (take("record") || take("class")) {
             bool classDeclaration = tokens[position - 1].text == "class";
             result = node(classDeclaration ? "class" : "record", start.span, name().text);
+            result->typeParams = typeParameters();
             if (take("extends")) {
                 if (!classDeclaration) throw Error(start.span, "Only classes support inheritance");
-                result->baseClass = typeName();
-                if (result->baseClass.find_first_of("[?&(") != std::string::npos) throw Error(start.span, "extends requires one qualified class name");
+                result->baseClass = typeName(&result->typeExpr);
+                if (result->typeExpr->kind != TypeKind::Named) throw Error(start.span, "extends requires one qualified class name");
             }
             if (take("implements")) do {
-                newlines(); std::string trait = typeName();
-                if (trait.find_first_of("[?&(") != std::string::npos) throw Error(start.span, "implements requires plain qualified trait names");
+                newlines(); TypeAst traitType; std::string trait = typeName(&traitType);
+                if (traitType->kind != TypeKind::Named) throw Error(start.span, "implements requires plain qualified trait names");
                 if (std::find(result->names.begin(), result->names.end(), trait) != result->names.end())
                     throw Error(start.span, "Duplicate implemented trait '" + trait + "'");
-                result->names.push_back(trait); newlines();
+                result->names.push_back(trait); result->typeExprs.push_back(traitType); newlines();
             } while (take(","));
             consume("{"); separators();
             result->documentation = docstring();
@@ -194,7 +273,7 @@ class Parser {
                     identifier = name().text;
                     Ast field = node("binding", location.span, identifier); field->staticMember = true; field->mutableBinding = mutableMember;
                     field->visibility = visibility;
-                    consume(":"); field->type = typeName(); consume("="); field->children.push_back(expression());
+                    consume(":"); field->type = typeName(&field->typeExpr); consume("="); field->children.push_back(expression());
                     result->children.push_back(field);
                 } else {
                     Parameter field;
@@ -203,7 +282,7 @@ class Parser {
                         if (take("var")) field.mutableBinding = true;
                         else consume("let");
                     }
-                    identifier = field.name = name().text; consume(":"); field.type = typeName();
+                    identifier = field.name = name().text; consume(":"); field.type = typeName(&field.typeExpr);
                     if (take("=")) field.defaultValue = expression();
                     result->parameters.push_back(field);
                 }
@@ -216,12 +295,13 @@ class Parser {
             }
             consume("}");
         } else if (take("trait")) {
-            result = node("trait", start.span, name().text); consume("{"); separators();
+            result = node("trait", start.span, name().text); result->typeParams = typeParameters(); consume("{"); separators();
             result->documentation = docstring();
             while (!at("}")) {
                 Token location = consume("fn"); Ast signature = node("signature", location.span, name().text);
                 if (signature->text == "self" || signature->text == "init") throw Error(location.span, "Reserved trait lifecycle member");
-                signature->parameters = parameters(); consume("->"); signature->type = typeName();
+                signature->typeParams = typeParameters();
+                signature->parameters = parameters(); consume("->"); signature->type = typeName(&signature->typeExpr);
                 for (const auto &parameter : signature->parameters)
                     if (parameter.name == "self" || parameter.type.empty() || parameter.rest || parameter.defaultValue)
                         throw Error(location.span, "Trait parameters require explicit types, without self, defaults or rest");
@@ -261,12 +341,12 @@ class Parser {
             }
             consume("}");
         } else if (take("enum")) {
-            result = node("enum", start.span, name().text); consume("{"); separators();
+            result = node("enum", start.span, name().text); result->typeParams = typeParameters(); consume("{"); separators();
             result->documentation = docstring();
             while (!at("}")) {
                 Ast variant = node("variant", peek().span, name().text);
                 if (take("(")) {
-                    if (!at(")")) do { variant->names.push_back(typeName()); } while (take(","));
+                    if (!at(")")) do { TypeAst payload; variant->names.push_back(typeName(&payload)); variant->typeExprs.push_back(payload); } while (take(","));
                     consume(")");
                 }
                 for (const auto &previous : result->children)
@@ -347,7 +427,7 @@ class Parser {
             }
             result->children.push_back(left);
         }
-        if (exported && result->kind != "binding" && result->kind != "function" && result->kind != "record" && result->kind != "class" && result->kind != "trait" && result->kind != "enum")
+        if (exported && result->kind != "binding" && result->kind != "function" && result->kind != "record" && result->kind != "class" && result->kind != "trait" && result->kind != "enum" && result->kind != "type_alias")
             throw Error(start.span, "Only declarations can be exported");
         result->exported = exported; return result;
     }
@@ -356,7 +436,7 @@ class Parser {
         if (operation == "||" || operation == "or") return 2;
         if (operation == "&&" || operation == "and") return 3;
         if (operation == "==" || operation == "!=") return 4;
-        if (operation == "<" || operation == ">" || operation == "<=" || operation == ">=") return 5;
+        if (operation == "<" || operation == ">" || operation == "<=" || operation == ">=" || operation == "is") return 5;
         if (operation == "+" || operation == "-") return 6;
         if (operation == "*" || operation == "/" || operation == "//" || operation == "%") return 7;
         if (operation == "**") return 8;
@@ -367,7 +447,12 @@ class Parser {
         for (;;) {
             int priority = peek().kind == TokenKind::Name || peek().kind == TokenKind::Symbol ? precedence(peek().text) : 0;
             if (priority < minimum) break;
-            Token operation = tokens[position++]; newlines();
+            Token operation = tokens[position++];
+            if (operation.text == "is") {
+                Ast test = node("is", operation.span, "is"); test->children = {left};
+                test->type = typeName(&test->typeExpr); left = test; continue;
+            }
+            newlines();
             Ast binary = node("binary", operation.span, operation.text);
             binary->children = {left, expression(operation.text == "**" ? priority : priority + 1)}; left = binary;
         }
@@ -439,7 +524,16 @@ class Parser {
                 } else result = first;
                 consume(")");
             }
-        } else if (token.kind == TokenKind::Name) { position++; result = node("name", token.span, token.text); }
+        } else if (token.kind == TokenKind::Name) {
+            position++; result = node("name", token.span, token.text);
+            if (at("<")) {
+                size_t saved = position; position++; speculativeTypes = true;
+                try {
+                    auto arguments = typeArgumentList(); speculativeTypes = false;
+                    if (at("(") || at(".")) result->typeArgs = std::move(arguments); else position = saved;
+                } catch (const Error &) { speculativeTypes = false; position = saved; }
+            }
+        }
         else throw Error(token.span, "Expected expression");
         for (;;) {
             if (take("(")) {
@@ -464,6 +558,15 @@ class Parser {
                     result = slice;
                 } else { Ast index = node("index", result->span); index->children = {result, first}; result = index; }
                 consume("]");
+            } else if (take("?.")) {
+                Token member = name(); Ast access = node("member", member.span, member.text);
+                access->safe = true; access->children.push_back(result); result = access;
+            } else if (at("!") && peek().kind == TokenKind::Symbol) {
+                Token operation = tokens[position++]; Ast assertion = node("nonnull", operation.span, "!");
+                assertion->children.push_back(result); result = assertion;
+            } else if (take("as")) {
+                Ast cast = node("cast", tokens[position - 1].span, "as"); cast->children.push_back(result);
+                cast->type = typeName(&cast->typeExpr); result = cast;
             } else break;
         }
         return result;

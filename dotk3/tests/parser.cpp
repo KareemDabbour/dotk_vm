@@ -75,7 +75,7 @@ int main() {
     assert(defaults->children[0]->kind == "function" && defaults->children[0]->documentation == "A default name.");
     auto recordMethods = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"record-methods.k3", "record Point implements Named { x: Int, y: Int = x; fn name() -> String { return 'point' } }"}))->children[0];
     assert(recordMethods->kind == "record" && recordMethods->names[0] == "Named" && recordMethods->children[0]->text == "name");
-    for (const char *invalid : {"trait Bad { fn length() }", "trait Bad { fn f(value) -> Int }", "trait Bad { fn f(self: Int) -> Int }", "trait Bad { fn f(value: Int = 0) -> Int }", "impl T for C { fn f(self) {} }", "export impl T for C {}", "class C implements {}", "class C implements T, T {}", "class C implements T? {}", "class C implements T[Int] {}", "class C implements T, {}", "let implements = 1"}) {
+    for (const char *invalid : {"trait Bad { fn length() }", "trait Bad { fn f(value) -> Int }", "trait Bad { fn f(self: Int) -> Int }", "trait Bad { fn f(value: Int = 0) -> Int }", "impl T for C { fn f(self) {} }", "export impl T for C {}", "class C implements {}", "class C implements T, T {}", "class C implements T? {}", "class C implements T, {}", "let implements = 1"}) {
         rejected = false;
         try { dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"invalid-trait.k3", invalid})); }
         catch (const dk3::Error &) { rejected = true; }
@@ -87,5 +87,61 @@ int main() {
         catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
+    auto parseSource = [](const char *text) { return dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"static.k3", text})); };
+    auto rejects = [&](const char *text) { try { parseSource(text); } catch (const dk3::Error &) { return true; } return false; };
+
+    auto generics = parseSource("fn first<T extends Comparable, U>(items: List<T>, pick: fn(T, Int) -> U?) -> T? { return null }");
+    auto genericFunction = generics->children[0];
+    assert(genericFunction->typeParams.size() == 2 && genericFunction->typeParams[0].name == "T" && genericFunction->typeParams[0].bound->name == "Comparable");
+    assert(genericFunction->parameters[0].typeExpr->kind == dk3::TypeKind::Named && genericFunction->parameters[0].typeExpr->items[0]->name == "T");
+    assert(genericFunction->parameters[0].type == "List[T]");
+    auto functionType = genericFunction->parameters[1].typeExpr;
+    assert(functionType->kind == dk3::TypeKind::Function && functionType->items.size() == 2 && functionType->inner->kind == dk3::TypeKind::Nullable);
+    assert(genericFunction->typeExpr->kind == dk3::TypeKind::Nullable && genericFunction->type == "T?");
+
+    auto unions = parseSource("let value: Int | String | Null = 1\nlet nested: List<Map<String, Int | Float>>= []\nlet either: (Int | String)? = null");
+    assert(unions->children[0]->typeExpr->kind == dk3::TypeKind::Union && unions->children[0]->typeExpr->items.size() == 3);
+    assert(unions->children[1]->typeExpr->items[0]->items[1]->kind == dk3::TypeKind::Union);
+    assert(unions->children[2]->typeExpr->kind == dk3::TypeKind::Nullable && unions->children[2]->typeExpr->inner->kind == dk3::TypeKind::Union);
+    assert(unions->children[2]->type == "(Int|String)?");
+
+    auto wildcards = parseSource("fn total(values: List<? extends Number>, sink: Map<?, ? super Int>, any: List<?>) -> Int { return 0 }");
+    auto bounded = wildcards->children[0]->parameters[0].typeExpr->items[0];
+    assert(bounded->kind == dk3::TypeKind::Wildcard && bounded->bound == dk3::WildcardBound::Extends && bounded->inner->name == "Number");
+    assert(wildcards->children[0]->parameters[1].typeExpr->items[1]->bound == dk3::WildcardBound::Super);
+    assert(wildcards->children[0]->parameters[2].typeExpr->items[0]->bound == dk3::WildcardBound::None);
+
+    auto declarations = parseSource("class Stack<T> implements Iterable<T> { var items: List<T> = [] }\nrecord Pair<A, B> { first: A, second: B }\nenum Option<T> { Some(T), None }\ntrait Source<T> { fn next() -> T? }\ntype Point = Tuple<Int, Int>\nexport type Pair2<T> = Tuple<T, T>\nclass Node extends Base<Int> {}");
+    assert(declarations->children[0]->typeParams.size() == 1 && declarations->children[0]->typeExprs[0]->items[0]->name == "T");
+    assert(declarations->children[1]->typeParams.size() == 2 && declarations->children[2]->typeParams[0].name == "T" && declarations->children[3]->typeParams[0].name == "T");
+    assert(declarations->children[4]->kind == "type_alias" && declarations->children[4]->text == "Point" && declarations->children[4]->typeExpr->items.size() == 2);
+    assert(declarations->children[5]->kind == "type_alias" && declarations->children[5]->exported && declarations->children[5]->typeParams.size() == 1);
+    assert(declarations->children[6]->baseClass == "Base[Int]" && declarations->children[6]->typeExpr->name == "Base");
+
+    auto instantiation = parseSource("let a = first<Int>(items)\nlet b = Stack<Int>()\nlet c = List<Int>.of(1)\nlet d = x < y\nlet e = i < n && n > (j)\nlet f = (a < b) == (c > d)");
+    assert(instantiation->children[0]->children[0]->kind == "call" && instantiation->children[0]->children[0]->children[0]->typeArgs.size() == 1);
+    assert(instantiation->children[1]->children[0]->children[0]->typeArgs[0]->name == "Int");
+    assert(instantiation->children[2]->children[0]->kind == "call" && instantiation->children[2]->children[0]->children[0]->children[0]->typeArgs.size() == 1);
+    assert(instantiation->children[3]->children[0]->kind == "binary" && instantiation->children[3]->children[0]->text == "<");
+    assert(instantiation->children[4]->children[0]->kind == "binary" && instantiation->children[4]->children[0]->text == "&&");
+    assert(instantiation->children[5]->children[0]->kind == "binary" && instantiation->children[5]->children[0]->text == "==");
+
+    auto operators = parseSource("let a = value is String && other is List<Int>?\nlet b = (value as Int) + 1\nlet c = value as Map<String, Int>\nlet d = user?.name\nlet e = maybe!\nlet f = user?.address?.city!.length()\nlet g = x != y");
+    auto conjunction = operators->children[0]->children[0];
+    assert(conjunction->kind == "binary" && conjunction->text == "&&" && conjunction->children[0]->kind == "is" && conjunction->children[0]->typeExpr->name == "String");
+    assert(conjunction->children[1]->kind == "is" && conjunction->children[1]->typeExpr->kind == dk3::TypeKind::Nullable);
+    assert(operators->children[1]->children[0]->children[0]->kind == "cast" && operators->children[1]->children[0]->children[0]->typeExpr->name == "Int");
+    assert(operators->children[2]->children[0]->kind == "cast" && operators->children[2]->children[0]->typeExpr->items.size() == 2);
+    assert(operators->children[3]->children[0]->kind == "member" && operators->children[3]->children[0]->safe);
+    assert(operators->children[4]->children[0]->kind == "nonnull");
+    auto chain = operators->children[5]->children[0];
+    assert(chain->kind == "call" && chain->children[0]->kind == "member" && chain->children[0]->children[0]->kind == "nonnull");
+    assert(chain->children[0]->children[0]->children[0]->safe && operators->children[6]->children[0]->text == "!=");
+
+    auto functionTypeAlias = parseSource("type Callback = fn(Int) -> Int\nlet type = 1\nlet is_ok = type\nSystem.print(Reflection.type(1))");
+    assert(functionTypeAlias->children[0]->typeExpr->kind == dk3::TypeKind::Function && functionTypeAlias->children[1]->kind == "binding");
+    for (const char *invalid : {"let x: List<Int = []", "let x: Int | = 1", "fn f<T, T>() {}", "fn f<>() {}", "let x: List<? extends> = []", "let x = y as", "let is = 1", "class C extends Base<Int>? {}", "type = 1 2", "type Alias<T> Tuple<T, T>"})
+        assert(rejects(invalid));
+
     std::cout << "parser: PASS\n";
 }

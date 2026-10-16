@@ -48,6 +48,26 @@ std::string diagnose(const Error &error, bool color = false);
 struct Node;
 using Ast = std::shared_ptr<Node>;
 enum class Visibility { Public, Protected, Private };
+
+enum class TypeKind { Named, Nullable, Union, Intersection, Function, Wildcard };
+enum class WildcardBound { None, Extends, Super };
+// Named: name + items (type arguments). Nullable: inner. Union/Intersection: items.
+// Function: items (parameters) + inner (result). Wildcard: bound + inner (the bound type, if any).
+struct TypeExpr;
+using TypeAst = std::shared_ptr<const TypeExpr>;
+struct TypeExpr {
+    TypeKind kind = TypeKind::Named;
+    std::string name;
+    std::vector<TypeAst> items;
+    TypeAst inner;
+    WildcardBound bound = WildcardBound::None;
+    Span span;
+};
+struct TypeParam {
+    std::string name;
+    TypeAst bound;
+};
+
 struct Parameter {
     std::string name;
     std::string type;
@@ -55,6 +75,7 @@ struct Parameter {
     bool rest = false;
     bool mutableBinding = false;
     Visibility visibility = Visibility::Public;
+    TypeAst typeExpr = nullptr;
 };
 struct Node {
     std::string kind;
@@ -70,13 +91,19 @@ struct Node {
     bool builtinCollection = false;
     bool constructor = false;
     bool needsScope = true;
+    bool safe = false;
     Visibility visibility = Visibility::Public;
     std::string baseClass;
+    TypeAst typeExpr;
+    std::vector<TypeAst> typeArgs;
+    std::vector<TypeAst> typeExprs;
+    std::vector<TypeParam> typeParams;
     std::vector<Ast> children;
     std::vector<std::string> names;
     std::vector<Parameter> parameters;
 };
 Ast parse(std::shared_ptr<const Source> source);
+std::string typeText(const TypeAst &type);
 std::vector<std::string> typeArguments(const std::string &type);
 std::vector<std::string> typeIntersections(const std::string &type);
 

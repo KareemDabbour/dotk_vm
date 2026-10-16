@@ -130,7 +130,7 @@ std::vector<Token> lex(std::shared_ptr<const Source> source) {
         } else {
             text += advance();
             std::string pair = text + peek();
-            for (const char *compound : {"==", "!=", "<=", ">=", "->", "=>", "&&", "||", "//", "**", "+=", "-=", "*=", "/=", "??", "++", "--"}) {
+            for (const char *compound : {"==", "!=", "<=", ">=", "->", "=>", "&&", "||", "//", "**", "?.", "+=", "-=", "*=", "/=", "??", "++", "--"}) {
                 if (pair == compound) { text += advance(); break; }
             }
             if (std::string("(){}[],:;.?+-*/%!=<>&|").find(text[0]) == std::string::npos)
