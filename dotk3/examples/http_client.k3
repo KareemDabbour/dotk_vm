@@ -1,0 +1,20 @@
+fn request(host: String, port: Int, path: String) -> Null {
+    let client = Sockets.connect(host, port, 1000)
+    defer Sockets.close(client)
+    Http.writeRequest(client, "GET", path)
+    let response = Http.readResponse(client)
+    if response == null { throw Error(Error.Kind.IO, "No HTTP response") }
+    System.print(response["status"])
+    IO.write(response["body"])
+}
+
+if System.args.length() == 0 { System.print("http_client: use --net http_client.k3 127.0.0.1 8080 /health") }
+else {
+    if System.args.length() != 3 { throw Error(Error.Kind.Value, "Expected host, port and path") }
+    request(System.args[0], Json.parse(System.args[1]), System.args[2])
+}
+
+
+"https://api.ofsl.ca/rest/v1/weekly_schedules"
+"?select=*&league_id=eq.188&week_number=eq.5&order=tier_number.asc"
+"eyJhbGciOiJIUzI1NiIsImtpZCI6InlGcTJUN2V3VUxraEN4VWgiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2FpanVoYWxvd3dqYmNjeWpybGdmLnN1cGFiYXNlLmNvL2F1dGgvdjEiLCJzdWIiOiI5YjMyOTUyYS0wMTk3LTQxZjMtOWJjYy1jMTJlMDE3ZGZkODEiLCJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoxNzkxOTkzMzA4LCJpYXQiOjE3OTE5ODk3MDgsImVtYWlsIjoia2FyZWVtLmRhYmJvdXI0MUBnbWFpbC5jb20iLCJwaG9uZSI6IiIsImFwcF9tZXRhZGF0YSI6eyJwcm92aWRlciI6Imdvb2dsZSIsInByb3ZpZGVycyI6WyJnb29nbGUiXX0sInVzZXJfbWV0YWRhdGEiOnsiYXZhdGFyX3VybCI6Imh0dHBzOi8vbGgzLmdvb2dsZXVzZXJjb250ZW50LmNvbS9hL0FDZzhvY0lMZ1BiQ0NQVEd5S2ZGbmVNMEc2dXpoS1htc0xJOTBEOS11OHU5VE50VkNrN0ZwaHcxPXM5Ni1jIiwiZW1haWwiOiJrYXJlZW0uZGFiYm91cjQxQGdtYWlsLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJmdWxsX25hbWUiOiJLYXJlZW0gRGFiYm91ciIsImlzcyI6Imh0dHBzOi8vYWNjb3VudHMuZ29vZ2xlLmNvbSIsIm5hbWUiOiJLYXJlZW0gRGFiYm91ciIsInBob25lX3ZlcmlmaWVkIjpmYWxzZSwicGljdHVyZSI6Imh0dHBzOi8vbGgzLmdvb2dsZXVzZXJjb250ZW50LmNvbS9hL0FDZzhvY0lMZ1BiQ0NQVEd5S2ZGbmVNMEc2dXpoS1htc0xJOTBEOS11OHU5VE50VkNrN0ZwaHcxPXM5Ni1jIiwicHJvdmlkZXJfaWQiOiIxMDE5NTgwMDQwMzY0NzA0NjUxNzciLCJzdWIiOiIxMDE5NTgwMDQwMzY0NzA0NjUxNzcifSwicm9sZSI6ImF1dGhlbnRpY2F0ZWQiLCJhYWwiOiJhYWwxIiwiYW1yIjpbeyJtZXRob2QiOiJvYXV0aCIsInRpbWVzdGFtcCI6MTc5MTI5NzcxNH1dLCJzZXNzaW9uX2lkIjoiZTgwNTM1MGQtOTYyYS00OWY0LWJjZmItYWMwODFiNzkwYmRhIiwiaXNfYW5vbnltb3VzIjpmYWxzZX0.fdU4C96TgF1DhmBEOOFImPfRotRx-VW6hzG3TkKbMOQ"

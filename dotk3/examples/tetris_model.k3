@@ -1,0 +1,129 @@
+export class Tetris {
+    let width: Int
+    let height: Int
+    var board: List[List[Int]] = []
+    var piece: List[List[Int]] = []
+    var nextPiece: List[List[Int]] = []
+    var x: Int = 3
+    var y: Int = 0
+    var score: Int = 0
+    var lines: Int = 0
+    var gameOver: Bool = false
+    private let shapes: List[List[List[Int]]] = [
+        [[1,1,1,1]], [[2,0,0],[2,2,2]], [[0,0,3],[3,3,3]],
+        [[4,4],[4,4]], [[0,5,5],[5,5,0]], [[0,6,0],[6,6,6]], [[7,7,0],[0,7,7]]
+    ]
+
+    constructor(width: Int = 10, height: Int = 20) -> Null {
+        if width < 4 or height < 4 { throw Error(Error.Kind.Value, "Board must be at least 4 by 4") }
+        self.width = width
+        self.height = height
+        self.board = Collections.range(height).map(fn(row: Int) -> List[Int] {
+            return Collections.range(width).map(fn(column: Int) -> Int => 0)
+        })
+        self.nextPiece = Random.choice(self.shapes)
+        self.spawn()
+    }
+
+    fn fits(piece: List[List[Int]], x: Int, y: Int) -> Bool {
+        for row in Collections.range(piece.length()) {
+            for column in Collections.range(piece[row].length()) {
+                if piece[row][column] != 0 {
+                    let bx = x + column
+                    let by = y + row
+                    if bx < 0 or bx >= self.width or by < 0 or by >= self.height { return false }
+                    if self.board[by][bx] != 0 { return false }
+                }
+            }
+        }
+        return true
+    }
+
+    private fn spawn() -> Null {
+        self.piece = self.nextPiece
+        self.nextPiece = Random.choice(self.shapes)
+        self.x = (self.width - self.piece[0].length()) // 2
+        self.y = 0
+        self.gameOver = not self.fits(self.piece, self.x, self.y)
+    }
+
+    fn move(dx: Int) -> Bool {
+        if self.gameOver { return false }
+        if not self.fits(self.piece, self.x + dx, self.y) { return false }
+        self.x += dx
+        return true
+    }
+
+    fn rotate() -> Bool {
+        if self.gameOver { return false }
+        let rows = self.piece.length()
+        let columns = self.piece[0].length()
+        let turned: List[List[Int]] = Collections.range(columns).map(fn(column: Int) -> List[Int] {
+            return Collections.range(rows).map(fn(row: Int) -> Int => self.piece[rows - row - 1][column])
+        })
+        for kick in [0,-1,1,-2,2] {
+            if self.fits(turned, self.x + kick, self.y) {
+                self.piece = turned
+                self.x += kick
+                return true
+            }
+        }
+        return false
+    }
+
+    fn clearRows() -> Int {
+        let remaining = self.board.filter(fn(row: List[Int]) -> Bool => row.contains(0))
+        let cleared = self.height - remaining.length()
+        while remaining.length() < self.height {
+            remaining.insert(0, Collections.range(self.width).map(fn(column: Int) -> Int => 0))
+        }
+        self.board = remaining
+        self.lines += cleared
+        self.score += [0,100,300,500,800][cleared]
+        return cleared
+    }
+
+    private fn lock() -> Null {
+        for row in Collections.range(self.piece.length()) {
+            for column in Collections.range(self.piece[row].length()) {
+                if self.piece[row][column] != 0 { self.board[self.y + row][self.x + column] = self.piece[row][column] }
+            }
+        }
+        self.clearRows()
+        self.spawn()
+        System.gc()
+    }
+
+    fn down() -> Bool {
+        if self.gameOver { return false }
+        if self.fits(self.piece, self.x, self.y + 1) { self.y += 1; return true }
+        self.lock()
+        return false
+    }
+
+    fn drop() -> Null {
+        while self.down() { self.score += 2 }
+    }
+
+    fn render() -> String {
+        let view = self.board.map(fn(row: List[Int]) -> List[Int] => List(row))
+        if not self.gameOver {
+            for row in Collections.range(self.piece.length()) {
+                for column in Collections.range(self.piece[row].length()) {
+                    if self.piece[row][column] != 0 { view[self.y + row][self.x + column] = self.piece[row][column] }
+                }
+            }
+        }
+        let colors: List[String] = ["  ","\x1b[36m[]","\x1b[34m[]","\x1b[37m[]","\x1b[33m[]","\x1b[32m[]","\x1b[35m[]","\x1b[31m[]"]
+        var output = f"TETRIS  Score {self.score}  Lines {self.lines}\n"
+        for row in view {
+            output += "|"
+            for value in row { output += colors[value] + "\x1b[0m" }
+            output += "|\n"
+        }
+        output += "a/d move  w rotate  s down  Space drop  p pause  q quit\n"
+        output += "Next:\n"
+        for row in self.nextPiece { output += row.map(fn(value: Int) -> String => colors[value] + "\x1b[0m").reduce(fn(text: String, part: String) -> String => text + part, "") + "\n" }
+        return output
+    }
+}

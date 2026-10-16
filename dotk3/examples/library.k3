@@ -1,0 +1,5 @@
+let privateValue = 123
+export let answer = 42
+export fn add(first: Int, second: Int) -> Int {
+    return first + second
+}

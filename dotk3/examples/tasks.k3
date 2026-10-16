@@ -1,0 +1,24 @@
+fn worker(label: String) {
+    defer System.print("cleanup", label)
+    for number in Collections.range(3) {
+        System.print(label, number)
+        yield number
+    }
+}
+
+fn supervisor() {
+    defer System.print("cleanup supervisor")
+    Tasks.spawn(worker("first"))
+    Tasks.spawn(worker("second"))
+
+    while true { yield null }
+}
+
+let family: Task = Tasks.spawn(supervisor())
+System.print("turns", Tasks.pump(5))
+Tasks.cancel(family)
+System.print("family", family.status)
+
+let finite = Tasks.spawn(worker("finite"))
+while not finite.done { Tasks.pump(1) }
+System.print("finite", finite.status, finite.value)

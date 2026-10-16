@@ -1,0 +1,23 @@
+export class LineBuffer {
+    private var pending: Bytes = b""
+
+    fn feed(bytes: Bytes) -> List[String] {
+        self.pending += bytes
+        if self.pending.length() > 8192 { throw Error(Error.Kind.Value, "Chat buffer exceeds 8 KiB") }
+        let lines: List[String] = []
+        var offset = 0
+        while offset < self.pending.length() {
+            if self.pending[offset] == 10 {
+                var line = self.pending[:offset]
+                if line.length() > 0 and line[-1] == 13 { line = line[:-1] }
+                for byte in line {
+                    if byte < 32 or byte == 127 { throw Error(Error.Kind.Value, "Control byte in chat line") }
+                }
+                lines.append(Text.decode(line))
+                self.pending = self.pending[offset + 1:]
+                offset = 0
+            } else { offset += 1 }
+        }
+        return lines
+    }
+}

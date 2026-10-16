@@ -1,0 +1,21 @@
+from System import print
+
+let double: Function = fn(value: Int) -> Int => value * 2
+
+fn makeAdder(base: Int) {
+    return fn(value: Int) -> Int {
+        return base + value
+    }
+}
+
+let addFive = makeAdder(5)
+System.gc()
+print(double(3), addFive(10))
+fn(value: Int) -> Null { print(value) }(7)
+
+let stream = fn() {
+    defer print("closed")
+    yield null
+    yield 2
+}
+for value in stream() { print(value) }

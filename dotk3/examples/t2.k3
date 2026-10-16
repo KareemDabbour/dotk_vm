@@ -1,0 +1,20 @@
+class Singleton {
+    private let x: Int
+    private constructor(x: Int?) {
+        self.x = x ?? 0
+    }
+    private static var instance : Singleton? = null
+
+    public static fn getInstance() -> Singleton {
+        if Singleton.instance == null {
+            Singleton.instance = Singleton(100)
+        }
+        return Singleton.instance
+    }
+
+    public fn toString() -> String {
+        return f"Singleton(x: {self.x})"
+    }   
+}
+
+let s = Singleton.getInstance()

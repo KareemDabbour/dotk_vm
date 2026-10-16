@@ -1,0 +1,44 @@
+from System import print
+from Collections import Sized, len
+
+trait Readable {
+    """A value with a stable text representation."""
+    fn read() -> String
+}
+
+class Bag implements Sized, Readable {
+    let items: List[String] = []
+
+    fn length() -> Int {
+        return self.items.length()
+    }
+
+    fn read() -> String {
+        return Text.str(self.items)
+    }
+}
+
+fn size(value: Sized) -> Int {
+    return value.length()
+}
+
+fn describe(value: Readable) -> String {
+    return value.read()
+}
+
+let bag = Bag(["Ada", "Grace"])
+let sized: List[Sized] = [bag, [1, 2, 3], {"x": 1}, "abc"]
+print(size(bag), len(bag), describe(bag))
+print(size(sized[1]), size(sized[2]), size(sized[3]))
+let read = bag.read
+System.gc()
+print(read())
+print(Reflection.members(Readable))
+
+fn describeSized(value: Sized & Readable) -> String {
+    return value.read() + " / " + Text.str(value.length())
+}
+let readableSized: Sized & Readable = bag
+let constrained: List[Sized & Readable] = [readableSized]
+let optional: (Sized & Readable)? = null
+print(describeSized(constrained[0]), optional)

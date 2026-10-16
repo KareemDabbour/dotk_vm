@@ -1,0 +1,28 @@
+from System import print
+
+if System.args.length() == 0 {
+    print("terminal available session:", IO.Terminal.isOpen())
+} else {
+    IO.Terminal.open()
+    defer IO.Terminal.close()
+    var running: Bool = true
+    var ticks: Int = 0
+    fn background() {
+        while running {
+            ticks += 1
+            yield null
+        }
+    }
+    let work = Tasks.spawn(background())
+    defer Tasks.cancel(work)
+    IO.write("Keys are read without Enter; q or Ctrl-C exits.\n")
+    while running {
+        let key: Int? = IO.Terminal.readKey(0)
+        if key != null {
+            print(f"key={key}, ticks={ticks}")
+            if key == 113 or key == 3 { running = false }
+        }
+        Tasks.pump(1)
+        System.delay(10)
+    }
+}

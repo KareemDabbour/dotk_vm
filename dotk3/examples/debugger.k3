@@ -1,0 +1,21 @@
+fn total(values: List[Int]) -> Int {
+    var sum = 0
+    for value in values {
+        sum += value
+    }
+    return sum
+}
+
+fn stream() {
+    defer System.print("stream cleanup")
+    yield null
+    yield 10
+}
+
+let values = [3, 5, 7]
+let result = total(values)
+System.print("total", result)
+
+let job = Tasks.spawn(stream())
+while not job.done { Tasks.pump(1) }
+System.print("task", job.status, job.value)

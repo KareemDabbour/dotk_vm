@@ -1,0 +1,66 @@
+from tcp_lines import LineBuffer
+
+fn sendMessage(host: String, port: Int, message: String) -> Null {
+    let client = Sockets.connect(host, port, 1000)
+    defer Sockets.close(client)
+    let incoming = LineBuffer()
+    Sockets.send(client, "/nick cli\n" + message + "\n", 1000)
+    var echoed = false
+    while not echoed {
+        let bytes = Sockets.receive(client, 4096, 1000)
+        if bytes == null or bytes.length() == 0 { throw Error(Error.Kind.IO, "Chat server did not echo message") }
+        for line in incoming.feed(bytes) {
+            System.print(line)
+            if line == "cli: " + message { echoed = true }
+        }
+    }
+}
+
+fn chat(host: String, port: Int) -> Null {
+    let client = Sockets.connect(host, port, 1000)
+    defer Sockets.close(client)
+    let incoming = LineBuffer()
+    IO.Terminal.open()
+    defer IO.Terminal.close()
+    let printable = b" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var draft: Bytes = b""
+    var running = true
+    IO.write("Connected. /nick NAME, /quit, Ctrl-C.\n> ")
+    while running {
+        let bytes = Sockets.receive(client, 4096, 0)
+        if bytes != null {
+            if bytes.length() == 0 { running = false }
+            else {
+                for line in incoming.feed(bytes) { IO.write("\r\x1b[2K" + line + "\n> " + Text.decode(draft)) }
+            }
+        }
+        let key = IO.Terminal.readKey(10)
+        if key == 3 { running = false }
+        else if key == 10 or key == 13 {
+            let line = Text.decode(draft)
+            if line.length() > 0 { Sockets.send(client, line + "\n", 1000) }
+            if line == "/quit" { running = false }
+            draft = b""
+            IO.write("\r\x1b[2K> ")
+        } else if key == 8 or key == 127 {
+            if draft.length() > 0 { draft = draft[:-1]; IO.write("\r\x1b[2K> " + Text.decode(draft)) }
+        } else if key != null and key >= 32 and key <= 126 and draft.length() < 2048 {
+            let byte = printable[key - 32:key - 31]
+            draft += byte
+            IO.write(byte)
+        }
+        System.gc()
+    }
+    IO.write("\nDisconnected\n")
+}
+
+if System.args.length() == 0 { System.print("chat_client: use --net --steps 0 chat_client.k3 connect HOST PORT; or send HOST PORT MESSAGE") }
+else {
+    if System.args.length() < 3 { throw Error(Error.Kind.Value, "Expected mode, host and port") }
+    let port = Json.parse(System.args[2])
+    if System.args[0] == "send" {
+        if System.args.length() != 4 { throw Error(Error.Kind.Value, "Send needs one message") }
+        sendMessage(System.args[1], port, System.args[3])
+    } else if System.args[0] == "connect" { chat(System.args[1], port) }
+    else { throw Error(Error.Kind.Value, "Use connect or send") }
+}

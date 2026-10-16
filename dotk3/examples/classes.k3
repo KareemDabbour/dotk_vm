@@ -1,0 +1,36 @@
+from System import print
+
+class Counter {
+    """A mutable counter with a readonly label."""
+    let label: String
+    var value: Int = 0
+
+    fn add(amount: Int = 1) -> Int {
+        """Increment this counter and return its value."""
+        self.value += amount
+        return self.value
+    }
+
+    fn same() -> Counter {
+        return self
+    }
+
+    fn values() {
+        yield self.value
+        self.add()
+        yield self.value
+    }
+}
+
+record Snapshot { 
+    """A snapshot of a counter`s state."""
+    label: String, value: Int }
+let counter = Counter(label: "jobs", value: 2)
+let increment: Function = counter.add
+System.gc()
+print(increment(amount: 3))
+counter.value = 7
+for value in counter.values() { print(value) }
+print(counter.same() == counter, counter == Counter("jobs", 8))
+print(Snapshot(counter.label, counter.value))
+print(Reflection.members(counter))

@@ -1,0 +1,26 @@
+from System import print
+from Reflection import doc, members
+
+record Person {
+    """An immutable person record.
+    The tags collection remains mutable.
+    """
+    name: String
+    tags: List[String] = []
+}
+
+fn describe(person: Person) -> String {
+    """Return a person's display name."""
+    return person.name
+}
+
+let person = Person("Ada")
+let names = List(("Ada", "Grace"))
+let ages = Map({"Ada": 37})
+person.tags.append("active")
+
+print(describe(person))
+print(names.length(), ages.length(), person.tags.length())
+print(members(person))
+print(doc(Person))
+System.gc()

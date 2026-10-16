@@ -1,0 +1,14 @@
+from System import print
+from Files import readText, readBytes, exists, size
+
+var path = "object_lifecycle.k3"
+if System.args.length() > 0 { path = System.args[0] }
+
+try {
+    print(exists(path), size(path))
+    let source: String = readText(path)
+    let data: Bytes = readBytes(path)
+    print(source.split("\n").length(), data.length())
+} catch error {
+    print(error.kind, error.message)
+}

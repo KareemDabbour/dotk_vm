@@ -1,0 +1,62 @@
+stage: tasks-to-implementation
+batch: dotk3-alpha-61
+legacy_tree_modified: false
+tasks:
+  T001: {status: implemented, evidence: dotk3/tests/lexer.cpp}
+  T002: {status: implemented_core, evidence: dotk3/tests/runtime.cpp}
+  T003: {status: qualified_nominal_data_contracts_implemented_modules_partial, evidence: dotk3/tests/runtime.cpp}
+  T004: {status: cooperative_task_core_implemented_await_pending, evidence: dotk3/tests/tasks.cpp}
+  T005: {status: checker_editor_assets_implemented_full_typing_tooling_partial, evidence: dotk3/tests/editor.rb}
+  T006: {status: alpha_documented, evidence: dotk3/README.md}
+  T007: {status: shell_file_commands_project_checking_implemented_editing_parity_pending, evidence: dotk3/tests/cli.sh}
+  T008: {status: debugger_core_layout_task_inspection_implemented_extensions_pending, evidence: dotk3/tests/debugger.cpp}
+  T009: {status: lsp_diagnostics_outlines_client_implemented_semantic_features_pending, evidence: dotk3/tests/lsp.rb}
+  T010: {status: typed_maps_atomic_collection_validation_checker_lsp_implemented, evidence: dotk3/tests/runtime.cpp}
+  T011: {status: modular_core_reflection_member_tooling_terminal_history_implemented, evidence: dotk3/tests/lsp.rb}
+  T012: {status: constructors_imports_record_docstrings_length_custom_hover_implemented, evidence: dotk3/tests/runtime.cpp}
+  T013: {status: class_init_static_inheritance_core_implemented_custom_argument_constructors_pending, evidence: dotk3/tests/runtime.cpp}
+  T014: {status: trait_defaults_class_record_core_implemented_generics_inheritance_pending, evidence: dotk3/tests/runtime.cpp}
+  T015: {status: three_lifecycle_default_record_increments_implemented, evidence: dotk3/tests/embedding.c}
+  T016: {status: map_membership_removal_typed_snapshot_increments_implemented, evidence: dotk3/tests/runtime.cpp}
+  T017: {status: list_insertion_typed_removal_atomic_extension_increments_implemented, evidence: dotk3/tests/runtime.cpp}
+  T018: {status: six_collection_search_clear_reverse_get_increments_implemented, evidence: dotk3/tests/runtime.cpp}
+  T019: {status: anonymous_expressions_known_calls_editor_scopes_implemented, evidence: dotk3/tests/lsp.rb}
+  T020: {status: six_string_search_split_join_increments_implemented, evidence: dotk3/tests/runtime.cpp}
+  T021: {status: readonly_files_host_c_cli_editor_capability_implemented, evidence: dotk3/tests/embedding.c}
+  T022: {status: strict_c_scalar_native_value_interoperability_implemented, evidence: dotk3/tests/embedding.c}
+  T023: {status: bounded_json_sax_conversion_interchange_implemented, evidence: dotk3/tests/runtime.cpp}
+  T024: {status: owned_c_collection_builders_traversal_checked_mutation_implemented, evidence: dotk3/tests/embedding.c}
+  T025: {status: active_context_structured_callbacks_rooted_returns_implemented, evidence: dotk3/tests/embedding_threads.cpp}
+  T026: {status: affine_parent_resource_explicit_cleanup_quotas_metadata_implemented, evidence: dotk3/tests/embedding.c}
+  T027: {status: versioned_atomic_contextual_module_docs_imports_implemented, evidence: dotk3/examples/structured_host.c}
+  T028: {status: seven_snapshot_callback_list_workflows_and_tooling_implemented, evidence: dotk3/tests/runtime.cpp}
+  T029: {status: five_seeded_random_services_and_procedural_example_implemented, evidence: dotk3/examples/procedural_loot.k3}
+  T030: {status: five_typed_conditional_map_updates_implemented, evidence: dotk3/examples/map_methods.k3}
+  T031: {status: pinned_trait_intersection_annotations_and_member_tooling_implemented, evidence: dotk3/examples/traits.k3}
+  T032: {status: shared_class_static_functions_fields_tooling_implemented, evidence: dotk3/tests/runtime.cpp}
+  T033: {status: open_single_inheritance_super_subtype_lifetimes_implemented, evidence: dotk3/examples/inheritance.k3}
+  T034: {status: custom_constructor_and_required_field_initialization_implemented, evidence: dotk3/tests/runtime.cpp}
+  T035: {status: native_open_collection_classes_subclass_storage_implemented, evidence: dotk3/tests/embedding.c}
+  T036: {status: typed_ordered_set_algebra_iteration_subclass_implemented, evidence: dotk3/examples/collection_classes.k3}
+  T037: {status: lexical_class_visibility_runtime_tooling_reflection_implemented, evidence: dotk3/examples/encapsulation.k3}
+  T038: {status: rooted_toString_and_typed_named_operator_hooks_implemented, evidence: dotk3/examples/operators.k3}
+  T039: {status: indexed_get_set_hooks_implemented, evidence: dotk3/tests/runtime.cpp}
+  T040: {status: f_string_interpolation_implemented, evidence: dotk3/tests/parser.cpp}
+  T041: {status: logical_Object_root_and_annotation_implemented, evidence: dotk3/tests/runtime.cpp}
+  T042: {status: nominal_Error_Kind_enum_implemented, evidence: dotk3/tests/runtime.cpp}
+  T043: {status: callback_IO_timing_foundation_implemented_network_pending, evidence: dotk3/examples/foundations.k3}
+  T044: {status: bounded_terminal_polling_and_restoration_implemented_await_pending, evidence: dotk3/tests/repl_terminal.rb}
+remaining:
+  - Advanced class generics covariance and broader method inference
+  - Optimized collection storage and wider cross-module type inference
+  - Generic traits associated types trait inheritance variance and builtin implementations
+  - Debugger exception stops richer inspectors C adapter and DAP
+  - CLI persistent history tab completion interrupt handling and version 2 workflow parity
+  - Full static inference and null-flow analysis
+  - Formatter and general language server navigation completion module indexing
+  - Generator send protocol and richer iterator ownership
+  - Await and timer/socket/native completion integration
+  - Worker message channels and process library
+  - Native module loading/editor manifests and raylib/database bindings
+  - Complete expression bytecode backend and instruction metadata
+  - Standard resource libraries and production capability policy

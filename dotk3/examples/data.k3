@@ -1,0 +1,20 @@
+record Vec2 {
+    x: Float
+    y: Float
+}
+
+enum Event {
+    Move(Vec2)
+    Quit
+}
+
+fn destination(event: Event) -> Vec2? {
+    return match event {
+        Event.Move(position) => position,
+        Event.Quit => null,
+    }
+}
+
+let position = destination(Event.Move(Vec2(x: 1.0, y: 2.0)))
+System.print(position)
+System.print(destination(Event.Quit()))

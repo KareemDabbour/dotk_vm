@@ -1,0 +1,12 @@
+fn show(response: Map) -> Null {
+    System.print(response["status"], response["reason"], response["url"])
+}
+
+if System.args.length() == 0 { System.print("requests: use --net requests.k3 https://api.github.com/zen") }
+else {
+    let response = Requests.get(System.args[0], {"headers": {"Accept": "application/json"}, "params": {"per_page": 2}})
+    show(response)
+    if response["ok"] and response["headers"]["content-type"].startsWith("application/json") {
+        System.print(Json.stringify(Requests.json(response)))
+    } else { IO.write(response["body"]) }
+}

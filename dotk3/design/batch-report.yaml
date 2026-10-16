@@ -1,0 +1,534 @@
+batch_id: dotk3-alpha-63
+verification_status: full_gates_passed
+completed_tasks: [T001, T002, T008, T009, T010, T011, T012, T015, T016, T017, T018, T019, T020, T021, T022, T023, T024, T025, T026, T027, T028, T029, T030, T031, T032, T033, T034, T035, T036, T037, T038, T039, T040, T041, T042, T043, T044, T045, T046, T047, T048, T049, T050]
+partial_tasks: [T003, T004, T005, T007, T013, T014]
+planned_tasks: []
+blocked_tasks: []
+files_changed:
+  T001:
+    - {file: dotk3/Makefile, change_type: created, description: Independent build}
+    - {file: dotk3/src/lexer.cpp, change_type: created, description: Tokenization and UTF-8 validation}
+  T002:
+    - {file: dotk3/src/parser.cpp, change_type: created, description: Source-spanned AST grammar}
+    - {file: dotk3/src/runtime.cpp, change_type: created, description: Core semantics and tracing heap}
+  T003:
+    - {file: dotk3/src/runtime.hpp, change_type: modified, description: Resolved nominal type contracts held by bindings and typed lists}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Qualified type and enum-pattern identity validation with contract GC edges}
+    - {file: dotk3/examples/qualified_types.k3, change_type: created, description: Imported record and enum annotation/pattern example}
+    - {file: dotk3/examples/model_types.k3, change_type: created, description: Exported data types for the qualified example}
+    - {file: dotk3/tests/checker.cpp, change_type: modified, description: Known record constructor fields enum payloads and exhaustive-match contracts}
+    - {file: dotk3/examples/records_enums.k3, change_type: created, description: Runnable named/defaulted records and typed enum match example}
+    - {file: dotk3/src/runtime.cpp, change_type: created, description: Records enums structured errors and controlled modules}
+  T004:
+    - {file: dotk3/tests/tasks.cpp, change_type: created, description: Parent ownership FIFO cancellation failure propagation and GC tests}
+    - {file: dotk3/examples/tasks.k3, change_type: created, description: Cooperative task lifecycle example}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Generator handlers defers loop transfers explicit close and bounded cancellation cleanup}
+    - {file: dotk3/src/runtime.hpp, change_type: modified, description: Persistent cleanup continuations and pending GC roots}
+    - {file: dotk3/tests/generators.cpp, change_type: created, description: Suspension cleanup control-flow and fatal-error regressions}
+    - {file: dotk3/examples/generators.k3, change_type: modified, description: Generator cleanup and explicit close examples}
+  T005:
+    - {file: dotk3/editor, change_type: created, description: Optional declarative .k3 VS Code grammar and language configuration}
+    - {file: dotk3/tests/editor.rb, change_type: created, description: Manifest grammar include regex and configuration validation}
+    - {file: dotk3/tests/embedding_threads.cpp, change_type: created, description: Native callbacks overlap across independent worker VMs}
+    - {file: dotk3/design/native-integration.md, change_type: created, description: Current and planned threading processes raylib and database contracts}
+    - {file: dotk3/src/checker.cpp, change_type: created, description: Basic non-executing checking}
+    - {file: dotk3/src/embedding.cpp, change_type: created, description: Experimental independent C ABI}
+    - {file: dotk3/include/dotk3.h, change_type: created, description: Public opaque host interface}
+  T007:
+    - {file: dotk3/src/main.cpp, change_type: modified, description: Persistent shell load/check/AST file commands and quoted-path validation}
+    - {file: dotk3/src/main.cpp, change_type: modified, description: Multi-file directory and stdin project checking without execution}
+    - {file: dotk3/examples, change_type: renamed, description: All language examples migrated to .k3 with module and test references}
+    - {file: dotk3/src/main.cpp, change_type: modified, description: CLI flags and persistent parser-backed shell}
+    - {file: dotk3/tests/cli.sh, change_type: created, description: CLI subprocess contracts}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Echo roots arguments and explicit task shutdown}
+  T008:
+    - {file: dotk3/src/debugger.cpp, change_type: modified, description: Source context aligned inspection tables and grouped help}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Bounded owned task ancestry/state/location snapshots}
+    - {file: dotk3/src/debugger.hpp, change_type: created, description: Copied snapshots and debugger controller interface}
+    - {file: dotk3/src/debugger.cpp, change_type: created, description: Source breakpoints stepping and CLI inspection console}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Frame roots execution hooks and owned module source metadata}
+    - {file: dotk3/tests/debugger.cpp, change_type: created, description: Debugger controller runtime GC frame and task contracts}
+    - {file: dotk3/examples/debugger.k3, change_type: created, description: Runnable function loop and task stepping example}
+    - {file: dotk3/design/cli-debugger.md, change_type: modified, description: Implemented debugger behavior and explicit limits}
+  T009:
+    - {file: dotk3/src/lsp_main.cpp, change_type: created, description: Frontend-only stdio LSP diagnostics UTF-16 sync and outlines}
+    - {file: dotk3/tests/lsp.rb, change_type: created, description: Live document lifecycle Unicode version and protocol contracts}
+    - {file: dotk3/editor/extension.js, change_type: created, description: Trusted-workspace native LSP client activation and restart}
+    - {file: dotk3/tests/lsp_client.js, change_type: created, description: Actual maintained JSON-RPC transport interoperability}
+    - {file: dotk3/vendor/json.hpp, change_type: created, description: Pinned upstream JSON parser dependency}
+  T010:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Typed map key/value checks and staged atomic collection contract attachment}
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Shared nested generic argument parsing}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Collection literals defaults returns indexes and append diagnostics}
+    - {file: dotk3/tests/lsp.rb, change_type: modified, description: Live typed-map key/value diagnostics and clearing}
+    - {file: dotk3/tests/lsp_client.js, change_type: modified, description: Maintained client transport confirms map edit/fix diagnostics}
+    - {file: dotk3/examples/typed_maps.k3, change_type: created, description: Typed nested/nominal map and dynamic boundary example}
+  T011:
+    - {file: dotk3/src/core_module.cpp, change_type: created, description: Isolated installation of namespaced native core services}
+    - {file: dotk3/src/core.hpp, change_type: created, description: Shared core member catalogue}
+    - {file: dotk3/src/semantic.cpp, change_type: created, description: Frontend record/core/enum/imported member discovery}
+    - {file: dotk3/tests/repl_terminal.rb, change_type: created, description: Real arrows history and UTF-8 cursor tests}
+    - {file: dotk3/examples/core_services.k3, change_type: created, description: Modular core/reflection example}
+  T012:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Record spelling explicit imports and declaration docs}
+    - {file: dotk3/src/lexer.cpp, change_type: modified, description: Triple-quoted multiline strings and incomplete shell input}
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Capitalized services List/Map constructors and Reflection.doc}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Atomic import aliases shared collection length and record dispatch}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Known import aliases constructor and length return typing}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Custom declaration documentation and imported alias hover/completion}
+    - {file: dotk3/editor/syntaxes/dotk3.tmLanguage.json, change_type: modified, description: Record from capitalized namespaces and triple docstrings}
+    - {file: dotk3/examples/language_api.k3, change_type: created, description: Consolidated imports constructors docs and length example}
+  T013:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Class let/var fields methods docs and exports}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Nominal instances bound receivers field contracts identity and reflection}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Known class constructors methods mutability returns and self}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Class self imported and returned instance member metadata}
+    - {file: dotk3/src/lsp_main.cpp, change_type: modified, description: Class field and method outlines}
+    - {file: dotk3/tests/runtime.cpp, change_type: modified, description: GC cycles detached receivers nominal modules generators and reflection}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: C host detached method handles survive collection}
+    - {file: dotk3/tests/debugger.cpp, change_type: modified, description: Method self frames remain safe under debugger GC}
+    - {file: dotk3/tests/lsp.rb, change_type: modified, description: Class docs outlines self imports and diagnostic clearing}
+    - {file: dotk3/examples/classes.k3, change_type: created, description: Runnable state methods generators and immutable record composition}
+  T014:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Trait signatures class implements clauses and qualified implementation blocks}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Shared class-header conformance validation failed publication rollback and Sized dispatch}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared core Sized trait metadata}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Known local conformance signatures readonly methods and alias checks}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Trait impl self imported and multiple implementation method metadata}
+    - {file: dotk3/tests/runtime.cpp, change_type: modified, description: Contract pinning atomic failures module identity and trait lifetimes}
+    - {file: dotk3/examples/traits.k3, change_type: modified, description: Class-local multi-trait methods and Sized builtin/class workflow}
+  T015:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Post-field init hooks trait defaults/ambiguity and bound record dispatch}
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Trait default bodies and shared record/class member parsing}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Lifecycle/default/immutable record diagnostics without AST mutation}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Inherited defaults external impl metadata and record/self discovery}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Combined init/default/record callbacks survive GC through host handles}
+    - {file: dotk3/examples/object_lifecycle.k3, change_type: created, description: Combined three-increment workflow}
+  T016:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Map contains/remove and contract-preserving shallow snapshot lists}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared map signature and generic result metadata}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Map key/arity/result typing and snapshot append checks}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Map method and indexed snapshot element discovery}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Nominal snapshots survive source deletion under host handles}
+    - {file: dotk3/examples/map_methods.k3, change_type: created, description: Combined map method workflow}
+  T017:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Strict insertion rooted indexed removal and staged iterable extension}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared list signatures and generic removal return metadata}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Index/element/source/arity checks and known removal types}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: List method signatures and removed nominal member discovery}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Removed nominal callbacks survive host-rooted GC}
+    - {file: dotk3/examples/list_methods.k3, change_type: created, description: Combined typed insertion/removal/generator/self extension workflow}
+  T018:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Typed list queries container clearing preflight reversal and nullable map lookup}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: "Shared query/reset signatures and V? result metadata"}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Zero-argument list handling and nullable get typing}
+    - {file: dotk3/tests/runtime.cpp, change_type: modified, description: Six increments with equality alias snapshot contract budget and GC tests}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Retrieved nominal object survives source Map clear under host ownership}
+    - {file: dotk3/examples/collection_queries.k3, change_type: created, description: Combined six-feature workflow}
+  T019:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Named-declaration versus anonymous expression routing and function extents}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Direct and immutable literal callable signature checks}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Anonymous signatures results and block/arrow parameter scopes}
+    - {file: dotk3/tests/cli.sh, change_type: modified, description: Immediate script and REPL anonymous calls}
+    - {file: dotk3/examples/anonymous_functions.k3, change_type: created, description: Block/arrow closures immediate calls and generator workflow}
+  T020:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Strict UTF-8 search code-point find typed split and staged join}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared String signatures and typed result metadata}
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Literal text excluded from keyword/operator grammar matching}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: String literal/result member discovery}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Joined/split String handles survive collection}
+    - {file: dotk3/examples/string_methods.k3, change_type: created, description: Combined six-method String workflow}
+  T021:
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Disabled-by-default readonly Files callbacks/path validation/bounds/errors}
+    - {file: dotk3/src/main.cpp, change_type: modified, description: Opt-in root option regular-file path policy and bounded chunk reads}
+    - {file: dotk3/include/dotk3.h, change_type: modified, description: Separately versioned C file provider grant/revoke API}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Trusted provider result copy/validation/reentry/isolation bridge}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Files path/import/arity result checks without I/O}
+    - {file: dotk3/examples/files.k3, change_type: created, description: Opt-in text/bytes/metadata example}
+  T022:
+    - {file: dotk3/include/dotk3.h, change_type: modified, description: Strict scalar/type/binary and native value API}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Owner/GC/finite/buffer validation and native borrowed/copied spans}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Roundtrip/released/foreign/type/concurrency coverage}
+  T023:
+    - {file: dotk3/src/json_module.cpp, change_type: created, description: Pinned SAX parse and bounded compatible-value encode}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Json readonly catalogue}
+    - {file: dotk3/tests/runtime.cpp, change_type: modified, description: Exact numbers Unicode aliases duplicate cycles depth bytes and steps}
+    - {file: dotk3/examples/json.k3, change_type: created, description: Typed parse/mutate/roundtrip and optional Files input}
+  T024:
+    - {file: dotk3/include/dotk3.h, change_type: modified, description: Owned host collection builders/traversal/mutation}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Contract-preserving collection boundaries}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Child roots and atomic handle publication}
+  T025:
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Active-thread helpers and result roots}
+    - {file: dotk3/tests/embedding_threads.cpp, change_type: modified, description: Wrong-thread rejection under overlapping VMs}
+    - {file: dotk3/examples/structured_host.c, change_type: created, description: Public C adapter with explicit cleanup}
+  T026:
+    - {file: dotk3/include/dotk3.h, change_type: modified, description: Versioned opaque resource and callback helper APIs}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Thread/tag/parent lifecycle guards quota and preflight shutdown}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Nonexecuting readonly resource metadata and category contracts}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Resource metadata completion and hover typing}
+    - {file: dotk3/tests/embedding_threads.cpp, change_type: modified, description: Wrong-thread lifecycle and shutdown no-partial-close assertions}
+  T027:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Rooted private namespace staging and single publication}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Versioned module validation and contextual callback dispatch}
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Native copied documentation reflection}
+    - {file: dotk3/examples/structured_host.c, change_type: modified, description: Contextual Counter resource module integration}
+  T028:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Seven rooted snapshot callback List operations}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Callback arity/input/predicate/result contracts and nullable folds}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Declared mapped and filtered nominal member discovery}
+    - {file: dotk3/tests/embedding.c, change_type: modified, description: Callback-created nominal values survive host collection}
+  T029:
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Five per-VM seeded Random services with strict bounds}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared Random signatures and sequence element results}
+    - {file: dotk3/examples/procedural_loot.k3, change_type: created, description: Reproducible twelve-operation treasure workflow}
+  T030:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Five conditional Map operations and callback-safe entry rescans}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared conditional Map callback/result signatures}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Typed callback keys/nullable inputs/values and results}
+    - {file: dotk3/examples/map_methods.k3, change_type: modified, description: Compute/update/removal workflow}
+  T031:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Grouped trait conjunction and optional intersection syntax}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Pinned conjunctive nominal contracts and signature conflicts}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Nonexecuting combined trait member discovery}
+    - {file: dotk3/examples/traits.k3, change_type: modified, description: Sized and Readable variable/parameter/collection example}
+  T032:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Static class member syntax}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Shared owner class storage and detached functions}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Static typing/access and no implicit receiver}
+  T033:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Base-chain subtype/field/method/super/trait lifetime semantics}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Inherited/static/super metadata without execution}
+    - {file: dotk3/examples/inheritance.k3, change_type: created, description: Open class factory and shared state workflow}
+  T034:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Explicit constructor syntax}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Independent init signatures and required field state}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Constructor arguments and readonly initialization checks}
+  T035:
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Open native collection descriptors and base methods}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Collection subclass storage/contracts/virtual dispatch}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Shared native metadata and typed subclass discovery}
+  T036:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Set storage mutations snapshots and algebra}
+    - {file: dotk3/examples/collection_classes.k3, change_type: created, description: Integrated custom class and collection workflow}
+  T037:
+    - {file: dotk3/src/parser.cpp, change_type: modified, description: Explicit class visibility modifiers}
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Lexical access owners and filtered reflection/display}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Access/override/trait diagnostics}
+    - {file: dotk3/src/semantic.cpp, change_type: modified, description: Scope-aware member filtering}
+    - {file: dotk3/examples/encapsulation.k3, change_type: created, description: Encapsulated collection subtype workflow}
+  T038:
+    - {file: dotk3/src/runtime.cpp, change_type: modified, description: Rooted conversion and left operator dispatch}
+    - {file: dotk3/src/core_module.cpp, change_type: modified, description: Script print/Text.str conversion hooks}
+    - {file: dotk3/src/core.hpp, change_type: modified, description: Shared explicit operator hook catalogue}
+    - {file: dotk3/src/checker.cpp, change_type: modified, description: Hook validation and compound/result typing}
+    - {file: dotk3/examples/operators.k3, change_type: created, description: Vector conversion/arithmetic workflow}
+  T039: [{file: dotk3/src/runtime.cpp, change_type: modified, description: Indexed operator dispatch and single-evaluation writes}]
+  T040: [{file: dotk3/src/lexer.cpp, change_type: modified, description: F-string tokenization}, {file: dotk3/src/parser.cpp, change_type: modified, description: Parsed replacement expressions}]
+  T041: [{file: dotk3/src/core_module.cpp, change_type: modified, description: Logical Object root and aliases}]
+  T042: [{file: dotk3/src/core_module.cpp, change_type: modified, description: Error.Kind nominal categories}]
+  T043: [{file: dotk3/src/main.cpp, change_type: modified, description: Bounded CLI input/timing adapters}, {file: dotk3/examples/foundations.k3, change_type: created, description: Combined language and IO foundation workflow}]
+  T044: [{file: dotk3/src/terminal.hpp, change_type: created, description: CLI-only termios/poll adapter}, {file: dotk3/src/core_module.cpp, change_type: modified, description: Explicit terminal capability lifecycle}, {file: dotk3/tests/repl_terminal.rb, change_type: modified, description: Actual raw/recovery/cooperative input PTY checks}, {file: dotk3/examples/input_loop.k3, change_type: created, description: Nonblocking interactive task loop}]
+  T045:
+    - {file: dotk3/examples/tetris_model.k3, change_type: created, description: Reusable collision rotation locking clearing score and spawn rules}
+    - {file: dotk3/examples/tetris.k3, change_type: created, description: Playable colored raw terminal gravity preview pause drop restart and cleanup}
+    - {file: dotk3/tests/repl_terminal.rb, change_type: modified, description: Deterministic game model and interactive controls/render/cursor tests}
+    - {file: dotk3/src/main.cpp, change_type: modified, description: Explicit sustained-run step budget option}
+  T046:
+    - {file: dotk3/src/runtime.hpp, change_type: modified, description: Polymorphic opaque Socket host contract and capability limits}
+    - {file: dotk3/src/socket_cli.hpp, change_type: created, description: Bounded nonblocking POSIX IPv4 registry and shutdown adapter}
+    - {file: dotk3/src/network_module.cpp, change_type: created, description: Default-denied bounded socket resource API and publication cleanup}
+    - {file: dotk3/src/embedding.cpp, change_type: modified, description: Type-safe SDK ResourceState casts after resource polymorphism}
+    - {file: dotk3/tests/runtime.cpp, change_type: modified, description: Mock lifecycle bounds provider publication and partial-failure tests}
+  T047:
+    - {file: dotk3/src/network_module.cpp, change_type: modified, description: Strict bounded HTTP framing with recoverable peer-input rejection}
+    - {file: dotk3/vendor/picohttpparser.c, change_type: created, description: Unchanged pinned proven HTTP syntax parser}
+    - {file: dotk3/vendor/picohttpparser.h, change_type: created, description: Unchanged upstream parser interface}
+    - {file: dotk3/examples/webserver.k3, change_type: created, description: Working loopback text JSON and binary echo API service}
+    - {file: dotk3/examples/http_client.k3, change_type: created, description: Runnable socket-based HTTP client}
+    - {file: dotk3/examples/chat_server.k3, change_type: created, description: Polled bounded multi-peer broadcast service}
+    - {file: dotk3/examples/chat_client.k3, change_type: created, description: Raw polled editing client and UTF-8 one-shot sender}
+    - {file: dotk3/examples/tcp_lines.k3, change_type: created, description: Bounded complete-line UTF-8 framing}
+    - {file: dotk3/tests/network.rb, change_type: created, description: Real readiness process cleanup HTTP binary rejection and chat PTY journeys}
+  T048:
+    - {file: dotk3/src/main.cpp, change_type: modified, description: Disable the CLI step ceiling by default}
+    - {file: dotk3/tests/cli.sh, change_type: modified, description: Beyond-ceiling long run and explicit step budget tests}
+  T049:
+    - {file: dotk3/examples/pacman_model.k3, change_type: created, description: Shared legacy maze/BFS buffered-turn pellet power ghost and lifecycle model}
+    - {file: dotk3/examples/pacman.k3, change_type: created, description: Raw terminal viewport arrow controls and restoration}
+    - {file: dotk3/tests/repl_terminal.rb, change_type: modified, description: Deterministic game rules and real terminal controls}
+  T050:
+    - {file: dotk3/examples/browser_server.k3, change_type: created, description: Separate local asset and authoritative game endpoint server}
+    - {file: dotk3/examples/browser_ui, change_type: created, description: Responsive proportional canvas HUD controls sound and pinned local visual assets}
+    - {file: dotk3/tests/network.rb, change_type: modified, description: UI asset/action/pause/restart and malformed input isolation journeys}
+    - {file: dotk3/Makefile, change_type: modified, description: Browser controller syntax check in canonical editor gate}
+upstream_artifacts_consumed:
+  T048: [{artifact: dotk3/design/spec.md, used_for: REQ-055 CLI default policy}]
+  T049: [{artifact: pacman.k, used_for: Existing maze cached neighbors and BFS navigation}, {artifact: dotk3/design/spec.md, used_for: REQ-056 shared game}]
+  T050: [{artifact: dotk3/design/spec.md, used_for: REQ-057 separate browser UI}]
+  T001:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-001 and REQ-006}
+  T002:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-002 through REQ-007}
+  T003:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-009 REQ-011 REQ-012}
+  T004:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-008 REQ-011 and REQ-015 cooperative task core}
+  T005:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-010 REQ-013 REQ-014 subsets}
+  T007:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-016 CLI core}
+  T008:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-017 source debugger core}
+  T009:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-010 REQ-013 REQ-018 initial language server}
+  T010:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-005 REQ-010 REQ-018 collection contracts and diagnostics}
+  T011:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-013 REQ-016 REQ-018 REQ-019 core/reflection/editor/terminal behavior}
+  T012:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-005 REQ-006 REQ-009 REQ-012 REQ-018 REQ-019 REQ-020 language API and documentation}
+  T013:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-009 REQ-010 REQ-013 REQ-017 REQ-018 class core}
+  T014:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-005 REQ-009 REQ-010 REQ-018 REQ-021 trait core}
+  T015:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-022 lifecycle/default/record composition}
+  T016:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-023 map method semantics and ownership}
+  T017:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-024 list mutations and atomic extension}
+  T018:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-025 collection query/reset/lookup semantics}
+  T019:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-026 anonymous callable behavior and editor scope}
+  T020:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-027 String semantics and ownership}
+  T021:
+    - {artifact: dotk3/design/spec.md, used_for: REQ-028 Files capability and integration boundaries}
+  T022: [{artifact: dotk3/design/spec.md, used_for: REQ-029 native interoperability}]
+  T023: [{artifact: dotk3/design/spec.md, used_for: REQ-030 JSON interchange}]
+  T024: [{artifact: dotk3/design/spec.md, used_for: REQ-031 owned collection API}]
+  T025: [{artifact: dotk3/design/spec.md, used_for: REQ-032 structured callback access}]
+  T026: [{artifact: dotk3/design/spec.md, used_for: REQ-033 opaque resource lifecycle}]
+  T027: [{artifact: dotk3/design/spec.md, used_for: REQ-034 native module registration}]
+  T028: [{artifact: dotk3/design/spec.md, used_for: REQ-035 callback collection workflows}]
+  T029: [{artifact: dotk3/design/spec.md, used_for: REQ-036 procedural randomness}]
+  T030: [{artifact: dotk3/design/spec.md, used_for: REQ-037 conditional Map updates}]
+  T031: [{artifact: dotk3/design/spec.md, used_for: REQ-038 trait intersections}]
+  T032: [{artifact: dotk3/design/spec.md, used_for: REQ-039 shared class statics}]
+  T033: [{artifact: dotk3/design/spec.md, used_for: REQ-040 open inheritance}]
+  T034: [{artifact: dotk3/design/spec.md, used_for: REQ-041 custom construction}]
+  T035: [{artifact: dotk3/design/spec.md, used_for: REQ-042 native collection classes}]
+  T036: [{artifact: dotk3/design/spec.md, used_for: REQ-043 typed Set}]
+  T037: [{artifact: dotk3/design/spec.md, used_for: REQ-044 lexical visibility}]
+  T038: [{artifact: dotk3/design/spec.md, used_for: REQ-045 conversion/operators}]
+  T039: [{artifact: dotk3/design/spec.md, used_for: REQ-046 indexed hooks}]
+  T040: [{artifact: dotk3/design/spec.md, used_for: REQ-047 interpolation}]
+  T041: [{artifact: dotk3/design/spec.md, used_for: REQ-048 Object root}]
+  T042: [{artifact: dotk3/design/spec.md, used_for: REQ-049 Error kinds}]
+  T043: [{artifact: dotk3/design/spec.md, used_for: REQ-050 IO/timing}]
+  T044: [{artifact: dotk3/design/spec.md, used_for: REQ-051 nonblocking input}]
+  T045: [{artifact: dotk3/design/spec.md, used_for: REQ-052 terminal game}]
+  T046: [{artifact: dotk3/design/spec.md, used_for: REQ-053 socket capability}]
+  T047: [{artifact: dotk3/design/spec.md, used_for: REQ-054 HTTP and chat workflows}]
+evidence_mapping:
+  T048: [{upstream: REQ-055, output: dotk3/src/main.cpp, evidence: tests/cli.sh}]
+  T049: [{upstream: REQ-056, output: dotk3/examples/pacman_model.k3, evidence: tests/repl_terminal.rb}]
+  T050: [{upstream: REQ-057, output: dotk3/examples/browser_server.k3, evidence: tests/network.rb}, {upstream: REQ-057, output: dotk3/examples/browser_ui, evidence: live_playwright_canvas_control_and_viewport_checks}]
+  T001: [{upstream: REQ-001, output: dotk3/Makefile, evidence: tests/lexer.cpp}]
+  T002: [{upstream: REQ-002..REQ-007, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}]
+  T003: [{upstream: REQ-009 REQ-011 REQ-012, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-009, output: dotk3/src/checker.cpp, evidence: tests/checker.cpp}]
+  T004: [{upstream: REQ-008 REQ-011, output: dotk3/src/runtime.cpp, evidence: tests/generators.cpp}, {upstream: REQ-015, output: dotk3/src/runtime.cpp, evidence: tests/tasks.cpp}]
+  T005: [{upstream: REQ-010, output: dotk3/src/checker.cpp, evidence: tests/checker.cpp}, {upstream: REQ-014, output: dotk3/src/embedding.cpp, evidence: tests/embedding.c}, {upstream: REQ-014, output: dotk3/src/embedding.cpp, evidence: tests/embedding_threads.cpp}]
+  T007: [{upstream: REQ-016, output: dotk3/src/main.cpp, evidence: tests/cli.sh}]
+  T008: [{upstream: REQ-017, output: dotk3/src/debugger.cpp, evidence: tests/debugger.cpp}, {upstream: REQ-017, output: dotk3/src/main.cpp, evidence: tests/cli.sh}]
+  T009: [{upstream: REQ-018, output: dotk3/src/lsp_main.cpp, evidence: tests/lsp.rb}, {upstream: REQ-018, output: dotk3/editor/extension.js, evidence: tests/editor_client.js}]
+  T010: [{upstream: REQ-005 REQ-010, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-018, output: dotk3/src/checker.cpp, evidence: tests/lsp.rb}]
+  T011: [{upstream: REQ-019, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-018, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}, {upstream: REQ-016, output: dotk3/src/main.cpp, evidence: tests/repl_terminal.rb}]
+  T012: [{upstream: REQ-020, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-020 REQ-018, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}, {upstream: REQ-012, output: dotk3/src/parser.cpp, evidence: tests/parser.cpp}]
+  T013: [{upstream: REQ-009 REQ-010, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-017, output: dotk3/src/runtime.cpp, evidence: tests/debugger.cpp}, {upstream: REQ-018, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T014: [{upstream: REQ-021, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-018, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T015: [{upstream: REQ-022, output: dotk3/src/runtime.cpp, evidence: tests/embedding.c}, {upstream: REQ-018 REQ-022, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T016: [{upstream: REQ-023, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-023, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T017: [{upstream: REQ-024, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-024, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T018: [{upstream: REQ-025, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-025, output: dotk3/src/core.hpp, evidence: tests/lsp.rb}]
+  T019: [{upstream: REQ-026, output: dotk3/src/parser.cpp, evidence: tests/parser.cpp}, {upstream: REQ-026, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T020: [{upstream: REQ-027, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-027, output: dotk3/src/core.hpp, evidence: tests/lsp.rb}]
+  T021: [{upstream: REQ-028, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-028, output: dotk3/src/embedding.cpp, evidence: tests/embedding.c}, {upstream: REQ-028, output: dotk3/src/main.cpp, evidence: tests/cli.sh}]
+  T022: [{upstream: REQ-029, output: dotk3/src/embedding.cpp, evidence: tests/embedding.c}]
+  T023: [{upstream: REQ-030, output: dotk3/src/json_module.cpp, evidence: tests/runtime.cpp}]
+  T024: [{upstream: REQ-031, output: dotk3/src/embedding.cpp, evidence: tests/embedding.c}]
+  T025: [{upstream: REQ-032, output: dotk3/src/embedding.cpp, evidence: tests/embedding_threads.cpp}]
+  T026: [{upstream: REQ-033, output: dotk3/src/embedding.cpp, evidence: tests/embedding.c}, {upstream: REQ-033, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T027: [{upstream: REQ-034, output: dotk3/src/runtime.cpp, evidence: tests/embedding.c}, {upstream: REQ-034, output: dotk3/src/embedding.cpp, evidence: examples/structured_host.c}]
+  T028: [{upstream: REQ-035, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-035, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T029: [{upstream: REQ-036, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-036, output: dotk3/src/core.hpp, evidence: examples/procedural_loot.k3}]
+  T030: [{upstream: REQ-037, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-037, output: dotk3/src/checker.cpp, evidence: tests/checker.cpp}]
+  T031: [{upstream: REQ-038, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-038, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T032: [{upstream: REQ-039, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-039, output: dotk3/src/checker.cpp, evidence: tests/checker.cpp}]
+  T033: [{upstream: REQ-040, output: dotk3/src/runtime.cpp, evidence: tests/embedding.c}, {upstream: REQ-040, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T034: [{upstream: REQ-041, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}]
+  T035: [{upstream: REQ-042, output: dotk3/src/core_module.cpp, evidence: tests/embedding.c}, {upstream: REQ-042, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T036: [{upstream: REQ-043, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-043, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}]
+  T037: [{upstream: REQ-044, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-044, output: dotk3/src/semantic.cpp, evidence: tests/lsp.rb}, {upstream: REQ-044, output: dotk3/src/checker.cpp, evidence: tests/checker.cpp}]
+  T038: [{upstream: REQ-045, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-045, output: dotk3/src/runtime.cpp, evidence: tests/debugger.cpp}, {upstream: REQ-045, output: dotk3/src/checker.cpp, evidence: tests/lsp.rb}]
+  T039: [{upstream: REQ-046, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}]
+  T040: [{upstream: REQ-047, output: dotk3/src/parser.cpp, evidence: tests/parser.cpp}]
+  T041: [{upstream: REQ-048, output: dotk3/src/runtime.cpp, evidence: tests/runtime.cpp}]
+  T042: [{upstream: REQ-049, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}]
+  T043: [{upstream: REQ-050, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-050, output: dotk3/src/main.cpp, evidence: tests/cli.sh}]
+  T044: [{upstream: REQ-051, output: dotk3/src/terminal.hpp, evidence: tests/repl_terminal.rb}, {upstream: REQ-051, output: dotk3/src/core_module.cpp, evidence: tests/runtime.cpp}]
+  T045: [{upstream: REQ-052, output: dotk3/examples/tetris.k3, evidence: tests/repl_terminal.rb}]
+  T046: [{upstream: REQ-053, output: dotk3/src/network_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-053, output: dotk3/src/socket_cli.hpp, evidence: tests/network.rb}]
+  T047: [{upstream: REQ-054, output: dotk3/src/network_module.cpp, evidence: tests/runtime.cpp}, {upstream: REQ-054, output: dotk3/examples/webserver.k3, evidence: tests/network.rb}, {upstream: REQ-054, output: dotk3/examples/chat_server.k3, evidence: tests/network.rb}]
+traceability:
+  - {requirement: REQ-055, task: T048, status: completed, files: [dotk3/src/main.cpp, dotk3/tests/cli.sh]}
+  - {requirement: REQ-056, task: T049, status: completed, files: [dotk3/examples/pacman_model.k3, dotk3/examples/pacman.k3, dotk3/tests/repl_terminal.rb]}
+  - {requirement: REQ-057, task: T050, status: completed, files: [dotk3/examples/browser_server.k3, dotk3/examples/browser_ui, dotk3/tests/network.rb]}
+  - {requirement: REQ-001, task: T001, status: completed, files: [dotk3/Makefile]}
+  - {requirement: REQ-002..REQ-007, task: T002, status: core_completed, files: [dotk3/src/parser.cpp, dotk3/src/runtime.cpp]}
+  - {requirement: REQ-008, task: T004, status: partial, files: [dotk3/src/runtime.cpp]}
+  - {requirement: REQ-009 REQ-011 REQ-012, task: T003, status: partial, files: [dotk3/src/runtime.cpp]}
+  - {requirement: REQ-010 REQ-013 REQ-014, task: T005, status: partial, files: [dotk3/src/checker.cpp, dotk3/src/embedding.cpp]}
+  - {requirement: REQ-015, task: T004, status: core_completed, files: [dotk3/src/runtime.cpp, dotk3/src/runtime.hpp]}
+  - {requirement: REQ-016, task: T007, status: core_completed, files: [dotk3/src/main.cpp, dotk3/tests/cli.sh]}
+  - {requirement: REQ-017, task: T008, status: core_completed, files: [dotk3/src/debugger.cpp, dotk3/src/runtime.cpp, dotk3/tests/debugger.cpp]}
+  - {requirement: REQ-018, task: T009, status: initial_core_completed, files: [dotk3/src/lsp_main.cpp, dotk3/editor/extension.js, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-020, task: T012, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/semantic.cpp, dotk3/tests/runtime.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-009 REQ-010 REQ-017 REQ-018, task: T013, status: class_core_completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/tests/runtime.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-021, task: T014, status: trait_core_completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-022, task: T015, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-023, task: T016, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/core.hpp, dotk3/tests/runtime.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-024, task: T017, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/core.hpp, dotk3/tests/runtime.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-025, task: T018, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/core.hpp, dotk3/tests/runtime.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-026, task: T019, status: completed, files: [dotk3/src/parser.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-027, task: T020, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/core.hpp, dotk3/tests/runtime.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-028, task: T021, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/main.cpp, dotk3/src/embedding.cpp, dotk3/include/dotk3.h]}
+  - {requirement: REQ-029, task: T022, status: completed, files: [dotk3/include/dotk3.h, dotk3/src/embedding.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-030, task: T023, status: completed, files: [dotk3/src/json_module.cpp, dotk3/tests/runtime.cpp, dotk3/tests/cli.sh]}
+  - {requirement: REQ-031, task: T024, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/embedding.cpp, dotk3/tests/embedding.c]}
+  - {requirement: REQ-032, task: T025, status: completed, files: [dotk3/src/embedding.cpp, dotk3/examples/structured_host.c, dotk3/tests/embedding_threads.cpp]}
+  - {requirement: REQ-033, task: T026, status: completed, files: [dotk3/include/dotk3.h, dotk3/src/embedding.cpp, dotk3/src/runtime.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-034, task: T027, status: completed, files: [dotk3/include/dotk3.h, dotk3/src/runtime.cpp, dotk3/src/embedding.cpp, dotk3/examples/structured_host.c]}
+  - {requirement: REQ-035, task: T028, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/tests/lsp.rb]}
+  - {requirement: REQ-036, task: T029, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/runtime.hpp, dotk3/examples/procedural_loot.k3]}
+  - {requirement: REQ-037, task: T030, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/examples/map_methods.k3]}
+  - {requirement: REQ-038, task: T031, status: completed, files: [dotk3/src/parser.cpp, dotk3/src/runtime.cpp, dotk3/src/semantic.cpp, dotk3/examples/traits.k3]}
+  - {requirement: REQ-039, task: T032, status: completed, files: [dotk3/src/parser.cpp, dotk3/src/runtime.cpp, dotk3/src/checker.cpp]}
+  - {requirement: REQ-040, task: T033, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/semantic.cpp, dotk3/examples/inheritance.k3]}
+  - {requirement: REQ-041, task: T034, status: completed, files: [dotk3/src/parser.cpp, dotk3/src/runtime.cpp, dotk3/src/checker.cpp]}
+  - {requirement: REQ-042, task: T035, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/runtime.cpp, dotk3/src/semantic.cpp]}
+  - {requirement: REQ-043, task: T036, status: completed, files: [dotk3/src/runtime.cpp, dotk3/examples/collection_classes.k3]}
+  - {requirement: REQ-044, task: T037, status: completed, files: [dotk3/src/parser.cpp, dotk3/src/runtime.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/examples/encapsulation.k3]}
+  - {requirement: REQ-045, task: T038, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/core_module.cpp, dotk3/src/checker.cpp, dotk3/src/semantic.cpp, dotk3/examples/operators.k3]}
+  - {requirement: REQ-046, task: T039, status: completed, files: [dotk3/src/runtime.cpp, dotk3/src/checker.cpp]}
+  - {requirement: REQ-047, task: T040, status: completed, files: [dotk3/src/lexer.cpp, dotk3/src/parser.cpp]}
+  - {requirement: REQ-048, task: T041, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/runtime.cpp]}
+  - {requirement: REQ-049, task: T042, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/runtime.cpp]}
+  - {requirement: REQ-050, task: T043, status: completed, files: [dotk3/src/core_module.cpp, dotk3/src/main.cpp]}
+  - {requirement: REQ-051, task: T044, status: completed, files: [dotk3/src/terminal.hpp, dotk3/src/main.cpp, dotk3/src/core_module.cpp, dotk3/examples/input_loop.k3]}
+  - {requirement: REQ-052, task: T045, status: completed, files: [dotk3/examples/tetris_model.k3, dotk3/examples/tetris.k3, dotk3/tests/repl_terminal.rb]}
+  - {requirement: REQ-053, task: T046, status: completed, files: [dotk3/src/runtime.hpp, dotk3/src/socket_cli.hpp, dotk3/src/network_module.cpp, dotk3/src/embedding.cpp]}
+  - {requirement: REQ-054, task: T047, status: completed, files: [dotk3/src/network_module.cpp, dotk3/examples/webserver.k3, dotk3/examples/http_client.k3, dotk3/examples/chat_server.k3, dotk3/examples/chat_client.k3, dotk3/tests/network.rb]}
+protocol_violation: false
+language_server_status: diagnostics_symbols_member_hover_and_dot_completion
+errors: []
+warnings:
+  - Playable terminal Tetris and working loopback web/chat apps ship with bounded cooperative polling. No SRS/hold/seven-bag game guideline or production network service guarantee is claimed.
+  - CLI networking is opt-in POSIX numeric IPv4 TCP with a 256-open-socket registry, bounded native waits and explicit close/shutdown. DNS/IPv6/UDP/TLS/task-level await and a C network-provider grant API remain pending.
+  - HTTP is one strict bounded HTTP/1.1 exchange per connection with pinned picohttpparser. Chunking/keep-alive/custom headers/interim responses/compression are not implemented. A separate browser UI now ships; peer framing/size failures are IO errors while allocation/step/provider-contract limits stay fatal.
+  - CLI step limits are disabled by default and explicitly enabled with --steps N; embedding defaults remain bounded. Object budget and explicit game/server GC remain independent.
+  - Pac-Man reuses legacy maze/navigation rules rather than claiming an exact arcade emulator. Browser clients share one local session and best score is not persisted.
+  - Browser canvas/control/layout tests ran through live Playwright tools, not an installed headless browser dependency in make test. Assets are startup snapshots requiring server restart after edits.
+  - Legacy workspace IntelliSense misidentifies C++17 variant/optional in the runtime header; explicit C++17 builds validate it without changing the parent editor configuration.
+  - The currently attached editor language server predates Sockets and reports an undeclared name in the new UI script; rebuilt checker and live LSP gates pass. DotK 3 Restart Language Server refreshes that stale process; editor-host restart was not automated.
+  - Chat accepts up to32 local peers and 2KiB messages with complete-line UTF-8 framing. Interactive draft editing is ASCII; authentication/encryption/persistence/rate limiting are not implemented.
+  - Terminal input is bounded native polling, not task-level await; raw byte sequences require decoding. Restoration covers normal CLI/error paths, not SIGKILL or arbitrary signal termination.
+  - Object is a logical universal non-null annotation/root, not primitive boxing. Error kinds are nominal enum values; legacy unknown String categories normalize to Application.
+  - F-string replacements are parsed expressions with containing-literal diagnostics; Python formatting specs/conversion flags are not implemented.
+  - IO line reads and delays are host-callback based, bounded and blocking; C embedding defaults do not grant input/timing/network callbacks. Socket/HTTP providers remain trusted, not a sandbox.
+  - Conversion hooks execute only for script-facing top-level conversion; nested structural/debugger/reflection/error formatting does not execute user methods.
+  - Operator hooks dispatch on the left operand only; equality/hash/truthiness/reflected protocols remain separate. Indexed get/set hooks now ship; collection membership/equality semantics are unchanged.
+  - Conditional Map callbacks use null-as-absence/removal semantics and do not roll back script effects; these are not concurrent atomic operations.
+  - Core constructors/collection subclasses/Set/visibility are integrated; advanced class generics/variance remain extensions. Constructor side effects are not transactional.
+  - Visibility is lexical encapsulation, not a sandbox against trusted host/native code; authorized private callable delegation remains possible.
+  - Set storage is insertion-ordered and linear, not a hash performance claim. Native collection copying/slicing returns base types, not implicit subclass reconstruction.
+  - Callback collection operations take eager shallow snapshots; source/element side effects are not rolled back. Map result contracts require explicit annotation; dynamic callback signatures remain runtime checked.
+  - Random defaults to seed 0 per VM and uses standard distributions/engine for same-build replay; it is not cryptographic or a portable cross-version stream format.
+  - JSON uses unchanged pinned parser header shared with LSP; SAX conversion/depth/byte/step bounds are not a total memory/wall-clock sandbox. Serialization estimates are conservative.
+  - Owned collections/callbacks/resources and versioned module registration are implemented; dynamic loading/editor manifests remain pending. Handles require release and DK3Call contexts must not escape.
+  - Resource disposal is explicit or reverse-order owner-thread shutdown, not GC. Open state is separately bounded; external payload bytes and native cleanup remain trusted and not preemptible.
+  - Files is read-only and disabled by default; trusted host providers enforce their own policy. CLI root checks/open are TOCTOU-racy and native I/O is not preemptible or a sandbox.
+  - String matching is exact without normalization/graphemes/regex. Split/join are eager and budget-checked; native work is not wall-clock preemptible and generator side effects are not rolled back.
+  - Anonymous call checks use direct literals and immutable literal bindings; mutable/aliased/dynamically returned signatures remain conservative.
+  - Collection searches are linear; reverse preflights script budgets but native array work is not wall-clock preemptible. Map get returns null for both absent and stored-null values.
+  - List extension stages eager temporary storage; source side effects/consumed yields are not rolled back. Array insertion/removal shift items.
+  - Map membership/removal use linear scans; keys/values are eager shallow typed snapshots not lazy views or deep copies.
+  - LSP member hover and dot-completion implemented; general navigation/completion/full inference remain pending.
+  - Qualified imported annotations are runtime-resolved; cross-module static export inference remains pending.
+  - Full rewrite not complete; README coverage matrix is authoritative.
+  - Tests use thirteen groups including real network journeys and CLI/editor/LSP checks, not a claim of thirteen total assertions.
+  - Full VS Code editor-host interaction not automated; activation mocks and actual stream transport passed.
+  - npm dependencies had no known advisory findings; vendored C++ JSON review was best effort and not a security certification.
+  - New native C HTTP parser review used model-knowledge fallback because the available CVE tool accepts only Maven/NuGet/npm. Empty findings are best effort, not a live advisory scan or security certification.
+  - Static data checks use known lexical declarations; full inference generics and cross-module typing remain pending.
+  - Editor assets were validated structurally and by regex syntax; rendered VS Code highlighting was not visually verified.
+  - Debugger exception stops watch evaluation expandable objects C adapter and DAP remain pending.
+  - CLI history is in-session only; persistent history tab completion and Ctrl-C cleanup remain pending.
+  - CLI depends on system libedit on macOS/Linux; Windows currently uses plain line input.
+  - Flat implicit function aliases were removed intentionally; use capitalized namespaces or explicit from imports. List/Map type constructors remain bare.
+  - Legacy init hooks remain compatible; custom constructors use independent synchronous Null-returning signatures and checked required field initialization.
+  - Nominal trait defaults and record implementations are supported; generics inheritance associated types variance and builtin extensions remain pending.
+  - Docstrings preserve written whitespace; Javadoc tags field docs and documentation generation are not implemented.
+  - Cleanup is bounded best effort; native callbacks and allocation failures are not preempted.
+  - ASan not run due previously established local runtime startup problem; UBSan passed.
+  - Optional tooling, full static typing, await and worker channels, bytecode optimization and additional capability libraries remain pending.
+  - Raylib/database/process libraries and native binary loading are not implemented.
+test_results:
+  browser_ui:
+    live_playwright: passed
+    coverage: pixels_font_icons_player_ghost_movement_pause_resume_restart_and_proportional_small_wide_layouts
+    screenshots: [/tmp/dotk3-pacman-desktop.png, /tmp/dotk3-pacman-mobile.png]
+    automated_headless_dependency: not_installed
+    console_errors_during_interaction_checks: 0
+    minimum_mobile_direction_target: 44px
+    canvas_aspect_ratio: 28_to_31
+  runtime_apps:
+    command: make -C dotk3 CXX=clang++ CC=clang test-network test-cli
+    coverage: real_ephemeral_loopback_http_chat_and_terminal_game_client_journeys
+    release: passed
+    ubsan: passed
+    exit_code: 0
+    browser_ui: separate_static_and_authoritative_game_endpoint_process_tests
+  editor_diagnostics:
+    checked_translation_units: no_errors
+    runtime_header_explicit_cpp17_compile: passed
+    runtime_header_intellisense: stale_parent_configuration_warning
+  structured_native_example:
+    command: make -C dotk3 CXX=clang++ CC=clang example-native
+    coverage: owned_aggregates_and_versioned_counter_resource_module
+    release: passed
+    ubsan: passed
+  examples:
+    command: dotk3/build/release/dotk3 --check dotk3/examples
+    passed: 41
+    failed: 0
+    release_examples_executed: 41
+    ubsan_examples_executed: 41
+  editor_client_transport:
+    release: passed
+    ubsan: passed
+    editor_build: passed
+  release:
+    command: make -C dotk3 CXX=clang++ CC=clang all test
+    passed: 13
+    failed: 0
+    skipped: 0
+    failures: []
+  ubsan:
+    command: make -C dotk3 CXX=clang++ CC=clang MODE=stress all test
+    passed: 13
+    failed: 0
+    skipped: 0
+    failures: []

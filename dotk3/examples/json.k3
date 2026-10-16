@@ -1,0 +1,15 @@
+from System import print
+from Json import parse, stringify
+
+let document: Map[String, Any] = parse("""{"name":"Ada","count":9007199254740993,"tags":["active",null]}""")
+document["tags"].append("verified")
+System.gc()
+print(document["name"], document["count"])
+let encoded: String = stringify(document)
+print(encoded)
+print(parse(encoded)["tags"])
+
+if System.args.length() > 0 {
+    let source = Files.readText(System.args[0])
+    print(stringify(parse(source)))
+}

@@ -1,0 +1,20 @@
+let exact = 9_007_199_254_740_993
+System.print(Reflection.type(exact), exact)
+let numbers = [1] + [2, 3]
+numbers.append(4)
+System.print(numbers[::-1])
+System.print(numbers[:-1])
+System.print(-7 // 3, -7 % 3)
+
+fn greet(name: String, greeting: String = "Hello") -> String {
+    return greeting + ", " + name
+}
+System.print(greet(greeting: "Welcome", name: "DotK 3"))
+
+let word = "caf\xc3\xa9"
+System.print(Collections.len(word), word[-1], Reflection.type(Text.encode(word)))
+try {
+    System.print(numbers[::0])
+} catch error {
+    System.print(error.kind, error.message)
+}

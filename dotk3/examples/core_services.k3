@@ -1,0 +1,10 @@
+record Point { x: Int, y: Int = 2 }
+let point = Point(1)
+
+System.print(Reflection.members(point))
+System.print(Reflection.binding("point.x"))
+System.print(Reflection.bindings())
+System.print(Collections.len(Collections.range(3)))
+System.print(Math.toFloat(point.x))
+System.print(Text.decode(Text.encode("DotK 3")))
+System.gc()

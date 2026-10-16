@@ -1,0 +1,27 @@
+from System import print
+from Random import seed, int as draw, choice, shuffle
+import Random
+
+record Loot {
+    """One item from a reproducible treasure roll."""
+    name: String
+    power: Int
+}
+
+seed(2026)
+let names: List[String] = ["Compass", "Lantern", "Boots", "Cloak", "Charm"]
+let loot: List[Loot] = Collections.range(8).map(fn(slot: Int) -> Loot {
+    return Loot(choice(names), draw(1, 11))
+})
+let useful = loot.filter(fn(item: Loot) -> Bool => item.power >= 6)
+shuffle(useful)
+let labels: List[String] = useful.map(fn(item: Loot) -> String {
+    return item.name + " (" + Text.str(item.power) + ")"
+})
+print("Treasure:", ", ".join(labels))
+print("Total power:", useful.reduce(fn(total: Int, item: Loot) -> Int => total + item.power, 0))
+print("Rare item:", loot.find(fn(item: Loot) -> Bool => item.power >= 9))
+print("First charm:", loot.findIndex(fn(item: Loot) -> Bool => item.name == "Charm"))
+print("Has rare loot:", loot.any(fn(item: Loot) -> Bool => item.power >= 9))
+print("All items usable:", loot.all(fn(item: Loot) -> Bool => item.power > 0))
+print("Bonus chance:", Random.float() < 0.25)

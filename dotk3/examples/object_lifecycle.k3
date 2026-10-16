@@ -1,0 +1,38 @@
+from System import print
+
+trait Described {
+    fn value() -> Int
+
+    fn describe() -> String {
+        """Describe the value through the trait's required method."""
+        return "value=" + Text.str(self.value())
+    }
+}
+
+class Counter implements Described {
+    var count: Int = 0
+
+    fn init() -> Null {
+        self.count += 1
+    }
+
+    fn value() -> Int {
+        return self.count
+    }
+}
+
+record Snapshot implements Described {
+    count: Int
+
+    fn value() -> Int {
+        return self.count
+    }
+}
+
+let counter = Counter(count: 4)
+let snapshot = Snapshot(counter.value())
+let describe = snapshot.describe
+System.gc()
+print(counter.describe(), describe())
+print(snapshot == Snapshot(5))
+print(Reflection.members(snapshot))

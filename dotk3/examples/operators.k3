@@ -1,0 +1,36 @@
+from System import print
+
+record Vector {
+    x: Int
+    y: Int
+
+    fn toString() -> String {
+        return "(" + Text.str(self.x) + ", " + Text.str(self.y) + ")"
+    }
+
+    fn __add__(other: Vector) -> Vector {
+        return Vector(self.x + other.x, self.y + other.y)
+    }
+
+    fn __sub__(other: Vector) -> Vector {
+        return Vector(self.x - other.x, self.y - other.y)
+    }
+
+    fn __mul__(amount: Int) -> Vector {
+        return Vector(self.x * amount, self.y * amount)
+    }
+
+    fn __neg__() -> Vector { return Vector(-self.x, -self.y) }
+
+    fn __lt__(other: Vector) -> Bool {
+        return self.x * self.x + self.y * self.y < other.x * other.x + other.y * other.y
+    }
+}
+
+let position = Vector(2, 3)
+let velocity = Vector(1, -1)
+var next = position + velocity
+next *= 2
+print(position, velocity, next, -velocity)
+print(position < next, Text.str(next), next.toString())
+print(Reflection.members(position))

@@ -1,0 +1,9 @@
+export record Point {
+    x: Int
+    y: Int = x + 1
+}
+
+export enum Event {
+    Move(Point)
+    Quit
+}

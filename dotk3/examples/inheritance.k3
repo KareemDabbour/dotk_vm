@@ -1,0 +1,31 @@
+from System import print
+
+class Actor {
+    static var created: Int = 0
+    static let category: String = "actor"
+    let name: String
+    var energy: Int = 10
+
+    fn init() -> Null { Actor.created += 1 }
+    fn describe() -> String { return self.name + " / " + Text.str(self.energy) }
+}
+
+class Runner extends Actor {
+    let speed: Int = 2
+
+    fn init() -> Null {
+        super.init()
+        self.energy += 5
+    }
+
+    fn describe() -> String { return super.describe() + " / speed " + Text.str(self.speed) }
+    static fn create(name: String) -> Runner { return Runner(name) }
+}
+
+let first: Actor = Runner.create("Ada")
+let second = Runner("Grace", speed: 3)
+let describe = first.describe
+System.gc()
+print(describe(), second.describe())
+print(Actor.created, Runner.created, Runner.category)
+print(Reflection.members(first))

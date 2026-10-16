@@ -1,0 +1,41 @@
+from System import print
+
+class Inventory extends List {
+    private let owner: String
+    protected var changes: Int = 0
+    private static let category: String = "inventory"
+
+    public constructor(owner: String) -> Null {
+        super.init()
+        self.owner = owner
+    }
+
+    public fn append(value: String) -> Null {
+        super.append(value)
+        self.changes += 1
+    }
+
+    public fn describe() -> String {
+        return self.owner + " / " + Inventory.category + " / " + Text.str(self.length())
+    }
+
+    public fn reader() -> Function {
+        return fn() -> String { return self.owner }
+    }
+}
+
+class LoggedInventory extends Inventory {
+    public fn countChanges() -> Int { return self.changes }
+}
+
+let inventory = LoggedInventory("Ada")
+inventory.append("compass")
+inventory.append("rope")
+let reader = inventory.reader()
+System.gc()
+print(inventory.describe(), inventory.countChanges(), reader())
+print(Reflection.members(inventory))
+fn probe(value: Any) {
+    try { value.owner } catch error { print(error.kind) }
+}
+probe(inventory)

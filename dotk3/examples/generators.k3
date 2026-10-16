@@ -1,0 +1,48 @@
+fn stream() {
+    yield null
+    for number in Collections.range(3) {
+        yield number
+    }
+}
+
+var received = 0
+for value in stream() {
+    System.print(value)
+    received += 1
+}
+System.print("received", received)
+
+fn resourceWork() {
+    defer System.print("resource cleanup")
+    return "finished"
+}
+System.print(resourceWork())
+
+
+
+fn guardedStream() {
+    defer System.print("generator cleanup")
+    try {
+        for number in Collections.range(32) {
+            if number == 1 { continue }
+            if number == 4 { break }
+            yield number
+        }
+        throw System.Error("demo", "end of stream")
+    } catch error {
+        yield error.message
+    } finally {
+        System.print("generator finally")
+    }
+}
+
+for value in guardedStream() { System.print(value) }
+
+let partial = guardedStream()
+for value in partial {
+    System.print("first", value)
+    break
+}
+Tasks.close(partial)
+Tasks.close(partial)
+

@@ -1,0 +1,35 @@
+record Profile {
+    name: String
+    labels: List[String] = []
+}
+
+record Point {
+    x: Int
+    y: Int = x + 1
+}
+
+enum Lookup {
+    Found(Profile)
+    Missing
+}
+
+fn displayName(result: Lookup) -> String? {
+    return match result {
+        Lookup.Found(profile) => profile.name,
+        Lookup.Missing => null,
+    }
+}
+
+let first = Profile(name: "Ada")
+let second = Profile("Grace")
+first.labels.append("active")
+System.print(first.name, first.labels)
+System.print(second.name, second.labels)
+
+let point = Point(x: 3)
+System.print(point.x, point.y)
+System.print(point == Point(3, y: 4))
+
+let found = Lookup.Found(first)
+System.print(displayName(found) ?? "not found")
+System.print(displayName(Lookup.Missing()) ?? "not found")

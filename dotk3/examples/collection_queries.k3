@@ -1,0 +1,20 @@
+from System import print
+
+let values: List[Int?] = [1, null, 3, 1]
+print(values.contains(null), values.indexOf(1), values.indexOf(8))
+values.reverse()
+print(values)
+let copy = List(values)
+values.clear()
+print(values.length(), copy.length())
+
+record Entry { value: Int }
+let entries: Map[String, Entry?] = {"value": Entry(7), "empty": null}
+let found: Entry? = entries.get("value")
+let absent: Entry? = entries.get("missing")
+let snapshot = entries.values()
+print(entries.contains("empty"), absent)
+entries.clear()
+System.gc()
+print(found, snapshot, entries.length())
+print(Reflection.members(values), Reflection.members(entries))

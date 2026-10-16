@@ -1,0 +1,8 @@
+import library as library
+System.print(library.answer)
+System.print(library.add(2, 3))
+try {
+    System.print(library.privateValue)
+} catch error {
+    System.print(error.kind, error.message)
+}

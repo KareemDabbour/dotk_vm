@@ -1,0 +1,224 @@
+class Ghost {
+    let spawn: Int
+    var position: Int
+    var previous: Int = -1
+    var cooldown: Int = 0
+    constructor(spawn: Int) -> Null { self.spawn = spawn; self.position = spawn }
+}
+
+export class PacMan {
+    let width: Int = 28
+    let height: Int = 31
+    let spawn: Int = 657
+    var board: List[String] = []
+    var neighbors: List[List[Int]] = []
+    var ghosts: List[Ghost] = []
+    var player: Int = 657
+    var headingX: Int = 0
+    var headingY: Int = 0
+    var desiredX: Int = 0
+    var desiredY: Int = 0
+    var score: Int = 0
+    var best: Int = 0
+    var lives: Int = 3
+    var level: Int = 1
+    var pellets: Int = 0
+    var power: Int = 0
+    var invulnerable: Int = 0
+    var ticks: Int = 0
+    var ghostBonus: Int = 200
+    var status: String = "ready"
+    private let maze: List[String] = [
+        "############################", "#............##............#",
+        "#.####.#####.##.#####.####.#", "#.####.#####.##.#####.####.#",
+        "#.####.#####.##.#####.####.#", "#..........................#",
+        "#.####.##.########.##.####.#", "#.####.##.########.##.####.#",
+        "#......##....##....##......#", "######.#####.##.#####.######",
+        "######.#####.##.#####.######", "######.##..........##.######",
+        "######.##.########.##.######", "######.##.#      #.##.######",
+        "#                          #", "######.##.#      #.##.######",
+        "######.##.########.##.######", "######.##..........##.######",
+        "######.##.########.##.######", "######.##.########.##.######",
+        "#............##............#", "#.####.#####.##.#####.####.#",
+        "#.####.#####.##.#####.####.#", "#...##................##...#",
+        "###.##.##.########.##.##.###", "###.##.##.########.##.##.###",
+        "#......##....##....##......#", "#.##########.##.##########.#",
+        "#.##########.##.##########.#", "#..........................#",
+        "############################"
+    ]
+
+    constructor() -> Null { self.reset() }
+
+    fn next(position: Int, dx: Int, dy: Int) -> Int {
+        let row = position // self.width + dy
+        let column = position % self.width + dx
+        if row < 0 or row >= self.height or column < 0 or column >= self.width { return -1 }
+        let target = row * self.width + column
+        if self.board[target] == "#" { return -1 }
+        return target
+    }
+
+    fn reset() -> Null {
+        self.board = []
+        for row in self.maze {
+            if row.length() != self.width { throw Error(Error.Kind.Value, "Invalid maze width") }
+            for tile in row { self.board.append(tile) }
+        }
+        self.board[self.spawn] = " "
+        for position in [29,54,813,838] { self.board[position] = "o" }
+        self.pellets = self.board.filter(fn(tile: String) -> Bool => tile == "." or tile == "o").length()
+        self.neighbors = Collections.range(self.board.length()).map(fn(position: Int) -> List[Int] {
+            let adjacent: List[Int] = []
+            if self.board[position] != "#" {
+                for direction in [[0,-1],[0,1],[-1,0],[1,0]] {
+                    let target = self.next(position, direction[0], direction[1])
+                    if target != -1 { adjacent.append(target) }
+                }
+            }
+            return adjacent
+        })
+        self.ghosts = [Ghost(54), Ghost(813), Ghost(838), Ghost(29)]
+        self.player = self.spawn
+        self.headingX = 0; self.headingY = 0; self.desiredX = 0; self.desiredY = 0
+        self.score = 0; self.lives = 3; self.level = 1; self.power = 0; self.ticks = 0
+        self.invulnerable = 0; self.ghostBonus = 200; self.status = "ready"
+    }
+
+    fn action(command: String) -> Null {
+        if command == "restart" { self.reset(); return }
+        if command == "next" and self.status == "won" {
+            let level = self.level + 1; let score = self.score
+            self.reset(); self.level = level; self.score = score; self.status = "playing"; return
+        }
+        if command == "pause" {
+            if self.status == "playing" { self.status = "paused" }
+            else if self.status == "paused" { self.status = "playing" }
+            return
+        }
+        if command == "start" {
+            if self.status == "ready" or self.status == "paused" { self.status = "playing" }
+            return
+        }
+        if command == "left" { self.desiredX = -1; self.desiredY = 0 }
+        else if command == "right" { self.desiredX = 1; self.desiredY = 0 }
+        else if command == "up" { self.desiredX = 0; self.desiredY = -1 }
+        else if command == "down" { self.desiredX = 0; self.desiredY = 1 }
+        else { throw Error(Error.Kind.Value, "Unknown game action") }
+        if self.status == "ready" { self.status = "playing" }
+    }
+
+    fn distances(start: Int) -> List[Int] {
+        let distance = Collections.range(self.board.length()).map(fn(position: Int) -> Int => -1)
+        if start < 0 or start >= self.board.length() or self.board[start] == "#" { return distance }
+        let queue: List[Int] = [start]
+        var head = 0
+        distance[start] = 0
+        while head < queue.length() {
+            let position = queue[head]; head += 1
+            for target in self.neighbors[position] {
+                if distance[target] == -1 { distance[target] = distance[position] + 1; queue.append(target) }
+            }
+        }
+        return distance
+    }
+
+    fn collide() -> Bool {
+        if self.invulnerable > 0 { return false }
+        for ghost in self.ghosts {
+            if ghost.position == self.player and ghost.cooldown == 0 {
+                if self.power > 0 {
+                    self.score += self.ghostBonus; self.ghostBonus *= 2
+                    ghost.position = ghost.spawn; ghost.previous = -1; ghost.cooldown = 12
+                } else {
+                    self.lives -= 1
+                    if self.lives == 0 { self.status = "gameOver" }
+                    else {
+                        self.player = self.spawn; self.invulnerable = 20
+                        self.headingX = 0; self.headingY = 0; self.desiredX = 0; self.desiredY = 0
+                        for actor in self.ghosts { actor.position = actor.spawn; actor.previous = -1; actor.cooldown = 0 }
+                    }
+                    if self.score > self.best { self.best = self.score }
+                    return true
+                }
+            }
+        }
+        if self.score > self.best { self.best = self.score }
+        return false
+    }
+
+    fn tick() -> Null {
+        if self.status != "playing" { return }
+        self.ticks += 1
+        if self.power > 0 { self.power -= 1 }
+        if self.invulnerable > 0 { self.invulnerable -= 1 }
+        let desired = self.next(self.player, self.desiredX, self.desiredY)
+        if desired != -1 { self.headingX = self.desiredX; self.headingY = self.desiredY }
+        let target = self.next(self.player, self.headingX, self.headingY)
+        if target != -1 { self.player = target }
+        let tile = self.board[self.player]
+        if tile == "." or tile == "o" {
+            self.score += 10; self.pellets -= 1; self.board[self.player] = " "
+            if tile == "o" { self.score += 40; self.power = 40; self.ghostBonus = 200 }
+        }
+        if self.score > self.best { self.best = self.score }
+        if self.collide() { return }
+        if self.pellets == 0 { self.status = "won"; return }
+        if self.ticks % 2 != 0 { return }
+        let distance = self.distances(self.player)
+        for index in Collections.range(self.ghosts.length()) {
+            let ghost = self.ghosts[index]
+            if ghost.cooldown > 0 { ghost.cooldown -= 1 }
+            else {
+                let options = self.neighbors[ghost.position].filter(fn(position: Int) -> Bool => self.neighbors[ghost.position].length() <= 1 or position != ghost.previous)
+                if options.length() > 0 {
+                    var chosen = Random.choice(options)
+                    var best = 1000000
+                    if self.power > 0 { best = -1 }
+                    if index != 1 or self.power > 0 {
+                        for position in options {
+                            let value = distance[position]
+                            if value >= 0 and ((self.power == 0 and value < best) or (self.power > 0 and value > best)) { best = value; chosen = position }
+                        }
+                    }
+                    ghost.previous = ghost.position; ghost.position = chosen
+                }
+            }
+        }
+        self.collide()
+    }
+
+    fn snapshot() -> Map[String, Any] {
+        return {"width": self.width, "height": self.height, "board": self.board, "player": self.player,
+            "ghosts": self.ghosts.map(fn(ghost: Ghost) -> Map[String, Any] => {"position": ghost.position, "cooldown": ghost.cooldown}),
+            "headingX": self.headingX, "headingY": self.headingY, "score": self.score, "best": self.best,
+            "lives": self.lives, "level": self.level, "pellets": self.pellets, "power": self.power,
+            "invulnerable": self.invulnerable, "status": self.status, "ticks": self.ticks}
+    }
+
+    fn render() -> String {
+        var output = f"PAC-MAN  Score {self.score}  Best {self.best}  Lives {self.lives}  Level {self.level}\n"
+        output += f"Pellets {self.pellets}  {self.status}  Power {self.power}\n"
+        var top = self.player // self.width - 10
+        if top < 0 { top = 0 }
+        if top > self.height - 21 { top = self.height - 21 }
+        for (var row = top; row < top + 21; row++) {
+            for (var column = 0; column < self.width; column++) {
+                let position = row * self.width + column
+                var cell = "  "
+                if self.board[position] == "#" { cell = "\x1b[34m##" }
+                else if self.board[position] == "." { cell = ". " }
+                else if self.board[position] == "o" { cell = "\x1b[33mo " }
+                for (var index = 0; index < self.ghosts.length(); index++) {
+                    if self.ghosts[index].position == position {
+                        cell = ["\x1b[31mG ","\x1b[36mG ","\x1b[35mG ","\x1b[32mG "][index]
+                        if self.power > 0 { cell = "\x1b[34mg " }
+                    }
+                }
+                if self.player == position { cell = "\x1b[33mC " }
+                output += cell + "\x1b[0m"
+            }
+            output += "\n"
+        }
+        return output + "Arrows/WASD move  Space start  p pause  r restart  n next  q quit"
+    }
+}

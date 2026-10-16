@@ -1,0 +1,50 @@
+{
+  "name": "dotk3-language",
+  "displayName": "DotK 3 Language",
+  "description": "Syntax highlighting and live DotK 3 diagnostics for .k3 files",
+  "version": "0.8.0",
+  "publisher": "dotk",
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": "limited", "description": "Syntax highlighting is available; the language server runs only in trusted workspaces." }
+  },
+  "scripts": {
+    "build": "node --check extension.js",
+    "test": "node ../tests/editor_client.js && node ../tests/lsp_client.js"
+  },
+  "dependencies": { "vscode-languageclient": "9.0.1" },
+  "contributes": {
+    "commands": [
+      { "command": "dotk3.restartLanguageServer", "title": "DotK 3: Restart Language Server" },
+      { "command": "dotk3.showLanguageServerStatus", "title": "DotK 3: Show Language Server Status" },
+      { "command": "dotk3.testEditorIntegration", "title": "DotK 3: Test Editor Integration" }
+    ],
+    "configuration": {
+      "title": "DotK 3",
+      "properties": {
+        "dotk3.serverPath": {
+          "type": "string", "default": "",
+          "description": "Absolute path to dotk3-lsp. Empty auto-detects a built server in the workspace or extension source tree. Restart the server after changing it.",
+          "scope": "machine-overridable", "restricted": true
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "dotk3",
+        "aliases": ["DotK 3", "k3"],
+        "extensions": [".k3"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dotk3",
+        "scopeName": "source.dotk3",
+        "path": "./syntaxes/dotk3.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+fn reply(client) -> Null {
+    defer Sockets.close(client)
+    let request = Http.readRequest(client)
+    if request == null { return }
+    let path = request["target"]
+    if request["method"] == "GET" and path == "/" {
+        Http.writeResponse(client, 200, "DotK 3 web server\n")
+    } else if request["method"] == "GET" and path == "/health" {
+        Http.writeResponse(client, 200, Json.stringify({"ok": true, "language": "DotK 3"}), "application/json")
+    } else if request["method"] == "POST" and path == "/echo" {
+        Http.writeResponse(client, 200, request["body"], "application/octet-stream")
+    } else { Http.writeResponse(client, 404, "Not found\n") }
+}
+
+fn serve(port: Int, limit: Int) -> Null {
+    if limit < 0 { throw Error(Error.Kind.Value, "Request limit cannot be negative") }
+    let server = Sockets.listen("127.0.0.1", port)
+    defer Sockets.close(server)
+    IO.write(f"HTTP listening http://127.0.0.1:{Sockets.port(server)}\n")
+    var handled = 0
+    while limit == 0 or handled < limit {
+        let client = Sockets.accept(server, 1000)
+        if client != null {
+            try { reply(client) } catch error { IO.write(f"HTTP rejected: {error.message}\n") }
+            handled += 1
+        }
+        System.gc()
+    }
+}
+
+if System.args.length() == 0 { System.print("webserver: use --net --steps 0 webserver.k3 serve [port=8080] [requestLimit=0]") }
+else {
+    var port = 8080
+    var limit = 0
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    serve(port, limit)
+}

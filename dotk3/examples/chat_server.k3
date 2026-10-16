@@ -1,0 +1,73 @@
+from tcp_lines import LineBuffer
+
+class Peer {
+    let connection: Resource
+    var name: String = "guest"
+    let incoming: LineBuffer = LineBuffer()
+    constructor(connection) -> Null { self.connection = connection }
+}
+
+fn broadcast(peers: List[Peer], message: String) -> Null {
+    for peer in peers {
+        if not peer.connection.closed {
+            try { Sockets.send(peer.connection, message + "\n", 100) }
+            catch error { Sockets.close(peer.connection) }
+        }
+    }
+}
+
+fn serve(port: Int, limit: Int) -> Null {
+    if limit < 0 { throw Error(Error.Kind.Value, "Message limit cannot be negative") }
+    let server = Sockets.listen("127.0.0.1", port)
+    defer Sockets.close(server)
+    var peers: List[Peer] = []
+    var messages = 0
+    IO.write(f"CHAT listening 127.0.0.1:{Sockets.port(server)}\n")
+    while limit == 0 or messages < limit {
+        let connection = Sockets.accept(server, 0)
+        if connection != null {
+            if peers.length() >= 32 { Sockets.close(connection) }
+            else {
+                try { Sockets.send(connection, "Welcome to DotK 3 chat\n", 100); peers.append(Peer(connection)) }
+                catch error { Sockets.close(connection) }
+            }
+        }
+        for peer in peers {
+            if not peer.connection.closed {
+                try {
+                    let bytes = Sockets.receive(peer.connection, 4096, 0)
+                    if bytes != null {
+                        if bytes.length() == 0 { Sockets.close(peer.connection) }
+                        else {
+                            for line in peer.incoming.feed(bytes) {
+                                if line == "/quit" { Sockets.close(peer.connection); break }
+                                else if line.startsWith("/nick ") {
+                                    let name = line[6:]
+                                    if name.length() > 0 and name.length() <= 32 { peer.name = name }
+                                } else if line.length() > 0 {
+                                    if Text.encode(line).length() > 2048 { throw Error(Error.Kind.Value, "Chat message exceeds 2 KiB") }
+                                    broadcast(peers, peer.name + ": " + line)
+                                    messages += 1
+                                }
+                            }
+                        }
+                    }
+                } catch error { Sockets.close(peer.connection) }
+            }
+        }
+        peers = peers.filter(fn(peer: Peer) -> Bool => not peer.connection.closed)
+        System.gc()
+        System.delay(10)
+    }
+    broadcast(peers, "Server closing")
+    for peer in peers { Sockets.close(peer.connection) }
+}
+
+if System.args.length() == 0 { System.print("chat_server: use --net --steps 0 chat_server.k3 serve [port=9090] [messageLimit=0]") }
+else {
+    var port = 9090
+    var limit = 0
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    serve(port, limit)
+}

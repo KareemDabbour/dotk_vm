@@ -1,0 +1,225 @@
+# record Vec2{
+#     x: Float
+#     y: Float
+# }
+
+# record Pos{
+#     x: Int
+#     y: Int
+# }
+
+# trait Renderable{
+#     """Renders the object to the screen."""
+#     fn render() -> Null
+# }
+
+# class Scene{
+#     var objects: List[Renderable] = []
+
+#     fn addObject(obj: Renderable) {
+#         self.objects.append(obj)
+#     }
+
+#     fn render() -> Null {
+#         for obj in self.objects {
+#             obj.render()
+#         }
+#     }
+
+# }
+
+
+
+# class Camera implements Renderable{
+#     var position: Vec2 = Vec2(x: 2.0, y: 2.0)
+#     var velocity: Vec2 = Vec2(x: 0.0, y: 0.0)
+#     var angle: Float = 0.0
+#     var fov: Float = 90.0
+
+#     fn shootRays(numRays: Int, maxDistance: Float=10.0) {
+
+#     }
+
+#     private fn shootRay(angle: Float, maxDistance: Float=10.0) {
+#         """Shoots a single ray from the camera at the given angle and returns the distance to the first obstacle."""
+#     }
+
+#     fn render() -> Null {
+#         """Renders the object to the screen."""
+#     }
+# }
+
+# let camera: Camera = Camera()
+# camera.render()
+
+# let room : List[String] = [
+#         "############################",
+#         "#                          #",
+#         "#                          #",
+#         "# #### ## ######## ## #### #",
+#         "#                          #",
+#         "##                         #",
+#         "###### ## ######## ## ######",
+#         "#                          #",
+#         "###### ## ######## ## ######",
+#         "###### ## ######## ## ######",
+#         "#             #            #",
+#         "#             #            #",
+#         "### ## ## ######## #  ## ###",
+#         "#                          #",
+#         "#                          #",
+#         "############################"]
+
+
+
+
+class Ansi {
+    static let BOLD: String = "\x1b[1m"
+    static let DIM: String = "\x1b[2m"
+    static let UNDERLINED: String = "\x1b[4m"
+    static let BLINK: String = "\x1b[5m"
+    static let REVERSE: String = "\x1b[7m"
+    static let HIDDEN: String = "\x1b[8m"
+    static let BLACK: String = "\x1b[0;30m"
+    static let RED: String = "\x1b[0;31m"
+    static let GREEN: String = "\x1b[0;32m"
+    static let YELLOW: String = "\x1b[0;33m"
+    static let BLUE: String = "\x1b[0;34m"
+    static let PURPLE: String = "\x1b[0;35m"
+    static let CYAN: String = "\x1b[0;36m"
+    static let WHITE: String = "\x1b[0;37m"
+    static let RESET: String = "\x1b[0m"
+}
+
+from IO import write
+from Math import toInt, toFloat, sin, cos
+from System import print
+
+var s = ".,-~:;=!*#$@"
+fn wrap(s, col) => f"{col}{s}{Ansi.RESET}"
+
+let STRS = [      wrap(".", Ansi.BLACK),
+      wrap(",", Ansi.BLACK),
+      wrap("-", Ansi.RED),
+      wrap("~", Ansi.RED),
+      wrap(":", Ansi.GREEN),
+      wrap(";", Ansi.GREEN),
+      wrap("=", Ansi.BLUE),
+      wrap("!", Ansi.BLUE),
+      wrap("*", Ansi.PURPLE),
+      wrap("#", Ansi.PURPLE),
+      wrap("$", Ansi.CYAN),
+      wrap("@", Ansi.WHITE)]
+
+var screenWidth = 20
+var screenHeight = 20
+var theta_spacing = 0.07
+var phi_spacing = 0.02
+
+var R1 = 1
+var R2 = 2
+var K2 = 5
+var A = 0.0
+var B = 0.0
+var K1 = screenHeight*K2*3/(8*(R1+R2))
+
+fn pow(x, n) -> Int {
+  var result = 1
+  for (var i = 0; i < n; i += 1){
+    result *= x
+  }
+  return result
+}
+
+fn round(x: Float, n: Int) -> Float => toInt(x * pow(10, n) + 0.5) / pow(10, n)
+fn createBuff(width: Int, height: Int) -> List {
+  return Collections.range(height).map(fn(x)=>Collections.range(width).map(fn(y)=>null))
+}
+fn resetBuff(buff: List, val) -> List {
+  return buff.map(fn(row)=>row.map(fn(_)=>val))
+}
+fn run(){
+
+
+var output: List[List[String?]] = createBuff(screenWidth, screenHeight)
+var zbuffer: List[List[Float?]] = createBuff(screenWidth, screenHeight)
+var cosA = cos(A)
+var sinA = sin(A)
+var cosB = cos(B)
+var sinB = sin(B)
+var costheta = cos(0.0)
+var sintheta = sin(0.0)
+var cosphi = cos(0.0)
+var sinphi = sin(0.0)
+var circlex = 0.0
+var circley = 0.0
+var circlez = 0.0
+var x = 0.0
+var y = 0.0
+var z = 0.0
+var ooz = 0.0
+var xp = 0
+var yp = 0
+var L = 0.0
+
+for(var i = 0;i <10;i++){  
+  cosA = cos(A)
+  sinA = sin(A)
+  cosB = cos(B)
+  sinB = sin(B)
+  output = resetBuff(output, " ")
+  zbuffer = resetBuff(zbuffer, 0.0)
+
+# print(output, zbuffer)
+# print(zbuffer.length())
+# print(zbuffer[0].length())
+
+  for (var theta = 0.0; theta < 6.28; theta += theta_spacing){
+    costheta = cos(theta)
+    sintheta = sin(theta)
+    for(var phi = 0.0; phi < 6.28; phi += phi_spacing){
+      cosphi = cos(phi)
+      sinphi = sin(phi)
+      circlex = R2 + R1 * costheta
+      circley = sintheta
+      circlez = R1 * sintheta
+      x = circlex * (cosB * cosphi + sinA * sinB * sinphi) - circley * cosA * sinB
+      y = circlex * (sinB * cosphi - sinA * cosB * sinphi) + circley * cosA * cosB
+      z = K2 + cosA * circlex * sinphi + circley * sinA
+      ooz = 1 / z
+      xp = Math.floor(10 + K1* ooz * x)
+      yp = Math.floor(10 - K1* ooz * y)
+      L = cosphi * costheta * sinB - cosA * costheta * sinphi - sinA * sintheta + cosB * (cosA * sintheta - costheta * sinA * sinphi)
+    #   print(phi, theta, L, ooz, xp, yp) 
+      if (L > 0){
+        # try{
+
+        #     print(zbuffer.length())
+        #     print(zbuffer[xp].length())
+        # }catch error{
+        #     print("Error: ", error)
+        #     print("xp: ", xp, "yp: ", yp)
+        #     print(zbuffer)
+        # }
+        #   print(phi, theta, L, ooz, xp, yp) 
+
+        if (ooz > zbuffer[xp][yp]){
+          zbuffer[xp][yp] = ooz
+        #   var luminance_index = 
+          output[xp][yp] = STRS[toInt(L * 8)]
+        }
+      }
+    }
+  }
+#   clear()
+  for (var i = 0; i < screenHeight; i+=1){
+    write( "".join(output[i]))
+    write( "\n")
+  }
+  A += 0.04
+  B += 0.02
+}
+
+}
+
+run()

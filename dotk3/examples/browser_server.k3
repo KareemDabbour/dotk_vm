@@ -1,0 +1,58 @@
+from pacman_model import PacMan
+
+fn reply(client, game: PacMan, assets: Map[String, Any]) -> Null {
+    defer Sockets.close(client)
+    try {
+        let request = Http.readRequest(client, 100)
+        if request == null { return }
+        let path = request["target"]
+        let method = request["method"]
+        if method == "GET" and assets.contains(path) {
+            let asset = assets[path]
+            Http.writeResponse(client, 200, asset[0], asset[1])
+        } else if method == "GET" and path == "/api/state" {
+            Http.writeResponse(client, 200, Json.stringify(game.snapshot()), "application/json")
+        } else if method == "POST" and path == "/api/action" {
+            let payload = Json.parse(Text.decode(request["body"]))
+            game.action(payload["action"])
+            Http.writeResponse(client, 200, Json.stringify(game.snapshot()), "application/json")
+        } else if path == "/api/state" or path == "/api/action" {
+            Http.writeResponse(client, 405, "Method not allowed\n")
+        } else { Http.writeResponse(client, 404, "Not found\n") }
+    } catch error {
+        if not client.closed { Http.writeResponse(client, 400, Json.stringify({"error": error.message}), "application/json", 100) }
+    }
+}
+
+fn serve(port: Int, limit: Int) -> Null {
+    if limit < 0 { throw Error(Error.Kind.Value, "Request limit cannot be negative") }
+    let assets: Map[String, Any] = {
+        "/": [Files.readBytes("index.html"), "text/html; charset=utf-8"],
+        "/app.css": [Files.readBytes("app.css"), "text/css; charset=utf-8"],
+        "/app.js": [Files.readBytes("app.js"), "application/javascript"],
+        "/icons.js": [Files.readBytes("lucide.min.js"), "application/javascript"],
+        "/arcade.woff2": [Files.readBytes("oxanium.woff2"), "font/woff2"]
+    }
+    let game = PacMan()
+    let server = Sockets.listen("127.0.0.1", port)
+    defer Sockets.close(server)
+    IO.write(f"UI listening http://127.0.0.1:{Sockets.port(server)}\n")
+    var handled = 0
+    var previous = System.monotonicMillis()
+    while limit == 0 or handled < limit {
+        let client = Sockets.accept(server, 5)
+        if client != null { reply(client, game, assets); handled += 1 }
+        let now = System.monotonicMillis()
+        if now - previous >= 130 { game.tick(); previous = now }
+        System.gc()
+    }
+}
+
+if System.args.length() == 0 { System.print("browser_server: use --net --files-root dotk3/examples/browser_ui browser_server.k3 serve [port=8081] [requestLimit=0]") }
+else {
+    var port = 8081
+    var limit = 0
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    serve(port, limit)
+}

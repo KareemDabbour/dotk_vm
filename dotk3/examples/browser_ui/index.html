@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111215">
+  <title>Pac-Man | DotK Arcade</title>
+  <link rel="icon" href="data:,">
+  <link rel="preload" href="/arcade.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/icons.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/">DOTK <span>ARCADE</span></a>
+    <span class="connection" id="connection" role="status">Connecting</span>
+  </header>
+  <main>
+    <section class="game" aria-label="Pac-Man">
+      <div class="title-row"><h1>PAC-MAN</h1><span class="level">LEVEL <b id="level">01</b></span></div>
+      <dl class="hud">
+        <div><dt>SCORE</dt><dd id="score">000000</dd></div>
+        <div><dt>BEST</dt><dd id="best">000000</dd></div>
+        <div><dt>LIVES</dt><dd id="lives">3</dd></div>
+        <div><dt>PELLETS</dt><dd id="pellets">--</dd></div>
+      </dl>
+      <div class="stage" id="stage">
+        <canvas id="maze" width="896" height="992" tabindex="0" aria-label="Pac-Man maze" role="img"></canvas>
+        <div class="overlay" id="overlay">
+          <span class="overlay-status" id="overlay-status">READY</span>
+          <button class="primary" id="play"><i data-lucide="play"></i><span id="play-label">Play</span></button>
+        </div>
+      </div>
+    </section>
+    <aside class="console" aria-label="Game controls">
+      <div class="console-heading"><span id="game-status" aria-live="polite">READY</span><span class="power" id="power"></span></div>
+      <div class="tools">
+        <button class="icon-button" id="pause" title="Pause or resume" aria-label="Pause or resume"><i data-lucide="pause"></i></button>
+        <button class="icon-button" id="restart" title="Restart game" aria-label="Restart game"><i data-lucide="rotate-ccw"></i></button>
+        <label class="sound" title="Sound"><i data-lucide="volume-2"></i><input type="checkbox" id="sound" aria-label="Sound"></label>
+      </div>
+      <div class="dpad" aria-label="Direction controls">
+        <button class="icon-button up" data-direction="up" title="Move up" aria-label="Move up"><i data-lucide="chevron-up"></i></button>
+        <button class="icon-button left" data-direction="left" title="Move left" aria-label="Move left"><i data-lucide="chevron-left"></i></button>
+        <span class="dpad-center" aria-hidden="true"></span>
+        <button class="icon-button right" data-direction="right" title="Move right" aria-label="Move right"><i data-lucide="chevron-right"></i></button>
+        <button class="icon-button down" data-direction="down" title="Move down" aria-label="Move down"><i data-lucide="chevron-down"></i></button>
+      </div>
+      <div class="roster" aria-hidden="true"><span class="red">BLINKY</span><span class="mint">WANDERER</span><span class="pink">CHASER</span></div>
+      <div class="session"><span>SESSION</span><b id="session">NEW RUN</b></div>
+    </aside>
+  </main>
+  <footer><span>DOTK 3</span><span class="footer-status" id="footer-status">PAC-MAN</span></footer>
+</body>
+</html>

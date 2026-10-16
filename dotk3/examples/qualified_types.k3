@@ -1,0 +1,17 @@
+import model_types as model
+
+fn identity(point: model.Point) -> model.Point {
+    return point
+}
+
+fn coordinate(event: model.Event) -> Int? {
+    return match event {
+        model.Event.Move(point) => point.x,
+        model.Event.Quit => null,
+    }
+}
+
+let point: model.Point = model.Point(x: 3)
+let events: List[model.Event] = [model.Event.Move(identity(point)), model.Event.Quit()]
+for event in events { System.print(coordinate(event) ?? -1) }
+System.print(point.y)
