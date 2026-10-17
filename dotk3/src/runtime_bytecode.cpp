@@ -35,8 +35,8 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         else for (size_t index = 0; index < code.parameters; index++) if (code.locals[index].name == argument.name) slot = index;
         if (slot >= code.parameters) throw Error(span, argument.name.empty() ? "Too many positional arguments" : "Unknown named argument '" + argument.name + "'", "call");
         if (frame.initialized[slot]) throw Error(span, "Argument supplied more than once: '" + code.locals[slot].name + "'", "call");
-        frame.contracts[slot] = resolveContract(code.locals[slot].type, environment, span);
-        requireType(argument.value, frame.contracts[slot], span); frame.locals[slot] = argument.value; frame.initialized[slot] = true;
+        if (config.enforceContracts) { frame.contracts[slot] = resolveContract(code.locals[slot].type, environment, span); requireType(argument.value, frame.contracts[slot], span); }
+        frame.locals[slot] = argument.value; frame.initialized[slot] = true;
     }
     for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
     if (captured) for (size_t index = 0; index < code.captures && index < captured->size(); index++) {
@@ -141,15 +141,17 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             break;
         case ByteOp::CheckObject: byteObject(frame.stack.back(), location); break;
         case ByteOp::StoreLocal:
-            requireType(frame.stack.back(), frame.contracts[instruction.operand], location); frame.locals[instruction.operand] = frame.stack.back(); break;
+            if (config.enforceContracts) requireType(frame.stack.back(), frame.contracts[instruction.operand], location);
+            frame.locals[instruction.operand] = frame.stack.back(); break;
         case ByteOp::StoreName: {
             Binding &target = binding(instruction.operand, node->children[0]->span);
             requireType(frame.stack.back(), target.contract, location); target.value = frame.stack.back(); break;
         }
         case ByteOp::DeclareName: { Value value = pop(); define(environment, node->text, value, node->mutableBinding, node->type, location); break; }
         case ByteOp::DeclareLocal: {
-            Value value = frame.stack.back(); frame.contracts[instruction.operand] = resolveContract(code.locals[instruction.operand].type, environment, location);
-            requireType(value, frame.contracts[instruction.operand], location); frame.locals[instruction.operand] = value; frame.initialized[instruction.operand] = true; pop(); break;
+            Value value = frame.stack.back();
+            if (config.enforceContracts) { frame.contracts[instruction.operand] = resolveContract(code.locals[instruction.operand].type, environment, location); requireType(value, frame.contracts[instruction.operand], location); }
+            frame.locals[instruction.operand] = value; frame.initialized[instruction.operand] = true; pop(); break;
         }
         case ByteOp::ClearLocal: frame.locals[instruction.operand] = {}; frame.initialized[instruction.operand] = false; frame.contracts[instruction.operand].reset(); break;
         case ByteOp::DefineFunction: {

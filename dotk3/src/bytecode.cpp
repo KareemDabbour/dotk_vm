@@ -61,11 +61,18 @@ class Compiler {
             for (const auto &binding : scopes[index - 1]) emit(ByteOp::ClearLocal, node, binding.second);
     }
     void expression(const Ast &node) {
+        if (node->widen && node->kind == "literal" && node->literalKind == TokenKind::Integer) {
+            std::string digits = node->text; digits.erase(std::remove(digits.begin(), digits.end(), '_'), digits.end());
+            try { double value = static_cast<double>(std::stoll(digits, nullptr, 0)); size_t position = emit(ByteOp::Float, node); code.instructions[position].floating = value; return; }
+            catch (const std::exception &) {}
+        }
         expressionInner(node);
         if (node->widen) emit(ByteOp::IntToFloat, node);
     }
+    // Typed (static) code counts steps per statement and loop iteration instead of per expression.
+    bool ticksPerExpression() const { return !slotClosures || lexical; }
     void expressionInner(const Ast &node) {
-        emit(ByteOp::Tick, node);
+        if (ticksPerExpression()) emit(ByteOp::Tick, node);
         if (node->kind == "literal") {
             if (node->literalKind == TokenKind::Integer) {
                 std::string digits = node->text; digits.erase(std::remove(digits.begin(), digits.end(), '_'), digits.end());
@@ -108,7 +115,8 @@ class Compiler {
         else if (node->kind == "call") {
             const auto &callee = node->children[0];
             if (callee->kind == "member") {
-                emit(ByteOp::Tick, callee); expression(callee->children[0]);
+                if (ticksPerExpression()) emit(ByteOp::Tick, callee);
+                expression(callee->children[0]);
                 size_t skip = callee->safe ? emit(ByteOp::JumpNull, callee) : 0;
                 emit(ByteOp::ResolveMethod, callee);
                 for (size_t index = 1; index < node->children.size(); index++) expression(node->children[index]);
