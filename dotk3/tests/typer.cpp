@@ -43,6 +43,10 @@ int main() {
     accepts("fn grid(w: Int, h: Int) -> List<List<String?>> { return Collections.range(h).map(fn(y) => Collections.range(w).map(fn(x) => null)) }");
     accepts("fn make<T>(w: Int) -> List<T?> { return Collections.range(w).map(fn(i) => null) }\nfn fill<T>(b: List<T?>, v: T) -> List<T?> { return b.map(fn(x: T?) => v) }");
     accepts("fn reset(b: List<List<String?>>) -> List<List<String?>> { return b.map(fn(row: List<String?>) => row.map(fn(x: String?) => 'a')) }");
+    accepts("class P { let a: Int; var b: String; constructor(x: Int) -> Null { self.a = x; if x > 0 { self.b = 'p' } else { self.b = 'n' } } }");
+    accepts("class P { let a: Int; constructor(f: Bool) -> Null { if f { throw Error(Error.Kind.Value, 'x') }\nself.a = 1 } }");
+    rejects("class P { let a: Int; constructor(f: Bool) -> Null { if f { self.a = 1 } } }", "may not initialize field 'a'");
+    rejects("class P { let a: Int; constructor(f: Bool) -> Null { if f { return }\nself.a = 1 } }", "may return before initializing field 'a'");
     rejects("let a: Int = 1.5", "Expected Int, got Float");
     rejects("let a = 1\na = 2", "Cannot reassign");
     accepts("var a = 1\na = 2\na += 3\na++");

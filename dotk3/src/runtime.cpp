@@ -705,12 +705,16 @@ Value Runtime::binary(const std::string &operation, Value left, Value right, con
     }
     if (std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
         int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0;
-        if (operation == "+") { if (__builtin_add_overflow(first, second, &result)) throw Error(span, "Int overflow", "overflow"); return result; }
-        if (operation == "-") { if (__builtin_sub_overflow(first, second, &result)) throw Error(span, "Int overflow", "overflow"); return result; }
-        if (operation == "*") { if (__builtin_mul_overflow(first, second, &result)) throw Error(span, "Int overflow", "overflow"); return result; }
+        bool strict = config.enforceContracts;  // checked programs wrap like Java; contract mode keeps overflow errors
+        if (operation == "+") { if (__builtin_add_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
+        if (operation == "-") { if (__builtin_sub_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
+        if (operation == "*") { if (__builtin_mul_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
         if (operation == "//" || operation == "%") {
             if (!second) throw Error(span, "Division by zero", "value");
-            if (first == INT64_MIN && second == -1) throw Error(span, "Int overflow", "overflow");
+            if (first == INT64_MIN && second == -1) {
+                if (strict) throw Error(span, "Int overflow", "overflow");
+                return operation == "//" ? INT64_MIN : int64_t(0);
+            }
             int64_t quotient = first / second, remainder = first % second;
             if (remainder && ((remainder < 0) != (second < 0))) { quotient--; remainder += second; }
             return operation == "//" ? quotient : remainder;
@@ -719,9 +723,9 @@ Value Runtime::binary(const std::string &operation, Value left, Value right, con
             if (second < 0) throw Error(span, "Int exponent must be non-negative; use Math.toFloat for fractional powers", "value");
             int64_t base = first; result = 1; uint64_t exponent = static_cast<uint64_t>(second);
             while (exponent) {
-                if ((exponent & 1) && __builtin_mul_overflow(result, base, &result)) throw Error(span, "Int overflow", "overflow");
+                if ((exponent & 1) && __builtin_mul_overflow(result, base, &result) && strict) throw Error(span, "Int overflow", "overflow");
                 exponent >>= 1;
-                if (exponent && __builtin_mul_overflow(base, base, &base)) throw Error(span, "Int overflow", "overflow");
+                if (exponent && __builtin_mul_overflow(base, base, &base) && strict) throw Error(span, "Int overflow", "overflow");
             }
             return result;
         }

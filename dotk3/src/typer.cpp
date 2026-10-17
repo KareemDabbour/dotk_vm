@@ -653,11 +653,69 @@ private:
                 bool constructor = child->constructor || child->text == "init";
                 Ty result = checkFunctionBody(child, signature->type->args, declared, signature->typeParams, info, constructor, info->self, child->staticMember);
                 finishSignature(signature, result);
+                if (child->constructor && !child->children.empty()) checkConstructorFields(node, child);
                 if (child->text == "toString" && !child->staticMember && signature->type->result != stringType)
                     error(child->span, "Expected String, got " + show(signature->type->result) + " (toString must return String)");
             }
         }
         popScope();
+    }
+
+    // Fields without defaults must be assigned on every path through a custom constructor.
+    void checkConstructorFields(const Ast &classNode, const Ast &constructor) {
+        std::set<std::string> fields;
+        for (const auto &field : classNode->parameters) if (!field.defaultValue) fields.insert(field.name);
+        if (fields.empty()) return;
+        std::set<std::string> assigned;
+        bool completes = fieldFlow(constructor->children[0], assigned, fields);
+        if (!completes) return;
+        for (const auto &field : fields) if (!assigned.count(field)) error(constructor->span, "Constructor may not initialize field '" + field + "'");
+    }
+
+    // Returns false when the path never reaches the end of the node.
+    bool fieldFlow(const Ast &node, std::set<std::string> &assigned, const std::set<std::string> &fields) {
+        if (!node) return true;
+        const std::string &kind = node->kind;
+        if (kind == "block") { for (const auto &child : node->children) if (!fieldFlow(child, assigned, fields)) return false; return true; }
+        if (kind == "throw") return false;
+        if (kind == "return") {
+            for (const auto &field : fields) if (!assigned.count(field)) error(node->span, "Constructor may return before initializing field '" + field + "'");
+            return false;
+        }
+        if (kind == "expression" && !node->children.empty()) {
+            const Ast &value = node->children[0];
+            if (value->kind == "assignment" && value->text == "=" && value->children[0]->kind == "member" && value->children[0]->children[0]->kind == "name" &&
+                value->children[0]->children[0]->text == "self" && fields.count(value->children[0]->text)) assigned.insert(value->children[0]->text);
+            return true;
+        }
+        if (kind == "if") {
+            std::set<std::string> thenState = assigned, elseState = assigned;
+            bool thenCompletes = fieldFlow(node->children[1], thenState, fields);
+            bool elseCompletes = node->children.size() > 2 ? fieldFlow(node->children[2], elseState, fields) : true;
+            if (!thenCompletes && !elseCompletes) return false;
+            if (thenCompletes && elseCompletes) {
+                std::set<std::string> both;
+                for (const auto &field : thenState) if (elseState.count(field)) both.insert(field);
+                assigned = std::move(both);
+            } else assigned = thenCompletes ? thenState : elseState;
+            return true;
+        }
+        if (kind == "while" || kind == "for" || kind == "for_c") {
+            std::set<std::string> copy = assigned; fieldFlow(node->children.back(), copy, fields); return true;
+        }
+        if (kind == "try") {
+            std::set<std::string> bodyState = assigned, catchState = assigned;
+            bool bodyCompletes = fieldFlow(node->children[0], bodyState, fields), catchCompletes = fieldFlow(node->children[1], catchState, fields);
+            if (!bodyCompletes && !catchCompletes) return false;
+            if (bodyCompletes && catchCompletes) {
+                std::set<std::string> both;
+                for (const auto &field : bodyState) if (catchState.count(field)) both.insert(field);
+                assigned = std::move(both);
+            } else assigned = bodyCompletes ? bodyState : catchState;
+            if (node->children.size() > 2) return fieldFlow(node->children[2], assigned, fields);
+            return true;
+        }
+        return true;
     }
 
     void finishSignature(const std::shared_ptr<Signature> &signature, Ty result) {

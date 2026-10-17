@@ -212,7 +212,10 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 case Math::Multiply: overflow = __builtin_mul_overflow(first, second, &result); value = result; break;
                 case Math::FloorDivide: case Math::Modulo: {
                     if (!second) throw Error(location, "Division by zero", "value");
-                    if (first == INT64_MIN && second == -1) throw Error(location, "Int overflow", "overflow");
+                    if (first == INT64_MIN && second == -1) {
+                        if (config.enforceContracts) throw Error(location, "Int overflow", "overflow");
+                        value = instruction.math == Math::FloorDivide ? INT64_MIN : 0; break;
+                    }
                     int64_t quotient = first / second, remainder = first % second;
                     if (remainder && ((remainder < 0) != (second < 0))) { quotient--; remainder += second; }
                     value = instruction.math == Math::FloorDivide ? quotient : remainder; break;
@@ -225,7 +228,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 case Math::GreaterEqual: value = first >= second; break;
                 default: break;
                 }
-                if (overflow) throw Error(location, "Int overflow", "overflow");
+                if (overflow && config.enforceContracts) throw Error(location, "Int overflow", "overflow");
             } else {
                 if constexpr (profiled) config.profiler->genericBinaryOperations++;
                 value = binary(instruction.operand ? node->text.substr(0, 1) : node->text, left, right, location);
@@ -240,8 +243,8 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             else if (node->text == "+") {
                 if (!std::holds_alternative<int64_t>(value) && !std::holds_alternative<double>(value)) throw Error(location, "Unary arithmetic requires a number", "type");
             } else if (std::holds_alternative<int64_t>(value)) {
-                if (std::get<int64_t>(value) == INT64_MIN) throw Error(location, "Int overflow", "overflow");
-                frame.stack.back() = -std::get<int64_t>(value);
+                if (std::get<int64_t>(value) == INT64_MIN && config.enforceContracts) throw Error(location, "Int overflow", "overflow");
+                frame.stack.back() = static_cast<int64_t>(0 - static_cast<uint64_t>(std::get<int64_t>(value)));
             } else frame.stack.back() = -floating(value, location);
             break;
         }

@@ -166,6 +166,11 @@ if "$binary" --unknown >"$work/output" 2>"$work/error"; then
 else
     exit_code=$?; test "$exit_code" -eq 64
 fi
+output=$("$binary" --no-check -e 'fn f(a) { return a }; System.print(f(3))' 2>"$work/warning")
+expect '3' "$output"
+grep -Fq 'Warning: Parameter' "$work/warning"
+if "$binary" -e 'fn f(a) { return a }' >"$work/output" 2>"$work/error"; then exit 1; else exit_code=$?; fi
+test "$exit_code" -eq 65
 printf '%s\n' 'cli: PASS'
 printf '%s\n' 'fn add(value: Int) -> Int {' 'let local = value + 1' 'return local' '}' 'var result = add(2)' 'result += 1' 'System.print(result)' >"$work/debug.k3"
 printf '%s\n' 'b 3' 'breakpoints' 'c' 'locals' 'bt' 'frame 1' 'locals' 'frame 0' 'p local' 'p missing()' 'f' 'locals' 'n' 'globals' 'c' | "$binary" --debug "$work/debug.k3" >"$work/debug-output"

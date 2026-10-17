@@ -136,4 +136,7 @@ code=$?
 set -e
 [ "$code" -eq 65 ] && [ "$(cat "$dir/out")" = '0 2 5 7 [0, 1, 2] -3' ] && grep -q 'Math.sqrt is undefined' "$dir/errors" || { echo 'direct native calls differ' >&2; cat "$dir/out" "$dir/errors" >&2; exit 1; }
 
+printf 'let big: Int = 9223372036854775807\nvar acc = big\nacc += 1\nSystem.print(big + 1, big * 2, -big - 2, acc, 2 ** 63, (-big - 1) // -1)\n' > "$dir/wrap.k3"
+[ "$("$bin" "$dir/wrap.k3")" = '-9223372036854775808 -2 9223372036854775807 -9223372036854775808 -9223372036854775808 -9223372036854775808' ] || { echo 'Int arithmetic must wrap' >&2; "$bin" "$dir/wrap.k3" >&2; exit 1; }
+
 echo 'static: PASS'

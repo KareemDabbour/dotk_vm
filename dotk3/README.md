@@ -68,6 +68,8 @@ System.print(xs[0]?.toString() ?? "none")         // ?. and ?? on nullable value
 - Collections remain subclassable (`class Inventory extends List<String>`).
 - `String + value` concatenates by calling the value's `toString`.
 - `Json.parse` and `Reflection.binding` return `Object?`; use `as` to narrow.
+- `--no-check` reports type errors as warnings and runs the program under dynamic
+  run-time contracts instead (an escape hatch for scripts that are not typed yet).
 - The embedding C API still executes dynamic (contract-checked) code; typed
   native signatures are not wired through the C ABI yet.
 
