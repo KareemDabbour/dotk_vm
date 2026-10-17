@@ -46,7 +46,7 @@ Timeout.timeout(15) do
     prefix = unicode.split('missing', 2).first
     expected = prefix.encode('UTF-16LE').bytesize / 2
     raise 'Incorrect UTF-16 position' unless diagnostic.dig('params', 'diagnostics', 0, 'range', 'start', 'character') == expected
-    outline = "record Point { x: Int }\r\nenum Event { Move(Point), Quit }\r\nfn name(value: Event) -> String { return 'name' }\r\nlet value = Event.Quit()"
+    outline = "record Point { x: Int }\r\nenum Event { Move(Point), Quit }\r\nfn name(value: Event) -> String { return 'name' }\r\nlet value = Event.Quit"
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: uri, version: 4 }, contentChanges: [{ text: outline }] } })
     raise 'Valid outline source rejected' unless receive_message(reader).dig('params', 'diagnostics') == []
     send_message(writer, { jsonrpc: '2.0', id: 'outline', method: 'textDocument/documentSymbol', params: { textDocument: { uri: uri } } })
@@ -76,11 +76,11 @@ Timeout.timeout(15) do
       ["let data: Bytes = Files.readBytes('must-not-execute')\ndata", 'let data: Bytes', 'Declared type'],
       ["let count = 42\ncount", 'let count: Int = 42', 'Type inferred from initializer'],
       ["var active = true\nactive", 'var active: Bool = true', 'Type inferred from initializer'],
-      ["let values: List[Int] = [1,2]\nvalues", 'let values: List[Int]', 'Declared type'],
+      ["let values: List<Int> = [1,2]\nvalues", 'let values: List[Int]', 'Declared type'],
       ["class Item {}\nlet item = Item()\nitem", 'let item: Item', 'Type inferred from initializer'],
       ["let callback = fn(value: Int) -> Int => value + 1\ncallback", 'let callback: Function', 'fn callback(value: Int) -> Int'],
       ["export let version: String = 'alpha'", 'export let version: String', 'Declared type'],
-      ["let dynamic: Any = 1\ndynamic", 'let dynamic: Any', 'Declared type'],
+      ["let dynamic: Object = 1\ndynamic", 'let dynamic: Object', 'Declared type'],
       ["let total = 1 + 2\ntotal", 'let total: Int', 'Type inferred from initializer'],
       ["let values = [1,2]\nvalues", 'let values: List[Int]', 'Type inferred from initializer'],
       ["let scores = {'Ada': 1}\nscores", 'let scores: Map[String, Int]', 'Type inferred from initializer'],
@@ -121,12 +121,12 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', id: 'superMembers', method: 'textDocument/completion', params: { textDocument: { uri: oopUri }, position: { line: 2, character: 6 } } })
     raise 'Super member discovery missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['read']
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: oopUri, version: 4 }, contentChanges: [{ text: "class C { static fn read() -> Int { return self.value } }" }] } })
-    raise 'Static self diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?("Undeclared name 'self'")
+    raise 'Static self diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?("Undefined name 'self'")
     collectionUri = 'untitled:CollectionClasses'
     collectionCases = [
       ["class Bag extends Collections.List { let label: String = 'bag' }\nlet bag = Bag()\nbag.", ['all', 'any', 'append', 'clear', 'contains', 'extend', 'filter', 'find', 'findIndex', 'indexOf', 'insert', 'label', 'length', 'map', 'reduce', 'removeAt', 'reverse']],
-      ["let unique: Set[Int] = Set([1,2])\nunique.", ['add', 'clear', 'contains', 'difference', 'intersection', 'isSubsetOf', 'length', 'remove', 'union', 'values']],
-      ["record Item { value: Int }\nlet unique: Set[Item] = Set()\nunique.values()[0].", ['value']]
+      ["let unique: Set<Int> = Set([1,2])\nunique.", ['add', 'clear', 'contains', 'difference', 'intersection', 'isSubsetOf', 'length', 'remove', 'union', 'values']],
+      ["record Item { value: Int }\nlet unique: Set<Item> = Set()\nunique.values()[0].", ['value']]
     ]
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: collectionUri, languageId: 'dotk3', version: 1, text: '' } } })
     receive_message(reader)
@@ -136,7 +136,7 @@ Timeout.timeout(15) do
       send_message(writer, { jsonrpc: '2.0', id: "collectionClass#{index}", method: 'textDocument/completion', params: { textDocument: { uri: collectionUri }, position: { line: text.split("\n").size - 1, character: text.split("\n").last.length } } })
       raise "Collection class discovery #{index} missing" unless receive_message(reader)['result'].map { |entry| entry['label'] } == expected
     end
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: collectionUri, version: 5 }, contentChanges: [{ text: "let unique: Set[Int] = Set()\nunique.add('bad')" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: collectionUri, version: 5 }, contentChanges: [{ text: "let unique: Set<Int> = Set()\nunique.add('bad')" }] } })
     raise 'Set element diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
     accessUri = 'untitled:ClassAccess'
     accessHeader = "class Vault { private var secret: Int = 3; protected var shared: Int = 1; public var value: Int = 2; public fn read() -> Int { return self.secret } }\n"
@@ -155,7 +155,7 @@ Timeout.timeout(15) do
       raise "Visibility completion #{index} failed" unless receive_message(reader)['result'].map { |entry| entry['label'] } == expected
     end
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: accessUri, version: 5 }, contentChanges: [{ text: accessHeader + 'Vault().secret' }] } })
-    raise 'Private access diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Private member')
+    raise 'Private access diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('private in Vault')
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: accessUri, version: 6 }, contentChanges: [{ text: accessHeader + 'Vault().read()' }] } })
     raise 'Private access fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
     operatorUri = 'untitled:OperatorHooks'
@@ -187,7 +187,7 @@ Timeout.timeout(15) do
       raise "Foundation discovery #{index} missing" unless receive_message(reader)['result'].map { |entry| entry['label'] } == expected
     end
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: foundationUri, version: 12 }, contentChanges: [{ text: "let value = f'{missing}'" }] } })
-    raise 'Interpolation name diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Undeclared')
+    raise 'Interpolation name diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Undefined name')
     resourceUri = 'untitled:NativeResource'
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: resourceUri, languageId: 'dotk3', version: 1, text: "fn inspect(value: Resource) -> String { return value.type_name }" } } })
     raise 'Resource annotations/member types rejected' unless receive_message(reader).dig('params', 'diagnostics') == []
@@ -202,18 +202,18 @@ Timeout.timeout(15) do
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'intersectionMembers', method: 'textDocument/completion', params: { textDocument: { uri: intersectionUri }, position: { line: 2, character: 6 } } })
     raise 'Intersection member discovery missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['length', 'name']
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: intersectionUri, version: 2 }, contentChanges: [{ text: "let values: Map[String, Int] = {}\nvalues.compute('x', fn(key: String, old: Int) -> Int => old)" }] } })
-    raise 'Compute nullable input diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: intersectionUri, version: 3 }, contentChanges: [{ text: "let values: Map[String, Int] = {}\nvalues.compute('x', fn(key: String, old: Int?) -> Int => (old ?? 0) + 1)" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: intersectionUri, version: 2 }, contentChanges: [{ text: "let values: Map<String, Int> = {}\nvalues.compute('x', fn(key: String, old: Int) -> Int => old)" }] } })
+    raise 'Compute nullable input diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected fn(String, Int?)')
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: intersectionUri, version: 3 }, contentChanges: [{ text: "let values: Map<String, Int> = {}\nvalues.compute('x', fn(key: String, old: Int?) -> Int => (old ?? 0) + 1)" }] } })
     raise 'Compute fix did not clear diagnostics' unless receive_message(reader).dig('params', 'diagnostics') == []
     typedMap = 'untitled:TypedMap'
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: typedMap, languageId: 'dotk3', version: 1, text: "let scores: Map[String, Int] = {'Ada': 'bad'}" } } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: typedMap, languageId: 'dotk3', version: 1, text: "let scores: Map<String, Int> = {'Ada': 'bad'}" } } })
     mapError = receive_message(reader)
-    raise 'Typed-map LSP diagnostic missing' unless mapError.dig('params', 'diagnostics', 0, 'message').include?('Expected Int, inferred String')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: typedMap, version: 2 }, contentChanges: [{ text: "let scores: Map[String, Int] = {'Ada': 1}\nscores[2] = 3" }] } })
+    raise 'Typed-map LSP diagnostic missing' unless mapError.dig('params', 'diagnostics', 0, 'message').include?('Expected Int, got String')
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: typedMap, version: 2 }, contentChanges: [{ text: "let scores: Map<String, Int> = {'Ada': 1}\nscores[2] = 3" }] } })
     mapError = receive_message(reader)
-    raise 'Map-key diagnostic missing' unless mapError.dig('params', 'diagnostics', 0, 'message').include?('Expected String, inferred Int')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: typedMap, version: 3 }, contentChanges: [{ text: "let scores: Map[String, Int] = {'Ada': 1}\nscores['Grace'] = 3" }] } })
+    raise 'Map-key diagnostic missing' unless mapError.dig('params', 'diagnostics', 0, 'message').include?('Expected String, got Int')
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: typedMap, version: 3 }, contentChanges: [{ text: "let scores: Map<String, Int> = {'Ada': 1}\nscores['Grace'] = 3" }] } })
     raise 'Typed-map error did not clear' unless receive_message(reader).dig('params', 'diagnostics') == []
     memberUri = 'untitled:MemberDiscovery'
     source = "record Point { x: Int, y: Int = 2 }\nlet point = Point(1)\npoint."
@@ -268,33 +268,33 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', id: 'splitElementMembers', method: 'textDocument/completion', params: { textDocument: { uri: splitUri }, position: { line: 0, character: 20 } } })
     raise 'Split String element completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] }.include?('find')
     mapMethodUri = 'untitled:MapMethods'
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: mapMethodUri, languageId: 'dotk3', version: 1, text: "let data: Map[String, Int] = {}\ndata." } } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: mapMethodUri, languageId: 'dotk3', version: 1, text: "let data: Map<String, Int> = {}\ndata." } } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'mapMethodMembers', method: 'textDocument/completion', params: { textDocument: { uri: mapMethodUri }, position: { line: 1, character: 5 } } })
     raise 'Map membership completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] }.include?('contains')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 2 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\ndata.contains(1)" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 2 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\ndata.contains(1)" }] } })
     raise 'Map membership key diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected String')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 3 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\ndata.contains('x')" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 3 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\ndata.contains('x')" }] } })
     raise 'Map membership fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
     getUri = 'untitled:MapGet'
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: getUri, languageId: 'dotk3', version: 1, text: "let data: Map[String, Int] = {}\nlet value: Int = data.get('x')" } } })
-    raise 'Map get nullable diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('inferred Int?')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: getUri, version: 2 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\nlet value: Int? = data.get('x')" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: getUri, languageId: 'dotk3', version: 1, text: "let data: Map<String, Int> = {}\nlet value: Int = data.get('x')" } } })
+    raise 'Map get nullable diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Int?')
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: getUri, version: 2 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\nlet value: Int? = data.get('x')" }] } })
     raise 'Map get nullable fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 4 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\ndata.remove(1)" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 4 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\ndata.remove(1)" }] } })
     raise 'Map removal key diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected String')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 5 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\nlet removed: Bool = data.remove('x')" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 5 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\nlet removed: Bool = data.remove('x')" }] } })
     raise 'Map removal fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
-    snapshotSource = "record Point { x: Int }\nlet data: Map[String, Point] = {}\ndata.values()[0]."
+    snapshotSource = "record Point { x: Int }\nlet data: Map<String, Point> = {}\ndata.values()[0]."
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 6 }, contentChanges: [{ text: snapshotSource }] } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'snapshotElementMembers', method: 'textDocument/completion', params: { textDocument: { uri: mapMethodUri }, position: { line: 2, character: 17 } } })
     raise 'Typed snapshot element completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['x']
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 7 }, contentChanges: [{ text: "let data: Map[String, Int] = {}\ndata.values().append('wrong')" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: mapMethodUri, version: 7 }, contentChanges: [{ text: "let data: Map<String, Int> = {}\ndata.values().append('wrong')" }] } })
     raise 'Typed snapshot append diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
     semanticCases = [
       ["record Point { x: Int }\nfn use(point: Point) {\npoint.\n}", 2, 6, ['x']],
-      ["record Point { x: Int }\nlet values: Map[String, Point] = {}\nvalues['x'].", 2, 12, ['x']],
+      ["record Point { x: Int }\nlet values: Map<String, Point> = {}\nvalues['x'].", 2, 12, ['x']],
       ["enum Event { Move(Int), Quit }\nEvent.", 1, 6, ['Move', 'Quit']],
       ["let job: Task = Tasks.spawn(unknown())\njob.", 1, 4, ['done', 'error', 'has_value', 'status', 'value']]
     ]
@@ -325,10 +325,10 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', id: 'randomMembers', method: 'textDocument/completion', params: { textDocument: { uri: callbackUri }, position: { line: 0, character: 7 } } })
     raise 'Random completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['choice', 'float', 'int', 'seed', 'shuffle']
     callbackCases = [
-      "record Item { value: Int }\nlet values: List[Int] = []\nlet mapped = values.map(fn(value: Int) -> Item => Item(value))\nmapped[0].",
-      "record Item { value: Int }\nlet values: List[Item] = []\nlet filtered = values.filter(fn(value: Item) -> Bool => true)\nfiltered[0].",
-      "record Item { value: Int }\nlet values: List[Item] = []\nlet chosen = Random.choice(values)\nchosen.",
-      "record Item { value: Int }\nfrom Random import choice as pick\nlet values: List[Item] = []\nlet chosen = pick(values)\nchosen."
+      "record Item { value: Int }\nlet values: List<Int> = []\nlet mapped = values.map(fn(value: Int) -> Item => Item(value))\nmapped[0].",
+      "record Item { value: Int }\nlet values: List<Item> = []\nlet filtered = values.filter(fn(value: Item) -> Bool => true)\nfiltered[0].",
+      "record Item { value: Int }\nlet values: List<Item> = []\nlet chosen = Random.choice(values)\nchosen.",
+      "record Item { value: Int }\nfrom Random import choice as pick\nlet values: List<Item> = []\nlet chosen = pick(values)\nchosen."
     ]
     callbackCases.each_with_index do |text, index|
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: callbackUri, version: index + 2 }, contentChanges: [{ text: text }] } })
@@ -337,23 +337,23 @@ Timeout.timeout(15) do
       raise "Callback/Random result discovery #{index} missing" unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['value']
     end
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: callbackUri, version: 6 }, contentChanges: [{ text: "[1].filter(fn(value: Int) -> Int => value)" }] } })
-    raise 'Predicate result diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Bool')
+    raise 'Predicate result diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected fn(Int) -> Bool')
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: callbackUri, version: 7 }, contentChanges: [{ text: "Random.int('bad')" }] } })
     raise 'Random argument diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: callbackUri, version: 8 }, contentChanges: [{ text: "Random.choice([])\n[1].map(fn(value: Int) { throw 'must not execute' })" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: callbackUri, version: 8 }, contentChanges: [{ text: "Random.choice([1])\n[1].map(fn(value: Int) -> Int { throw 'must not execute' })" }] } })
     raise 'LSP executed randomness/callbacks' unless receive_message(reader).dig('params', 'diagnostics') == []
     listMethodUri = 'untitled:ListMethods'
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: listMethodUri, languageId: 'dotk3', version: 1, text: "let data: List[Int] = []\ndata.insert(0, 'bad')" } } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: listMethodUri, languageId: 'dotk3', version: 1, text: "let data: List<Int> = []\ndata.insert(0, 'bad')" } } })
     raise 'List insertion type diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 2 }, contentChanges: [{ text: "let data: List[Int] = []\ndata.insert(0, 1)" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 2 }, contentChanges: [{ text: "let data: List<Int> = []\ndata.insert(0, 1)" }] } })
     raise 'List insertion fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 3 }, contentChanges: [{ text: "record Item { value: Int }\nlet data: List[Item] = []\ndata.removeAt(0)." }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 3 }, contentChanges: [{ text: "record Item { value: Int }\nlet data: List<Item> = []\ndata.removeAt(0)." }] } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'removedElementMembers', method: 'textDocument/completion', params: { textDocument: { uri: listMethodUri }, position: { line: 2, character: 17 } } })
     raise 'Removed element completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['value']
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 4 }, contentChanges: [{ text: "let data: List[Int] = []\ndata.extend([1, 'bad'])" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 4 }, contentChanges: [{ text: "let data: List<Int> = []\ndata.extend([1, 'bad'])" }] } })
     raise 'List extension type diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected Int')
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 5 }, contentChanges: [{ text: "let data: List[Int] = []\ndata.extend([1, 2])" }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: listMethodUri, version: 5 }, contentChanges: [{ text: "let data: List<Int> = []\ndata.extend([1, 2])" }] } })
     raise 'List extension fix did not clear error' unless receive_message(reader).dig('params', 'diagnostics') == []
     classUri = 'untitled:Classes'
     classSource = "class Counter {\n\"\"\"Documented mutable counter.\"\"\"\nvar value: Int = 0\nlet name: String = 'counter'\nfn add(amount: Int) -> Int {\n\"\"\"Increment the counter.\"\"\"\nself.value += amount\nreturn self.value\n}\nfn same() -> Counter { return self }\n}\nlet counter = Counter()\ncounter.add(2)"
@@ -382,7 +382,7 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: initUri, version: 2 }, contentChanges: [{ text: 'class C { var value: Int = 0; fn init() -> Null { self.value += 1 } }' }] } })
     raise 'Initializer fix did not clear diagnostic' unless receive_message(reader).dig('params', 'diagnostics') == []
     anonymousUri = 'untitled:AnonymousFunctions'
-    anonymousSource = "record Point { x: Int }\nlet make: Function = fn(value: Int) -> Point => Point(value)\nlet point = make(2)\npoint.x"
+    anonymousSource = "record Point { x: Int }\nlet make = fn(value: Int) -> Point => Point(value)\nlet point = make(2)\npoint.x"
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: anonymousUri, languageId: 'dotk3', version: 1, text: anonymousSource } } })
     raise 'Anonymous function source rejected' unless receive_message(reader).dig('params', 'diagnostics') == []
     send_message(writer, { jsonrpc: '2.0', id: 'anonymousHover', method: 'textDocument/hover', params: { textDocument: { uri: anonymousUri }, position: { line: 1, character: 6 } } })
@@ -445,7 +445,7 @@ Timeout.timeout(15) do
       raise "Trait member case #{index} failed" unless receive_message(reader)['result'].map { |entry| entry['label'] } == expected
     end
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: traitUri, version: 7 }, contentChanges: [{ text: traitSource.sub('fn read() -> Int { return self.value }', "fn read() -> String { return 'bad' }") }] } })
-    raise 'Trait mismatch diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('signature mismatch')
+    raise 'Trait mismatch diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('requires')
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: traitUri, version: 8 }, contentChanges: [{ text: traitSource }] } })
     raise 'Trait mismatch fix did not clear diagnostics' unless receive_message(reader).dig('params', 'diagnostics') == []
     Dir.mktmpdir('dotk3-lsp-members') do |directory|
@@ -465,7 +465,7 @@ Timeout.timeout(15) do
       multilineOutline = receive_message(reader)['result'][1]
       raise 'Multiline class outline range incorrect' unless multilineOutline['children'].map { |entry| entry['name'] } == ['value', 'length', 'read'] && multilineOutline['children'][0].dig('selectionRange', 'start', 'line') == 3
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: embeddedUri, version: 2 }, contentChanges: [{ text: embeddedSource.sub('fn length() -> Int { return 1 }', "fn length() -> String { return 'bad' }") }] } })
-      raise 'Embedded class mismatch diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('signature mismatch')
+      raise 'Embedded class mismatch diagnostic absent' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('requires')
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: embeddedUri, version: 3 }, contentChanges: [{ text: embeddedSource }] } })
       raise 'Embedded class fix did not clear diagnostics' unless receive_message(reader).dig('params', 'diagnostics') == []
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: embeddedUri, version: 4 }, contentChanges: [{ text: embeddedSource + "\nBox()." }] } })

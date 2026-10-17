@@ -653,6 +653,8 @@ private:
                 bool constructor = child->constructor || child->text == "init";
                 Ty result = checkFunctionBody(child, signature->type->args, declared, signature->typeParams, info, constructor, info->self, child->staticMember);
                 finishSignature(signature, result);
+                if (child->text == "toString" && !child->staticMember && signature->type->result != stringType)
+                    error(child->span, "Expected String, got " + show(signature->type->result) + " (toString must return String)");
             }
         }
         popScope();
@@ -1015,6 +1017,8 @@ private:
     Ty hint(Ty expected, ClassInfo *info) {
         if (!expected) return nullptr;
         if (expected->tag == TypeTag::Named && expected->info == info) return expected;
+        if (expected->tag == TypeTag::Named && expected->info == iterableInfo && expected->args.size() == 1 && (info == listInfo || info == setInfo || info == tupleInfo))
+            return ty.named(info, {expected->args[0]});
         if (expected->tag == TypeTag::Union) { Ty stripped = ty.stripNull(expected); if (stripped != expected) return hint(stripped, info); }
         return nullptr;
     }

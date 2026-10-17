@@ -1,4 +1,4 @@
-#include "checker.hpp"
+#include "typer.hpp"
 #include "semantic.hpp"
 #include "../vendor/json.hpp"
 #include <algorithm>
@@ -206,9 +206,31 @@ class Server {
             return dk3::parse(std::make_shared<dk3::Source>(dk3::Source{request->span.source->file.substr(0, request->span.source->file.find_last_of('/') + 1) + name, text}));
         } catch (const dk3::Error &) { return {}; }
     }
+    // Source for an imported module: an open document wins over the file on disk.
+    std::shared_ptr<const dk3::Source> moduleSource(const std::string &documentUri, const std::string &module) {
+        auto parent = filePath(documentUri); if (!parent) return nullptr;
+        std::string name = module;
+        if (std::filesystem::path(name).is_absolute() || name.find("..") != std::string::npos) return nullptr;
+        if (std::filesystem::path(name).extension() != ".k3") { std::replace(name.begin(), name.end(), '.', '/'); name += ".k3"; }
+        auto path = (parent->parent_path() / name).lexically_normal();
+        for (const auto &entry : documents) if (filePath(entry.first) == std::optional<std::filesystem::path>(path)) return entry.second.source;
+        std::ifstream file(path, std::ios::binary); if (!file) return nullptr;
+        std::string text(maxDocument + 1, '\0'); file.read(text.data(), static_cast<std::streamsize>(text.size()));
+        size_t size = static_cast<size_t>(file.gcount()); if (size > maxDocument) return nullptr;
+        text.resize(size);
+        return std::make_shared<dk3::Source>(dk3::Source{path.string(), text});
+    }
     void diagnostics(const std::string &uri, Document &document) {
         Json errors = Json::array(); document.tree.reset(); document.tokens.clear();
-        try { document.tokens = dk3::lex(document.source); document.tree = dk3::parse(document.source); dk3::check(document.tree); }
+        try {
+            document.tokens = dk3::lex(document.source); document.tree = dk3::parse(document.source);
+            auto loader = [&](const std::string &name) { return moduleSource(uri, name); };
+            for (const auto &found : dk3::typeCheck(document.tree, loader)) {
+                if (found.span.source && found.span.source != document.source) continue;
+                errors.push_back({{"range", range(document.source, found.span.offset, found.span.offset + found.span.length)},
+                    {"severity", found.warning ? 2 : 1}, {"source", "dotk3"}, {"code", found.warning ? "warning" : "type"}, {"message", found.message}});
+            }
+        }
         catch (const dk3::Error &error) {
             errors.push_back({{"range", range(document.source, error.span.offset, error.span.offset + error.span.length)},
                 {"severity", 1}, {"source", "dotk3"}, {"code", error.category}, {"message", error.what()}});
