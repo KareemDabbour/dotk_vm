@@ -34,6 +34,9 @@ struct FunctionContext {
     std::vector<Ty> returned;
     size_t scopeBase = 0;
     bool constructor = false;
+    bool generator = false;
+    Ty yieldType = nullptr;
+    std::vector<Ty> yielded;
     ClassInfo *owner = nullptr;
 };
 
@@ -112,7 +115,7 @@ public:
         builtinMode = false;
         stringType = classType("String"); bytesType = classType("Bytes");
         listInfo = classInfo("List"); mapInfo = classInfo("Map"); setInfo = classInfo("Set"); tupleInfo = classInfo("Tuple");
-        generatorInfo = classInfo("Generator"); errorType = classType("Error");
+        generatorInfo = classInfo("Generator"); errorType = classType("Error"); iterableInfo = classInfo("Iterable");
         scopes.emplace_back();
     }
 
@@ -130,10 +133,11 @@ private:
     std::vector<FunctionContext> functions;
     std::unordered_map<const Node *, ClassInfo *> classOf;
     std::unordered_map<const Node *, std::shared_ptr<Signature>> signatureOf;
+    std::unordered_map<const Node *, ClassInfo *> implTarget;
     std::set<std::string> assigned;
     bool builtinMode = false;
     Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
-    ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr;
+    ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr, *iterableInfo = nullptr;
 
     // ---- diagnostics and scopes -------------------------------------------------------------
 
@@ -202,7 +206,15 @@ private:
             return ty.function(std::move(parameters), resolveType(type->inner));
         }
         case TypeKind::Wildcard: return ty.wildcard(type->bound, type->inner ? resolveType(type->inner) : nullptr);
-        case TypeKind::Intersection: error(type->span, "Intersection types are not supported yet"); return ty.error();
+        case TypeKind::Intersection: {
+            std::vector<Ty> members;
+            for (const auto &item : type->items) {
+                Ty member = resolveType(item);
+                if (member->tag != TypeTag::Named && member->tag != TypeTag::Var && member->tag != TypeTag::Error) error(type->span, "Intersection members must be classes or traits");
+                members.push_back(member);
+            }
+            return ty.intersect(std::move(members));
+        }
         }
         return ty.error();
     }
@@ -218,6 +230,7 @@ private:
         if (name == "Object") return plain(ty.object());
         if (name == "Never") return plain(ty.never());
         Symbol *symbol = lookup(name);
+        if (!symbol && name.find('.') != std::string::npos) { std::string nested = name; std::replace(nested.begin(), nested.end(), '.', '_'); symbol = lookup(nested); }
         if (!symbol) { error(type->span, "Unknown type '" + name + "'"); return ty.error(); }
         switch (symbol->kind) {
         case SymbolKind::TypeVar: return plain(symbol->type);
@@ -256,7 +269,7 @@ private:
         Ty result;
         if (function->typeExpr) result = resolveType(function->typeExpr);
         else if (function->constructor) result = ty.null();
-        else if (!function->children.empty() && hasValueReturn(function->children[0])) { result = ty.error(); signature->pendingResult = true; }
+        else if (!function->children.empty() && (hasValueReturn(function->children[0]) || containsYield(function->children[0]))) { result = ty.error(); signature->pendingResult = true; }
         else result = ty.null();
         popScope();
         signature->type = ty.function(std::move(parameters), result);
@@ -271,12 +284,19 @@ private:
         declareSymbol(node->text, std::move(symbol), node->span);
     }
 
-    void classHeader(const Ast &node) {
+    void classParams(const Ast &node) {
         ClassInfo *info = classOf[node.get()];
         pushScope(); info->params = declareTypeParams(node->typeParams, node->span); info->self = ty.named(info, info->params);
+        popScope();
+    }
+
+    void classHeader(const Ast &node) {
+        ClassInfo *info = classOf[node.get()];
+        pushScope(); enterTypeParams(info->params);
         if (!node->baseClass.empty()) {
             Ty base = resolveType(node->typeExpr);
-            if (base->tag == TypeTag::Named && base->info->kind == ClassKind::Class && !ty.asSuper(base, info)) info->super = base;
+            if (base->tag == TypeTag::Object) {}
+            else if (base->tag == TypeTag::Named && base->info->kind == ClassKind::Class && !ty.asSuper(base, info)) info->super = base;
             else if (base->tag != TypeTag::Error) error(node->span, "'" + node->baseClass + "' cannot be extended by '" + info->name + "'");
         }
         for (const auto &trait : node->typeExprs) {
@@ -440,7 +460,10 @@ private:
         }
         if (!explicitArguments.empty()) {
             if (explicitArguments.size() != variables.size()) error(node->span, "Expected " + std::to_string(variables.size()) + " type argument(s), got " + std::to_string(explicitArguments.size()));
-            else for (size_t index = 0; index < variables.size(); index++) bindings[variables[index]] = resolveType(explicitArguments[index]);
+            else {
+                for (size_t index = 0; index < variables.size(); index++) bindings[variables[index]] = resolveType(explicitArguments[index]);
+                variables.clear();
+            }
         }
         bool rest = signature && signature->hasRest;
         std::vector<int> target(count, -1); std::vector<bool> supplied(parameters.size(), false);
@@ -515,10 +538,15 @@ private:
 
     Ty checkFunctionBody(const Ast &function, const std::vector<Ty> &parameterTypes, Ty declaredResult, const std::vector<Ty> &typeParams, ClassInfo *owner, bool constructor, Ty self, bool isStatic = false) {
         if (function->children.empty()) return declaredResult ? declaredResult : ty.null();
-        if (containsYield(function->children[0])) { error(function->span, "Generators are not supported by the typer yet"); return ty.error(); }
+        bool generator = containsYield(function->children[0]);
         pushScope(); enterTypeParams(typeParams);
         FunctionContext context; context.declaredResult = declaredResult; context.scopeBase = scopes.size() - 1; context.constructor = constructor;
         context.owner = owner ? owner : (functions.empty() ? nullptr : functions.back().owner);
+        if (generator) {
+            context.generator = true; context.declaredResult = nullptr;
+            if (declaredResult && declaredResult->tag == TypeTag::Named && declaredResult->info == generatorInfo) context.yieldType = declaredResult->args[0];
+            else if (declaredResult && declaredResult->tag != TypeTag::Error) error(function->span, "A generator must return Generator<T>, not " + show(declaredResult));
+        }
         functions.push_back(context);
         if (self && !isStatic) {
             declareValue("self", self, false, function->span);
@@ -535,7 +563,13 @@ private:
         blockStatements(body->children);
         FunctionContext finished = functions.back(); functions.pop_back(); popScope();
         Ty result = declaredResult;
-        if (!result) {
+        if (generator) {
+            if (!result) {
+                Ty element = ty.never();
+                for (Ty yielded : finished.yielded) element = element->tag == TypeTag::Never ? yielded : ty.join(element, yielded);
+                result = ty.named(generatorInfo, {element});
+            }
+        } else if (!result) {
             if (finished.returned.empty()) result = ty.null();
             else { result = finished.returned[0]; for (size_t index = 1; index < finished.returned.size(); index++) result = ty.join(result, finished.returned[index]); }
         } else if (result->tag != TypeTag::Null && result->tag != TypeTag::Never && result->tag != TypeTag::Error && !alwaysExits(body))
@@ -550,8 +584,10 @@ private:
             if (statement->kind == "class" || statement->kind == "record" || statement->kind == "trait" || statement->kind == "enum") declareClass(statement);
             else if (statement->kind == "type_alias") { Symbol symbol; symbol.kind = SymbolKind::Alias; symbol.declaration = statement; declareSymbol(statement->text, std::move(symbol), statement->span); }
         }
+        for (const auto &statement : statements) if (classOf.count(statement.get())) classParams(statement);
         for (const auto &statement : statements) if (classOf.count(statement.get())) classHeader(statement);
         for (const auto &statement : statements) if (classOf.count(statement.get())) classMembers(statement);
+        for (const auto &statement : statements) if (statement->kind == "impl") implHeader(statement);
         for (const auto &statement : statements) {
             if (classOf.count(statement.get())) checkImplements(classOf[statement.get()], statement->span);
             else if (statement->kind == "function" && !statement->text.empty()) {
@@ -596,6 +632,66 @@ private:
         signature->pendingResult = false; signature->inferring = false; signature->type = ty.function(signature->type->args, result);
     }
 
+    void yieldStatement(const Ast &node) {
+        if (functions.empty() || !functions.back().generator) { error(node->span, "yield outside of a generator"); return; }
+        Ty wanted = functions.back().yieldType;
+        Ty value = node->children.empty() ? ty.null() : expr(node->children[0], wanted);
+        if (wanted) assignable(value, wanted, node->children.empty() ? node->span : node->children[0]->span);
+        else functions.back().yielded.push_back(value);
+    }
+
+    void importStatement(const Ast &node) {
+        Symbol *module = lookup(node->text);
+        if (!module || module->kind != SymbolKind::Class) { error(node->span, "Module '" + node->text + "' was not found; importing user modules is not supported by the typer yet"); return; }
+        if (node->kind == "import") { Symbol alias = *module; declareSymbol(node->names[0], std::move(alias), node->span); return; }
+        for (size_t index = 0; index + 1 < node->names.size(); index += 2) {
+            const Member *member = findMember(module->info, node->names[index]);
+            if (!member) {
+                Symbol *nested = lookup(module->info->name + "_" + node->names[index]);
+                if (nested && nested->kind == SymbolKind::Class) { Symbol alias = *nested; declareSymbol(node->names[index + 1], std::move(alias), node->span); continue; }
+            }
+            if (!member || !member->isStatic) { error(node->span, node->text + " has no member '" + node->names[index] + "'"); continue; }
+            Symbol symbol;
+            if (member->signature) { symbol.kind = SymbolKind::Function; symbol.signature = member->signature; symbol.type = member->signature->type; }
+            else { symbol.type = symbol.declared = member->type; symbol.global = true; }
+            declareSymbol(node->names[index + 1], std::move(symbol), node->span);
+        }
+    }
+
+    void implHeader(const Ast &node) {
+        Symbol *traitSymbol = lookup(node->text), *targetSymbol = lookup(node->names[0]);
+        if (!traitSymbol || traitSymbol->kind != SymbolKind::Class || traitSymbol->info->kind != ClassKind::Trait) { error(node->span, "'" + node->text + "' is not a trait"); return; }
+        if (!targetSymbol || targetSymbol->kind != SymbolKind::Class || (targetSymbol->info->kind != ClassKind::Class && targetSymbol->info->kind != ClassKind::Record)) { error(node->span, "'" + node->names[0] + "' is not a class or record"); return; }
+        ClassInfo *target = targetSymbol->info, *trait = traitSymbol->info;
+        if (!trait->params.empty()) { error(node->span, "Generic traits cannot be implemented with impl yet"); return; }
+        Ty traitType = ty.named(trait);
+        if (std::find(target->traits.begin(), target->traits.end(), traitType) != target->traits.end()) { error(node->span, target->name + " already implements " + trait->name); return; }
+        target->traits.push_back(traitType); implTarget[node.get()] = target;
+        pushScope(); enterTypeParams(target->params);
+        for (const auto &child : node->children) {
+            if (child->kind != "function") continue;
+            Member member; member.isMethod = true; member.signature = makeSignature(child, false); member.type = member.signature->type; member.visibility = child->visibility;
+            addMember(target, child->text, std::move(member), child->span);
+        }
+        popScope();
+    }
+
+    void checkImplBodies(const Ast &node) {
+        auto found = implTarget.find(node.get());
+        if (found == implTarget.end()) return;
+        ClassInfo *target = found->second;
+        pushScope(); enterTypeParams(target->params);
+        for (const auto &child : node->children) {
+            if (child->kind != "function") continue;
+            auto signature = signatureOf[child.get()];
+            if (signature->pendingResult) signature->inferring = true;
+            Ty declared = signature->pendingResult ? nullptr : signature->type->result;
+            Ty result = checkFunctionBody(child, signature->type->args, declared, signature->typeParams, target, false, target->self);
+            finishSignature(signature, result);
+        }
+        popScope();
+    }
+
     void statement(const Ast &node) {
         const std::string &kind = node->kind;
         if (kind == "binding") bindingStatement(node);
@@ -613,9 +709,9 @@ private:
         else if (kind == "function") functionStatement(node);
         else if (classOf.count(node.get())) checkClassBodies(node);
         else if (kind == "type_alias") { Symbol *symbol = lookup(node->text); if (symbol && symbol->kind == SymbolKind::Alias) resolveAlias(*symbol); }
-        else if (kind == "import" || kind == "from_import") error(node->span, "Module imports are not supported by the typer yet");
-        else if (kind == "impl") error(node->span, "impl blocks are not supported by the typer yet");
-        else if (kind == "yield") error(node->span, "Generators are not supported by the typer yet");
+        else if (kind == "import" || kind == "from_import") importStatement(node);
+        else if (kind == "impl") checkImplBodies(node);
+        else if (kind == "yield") yieldStatement(node);
         else error(node->span, "Unsupported statement '" + kind + "'");
     }
 
@@ -645,6 +741,10 @@ private:
     void returnStatement(const Ast &node) {
         if (functions.empty()) { error(node->span, "return outside of a function"); return; }
         Ty declared = functions.back().declaredResult; bool constructor = functions.back().constructor;
+        if (functions.back().generator) {
+            if (!node->children.empty()) error(node->span, "A generator cannot return a value; use yield");
+            return;
+        }
         Ty value = node->children.empty() ? ty.null() : expr(node->children[0], declared);
         if (declared) {
             if (constructor && !node->children.empty()) error(node->span, "A constructor cannot return a value");
@@ -705,11 +805,8 @@ private:
     Ty elementType(Ty iterable) {
         if (iterable->tag == TypeTag::Var) return elementType(iterable->result);
         if (iterable->tag != TypeTag::Named) return nullptr;
-        ClassInfo *info = iterable->info;
-        if ((info == listInfo || info == setInfo || info == tupleInfo || info == generatorInfo || info == mapInfo) && !iterable->args.empty()) return iterable->args[0];
-        if (iterable == stringType) return stringType;
-        if (iterable == bytesType) return ty.integer();
-        return nullptr;
+        Ty up = ty.asSuper(iterable, iterableInfo);
+        return up && !up->args.empty() ? up->args[0] : nullptr;
     }
 
     void forInStatement(const Ast &node) {
@@ -965,6 +1062,8 @@ private:
 
     Ty compoundResult(const std::string &op, Ty left, Ty right, const Span &span) {
         left = bounded(left); right = bounded(right);
+        if (op == "+" && left == bytesType && right == bytesType) return bytesType;
+        if (op == "+" && left->tag == TypeTag::Named && left->info == listInfo && ty.isSubtype(right, left)) return left;
         if (ty.isNumeric(left) && ty.isNumeric(right)) return op == "/" ? ty.floating() : (left == ty.floating() || right == ty.floating() ? ty.floating() : ty.integer());
         if (op == "+" && left == stringType) return stringType;
         static const std::map<std::string, const char *> hooks{{"+", "__add__"}, {"-", "__sub__"}, {"*", "__mul__"}, {"/", "__div__"}};
@@ -988,16 +1087,25 @@ private:
         return allowed;
     }
 
+    // The class a name or qualified path (Outer.Nested) refers to, when it denotes a type rather than a value.
+    ClassInfo *classReference(const Ast &node) {
+        if (node->kind == "name") { Symbol *symbol = lookup(node->text); return symbol && symbol->kind == SymbolKind::Class ? symbol->info : nullptr; }
+        if (node->kind != "member") return nullptr;
+        ClassInfo *owner = classReference(node->children[0]);
+        if (!owner) return nullptr;
+        Symbol *nested = lookup(owner->name + "_" + node->text);
+        return nested && nested->kind == SymbolKind::Class ? nested->info : nullptr;
+    }
+
     Resolved resolveMember(const Ast &node, bool forWrite = false) {
         Resolved result; const Ast &receiverNode = node->children[0];
-        if (receiverNode->kind == "name") {
-            Symbol *symbol = lookup(receiverNode->text);
-            if (symbol && symbol->kind == SymbolKind::Class) {
-                const Member *member = findMember(symbol->info, node->text);
-                if (!member || !member->isStatic) { error(node->span, symbol->info->name + " has no static member '" + node->text + "'"); return result; }
+        if (ClassInfo *owner = classReference(receiverNode)) {
+            {
+                const Member *member = findMember(owner, node->text);
+                if (!member || !member->isStatic) { error(node->span, owner->name + " has no static member '" + node->text + "'"); return result; }
                 visible(*member, node->span, node->text);
                 result.found = true; result.signature = member->signature; result.type = member->signature ? member->signature->type : member->type;
-                if (!member->signature && symbol->info->kind == ClassKind::Enum && !symbol->info->params.empty()) result.genericConstant = symbol->info;
+                if (!member->signature && owner->kind == ClassKind::Enum && !owner->params.empty()) result.genericConstant = owner;
                 if (forWrite && !member->mutableBinding) error(node->span, "Cannot assign to '" + node->text + "'");
                 return result;
             }
@@ -1009,6 +1117,9 @@ private:
             receiver = ty.stripNull(receiver);
         }
         while (receiver->tag == TypeTag::Var) receiver = receiver->result;
+        if (receiver->tag == TypeTag::Intersection) {
+            for (Ty part : receiver->args) { Ty candidate = part; while (candidate->tag == TypeTag::Var) candidate = candidate->result; if (candidate->tag == TypeTag::Named && findMember(candidate->info, node->text)) { receiver = candidate; break; } }
+        }
         if (receiver->tag != TypeTag::Named) { error(node->span, show(receiver) + " has no member '" + node->text + "'"); return result; }
         const Member *member = findMember(receiver->info, node->text);
         if (!member || member->isStatic) { error(node->span, show(receiver) + " has no member '" + node->text + "'"); return result; }

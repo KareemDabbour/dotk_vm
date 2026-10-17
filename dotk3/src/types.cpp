@@ -41,7 +41,7 @@ Ty Types::named(ClassInfo *info, std::vector<Ty> args) {
 }
 
 Ty Types::variable(const std::string &name, Ty bound) {
-    auto data = std::make_unique<TypeData>(); data->tag = TypeTag::Var; data->name = name; data->result = bound ? bound : object_; data->id = nextId++;
+    auto data = std::make_unique<TypeData>(); data->tag = TypeTag::Var; data->name = name; data->result = bound ? bound : nullable(object_); data->id = nextId++;
     variables_.push_back(std::move(data)); return variables_.back().get();
 }
 
@@ -71,6 +71,20 @@ Ty Types::unite(std::vector<Ty> members) {
     return intern(std::move(data));
 }
 
+Ty Types::intersect(std::vector<Ty> members) {
+    std::vector<Ty> flat;
+    for (Ty member : members) {
+        if (member->tag == TypeTag::Error) return error_;
+        if (member->tag == TypeTag::Intersection) flat.insert(flat.end(), member->args.begin(), member->args.end());
+        else flat.push_back(member);
+    }
+    std::sort(flat.begin(), flat.end(), [](Ty first, Ty second) { return first->id < second->id; });
+    flat.erase(std::unique(flat.begin(), flat.end()), flat.end());
+    if (flat.size() == 1) return flat[0];
+    TypeData data; data.tag = TypeTag::Intersection; data.args = std::move(flat);
+    return intern(std::move(data));
+}
+
 Ty Types::substitute(Ty type, const std::map<Ty, Ty> &replacements) {
     if (replacements.empty()) return type;
     switch (type->tag) {
@@ -83,6 +97,10 @@ Ty Types::substitute(Ty type, const std::map<Ty, Ty> &replacements) {
     case TypeTag::Union: {
         std::vector<Ty> members; for (Ty member : type->args) members.push_back(substitute(member, replacements));
         return unite(std::move(members));
+    }
+    case TypeTag::Intersection: {
+        std::vector<Ty> members; for (Ty member : type->args) members.push_back(substitute(member, replacements));
+        return intersect(std::move(members));
     }
     case TypeTag::Function: {
         std::vector<Ty> parameters; for (Ty parameter : type->args) parameters.push_back(substitute(parameter, replacements));
@@ -126,6 +144,14 @@ bool Types::isSubtype(Ty value, Ty target) {
         for (Ty member : target->args) if (isSubtype(value, member)) return true;
         return false;
     }
+    if (target->tag == TypeTag::Intersection) {
+        for (Ty member : target->args) if (!isSubtype(value, member)) return false;
+        return true;
+    }
+    if (value->tag == TypeTag::Intersection) {
+        for (Ty member : value->args) if (isSubtype(member, target)) return true;
+        return false;
+    }
     if (value->tag == TypeTag::Var) return value->result && isSubtype(value->result, target);
     switch (target->tag) {
     case TypeTag::Object: return value->tag != TypeTag::Null;
@@ -161,6 +187,7 @@ std::string Types::show(Ty type) const {
     switch (type->tag) {
     case TypeTag::Named: {
         std::string result = type->name;
+        if (type->info && type->info->builtin) std::replace(result.begin(), result.end(), '_', '.');
         if (!type->args.empty()) {
             result += '<';
             for (size_t index = 0; index < type->args.size(); index++) result += (index ? ", " : "") + show(type->args[index]);
@@ -179,6 +206,11 @@ std::string Types::show(Ty type) const {
         for (size_t index = 0; index < parts.size(); index++) result += (index ? " | " : "") + parts[index];
         if (!hasNull) return result;
         return parts.size() > 1 ? '(' + result + ")?" : result + '?';
+    }
+    case TypeTag::Intersection: {
+        std::string result;
+        for (size_t index = 0; index < type->args.size(); index++) result += (index ? " & " : "") + show(type->args[index]);
+        return result;
     }
     case TypeTag::Function: {
         std::string result = "fn(";

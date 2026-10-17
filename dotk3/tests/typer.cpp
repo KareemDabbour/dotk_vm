@@ -119,6 +119,34 @@ int main() {
     rejects("fn f() -> Int { var base = 3\nlet add = fn(v: Int) => v + base\nbase = 4\nreturn add(1) }", "effectively final");
     accepts("var counter = 0\nfn bump() { counter += 1 }\nbump()");
 
+    // Imports of core modules.
+    accepts("from Math import sin, PI as pi\nimport Math as M\nlet a: Float = sin(pi)\nlet b: Float = M.cos(0.0)");
+    rejects("from Math import nope", "has no member");
+    rejects("import Missing", "was not found");
+
+    // Generators.
+    accepts("fn count(n: Int) { for i in Collections.range(n) { yield i } }\nfor v in count(3) { let x: Int = v }");
+    accepts("fn words() -> Generator<String> { yield 'a'\nyield 'b' }\nfor w in words() { let s: String = w }");
+    rejects("fn words() -> Generator<String> { yield 1 }", "Expected String, got Int");
+    rejects("fn words() -> Generator<String> { yield 'a'\nreturn 'b' }", "cannot return a value");
+    rejects("fn bad() -> Int { yield 1 }", "must return Generator");
+
+    // impl blocks and intersection types.
+    accepts("trait Named { fn name() -> String }\nclass D { private let id: Int = 1 }\nimpl Named for D { fn name() -> String { return Text.str(self.id) } }\nlet n: Named = D()");
+    rejects("trait Named { fn name() -> String }\nclass D { }\nimpl Named for D { }", "does not implement");
+    accepts("trait A { fn a() -> Int }\ntrait B { fn b() -> Int }\nclass C implements A, B { fn a() -> Int { return 1 }\nfn b() -> Int { return 2 } }\nfn both(x: A & B) -> Int { return x.a() + x.b() }\nlet n: Int = both(C())\nlet m: A = both2()\nfn both2() -> A & B { return C() }");
+    rejects("trait A { fn a() -> Int }\ntrait B { fn b() -> Int }\nclass C implements A { fn a() -> Int { return 1 } }\nfn both(x: A & B) -> Int { return 1 }\nboth(C())", "Expected A & B");
+
+    // Nested core types, iterables and builtin constructors.
+    accepts("let kind: Error.Kind = Error.Kind.Index\nfn f(e: Error) -> Bool { return e.kind == Error.Kind.Type }");
+    accepts("fn count(n: Int) { for i in Collections.range(n) { yield i } }\nlet xs = List<Int>(count(3))\nlet ys: List<Int> = []\nys.extend(count(2))\nlet s = Set<String>(['a'])\nlet m: Map<String, Int> = Map<String, Int>()");
+    accepts("fn size(v: Collections.Sized) -> Int { return v.length() }\nlet n: Int = size([1]) + size('ab')");
+    accepts("class Base extends Object { }\nlet b = Base()");
+    accepts("fn f<T>(v: T) -> T? { return v }\nlet a: Int? = f(1)");
+    rejects("fn f<T>(v: T) -> Object { return v }", "Expected Object, got T");
+    accepts("var b = b'a'\nb += b'c'");
+    rejects("let xs = List<Int>('x')", "Expected Iterable<Int>, got String");
+
     // Core library.
     accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: List<Int> = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");
     rejects("for x in 5 { }", "is not iterable");

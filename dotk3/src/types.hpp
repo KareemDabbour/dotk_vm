@@ -7,7 +7,7 @@
 
 namespace dk3 {
 
-enum class TypeTag { Error, Never, Null, Bool, Int, Float, Object, Named, Var, Union, Function, Wildcard };
+enum class TypeTag { Error, Never, Null, Bool, Int, Float, Object, Named, Var, Union, Intersection, Function, Wildcard };
 
 struct ClassInfo;
 struct TypeData {
@@ -82,6 +82,7 @@ public:
     Ty variable(const std::string &name, Ty bound = nullptr);
     void setBound(Ty variable, Ty bound) { const_cast<TypeData *>(variable)->result = bound; }
     Ty unite(std::vector<Ty> members);
+    Ty intersect(std::vector<Ty> members);
     Ty nullable(Ty type) { return unite({type, null_}); }
     Ty function(std::vector<Ty> parameters, Ty result);
     Ty wildcard(WildcardBound bound, Ty limit);
