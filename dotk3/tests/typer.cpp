@@ -1,13 +1,20 @@
 #include "typer.hpp"
 #include <cassert>
 #include <iostream>
+#include <map>
 
 namespace {
+std::map<std::string, std::string> modules;
+
 std::vector<std::string> errorsOf(const std::string &text) {
     std::vector<std::string> messages;
     try {
         auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"typer.k3", text}));
-        for (const auto &diagnostic : dk3::typeCheck(program)) if (!diagnostic.warning) messages.push_back(diagnostic.message);
+        auto loader = [](const std::string &name) -> std::shared_ptr<const dk3::Source> {
+            auto found = modules.find(name);
+            return found == modules.end() ? nullptr : std::make_shared<dk3::Source>(dk3::Source{name + ".k3", found->second});
+        };
+        for (const auto &diagnostic : dk3::typeCheck(program, loader)) if (!diagnostic.warning) messages.push_back(diagnostic.message);
     } catch (const dk3::Error &error) { messages.push_back(std::string("PARSE: ") + error.what()); }
     return messages;
 }
@@ -146,6 +153,26 @@ int main() {
     rejects("fn f<T>(v: T) -> Object { return v }", "Expected Object, got T");
     accepts("var b = b'a'\nb += b'c'");
     rejects("let xs = List<Int>('x')", "Expected Iterable<Int>, got String");
+
+    // User modules.
+    modules["shapes"] = "export record Point { x: Int, y: Int }\nexport enum Kind { Round, Flat }\nexport type Pair = Tuple<Int>\nexport fn origin() -> Point { return Point(0, 0) }\nexport let unit: Int = 1\nfn hidden() -> Int { return 1 }";
+    modules["loop_a"] = "import loop_b\nexport let a: Int = 1";
+    modules["loop_b"] = "import loop_a\nexport let b: Int = 2";
+    modules["broken"] = "export let n: Int = 'x'";
+    accepts("import shapes\nlet p: shapes.Point = shapes.origin()\nlet q = shapes.Point(1, 2)\nlet n: Int = q.x + shapes.unit\nlet k: shapes.Kind = shapes.Kind.Round");
+    accepts("from shapes import Point, origin as make, Kind\nlet p: Point = make()\nlet k: Kind = Kind.Flat\nfn f(k: Kind) -> Int { return match k { Kind.Round => 1, Kind.Flat => 2 } }");
+    rejects("from shapes import hidden", "does not export 'hidden'");
+    rejects("import shapes\nshapes.hidden()", "does not export 'hidden'");
+    rejects("import shapes\nlet p: shapes.Point = shapes.Point('a', 2)", "Expected Int, got String");
+    rejects("import shapes\nlet n: String = shapes.unit", "Expected String, got Int");
+    rejects("import nowhere", "was not found");
+    rejects("import loop_a", "Import cycle");
+    rejects("import broken", "Expected Int, got String");
+
+    // IO and network modules.
+    accepts("IO.write('hi')\nlet line: String? = IO.readLine()\nlet t: String = Files.readText('a')\nlet s: Resource = IO.Sockets.listen('127.0.0.1', 0)\nlet c: Resource? = Sockets.accept(s, 10)\nlet r: Map<String, Object?> = Requests.get('http://x')\nTerminal.open()");
+    accepts("from Sockets import receive as read, send\nfn f(s: Resource) -> Int { let b: Bytes? = read(s, 8)\nreturn send(s, 'x') }");
+    accepts("fn f(o: System.Object, e: System.Error) -> Null { }");
 
     // Core library.
     accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: List<Int> = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");

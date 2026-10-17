@@ -9,9 +9,13 @@
 namespace dk3 {
 namespace {
 
-enum class SymbolKind { Value, Function, Class, Alias, TypeVar };
+enum class SymbolKind { Value, Function, Class, Alias, TypeVar, Module };
+
+struct Symbol;
+using Exports = std::map<std::string, Symbol>;
 
 struct Symbol {
+    std::shared_ptr<Exports> exports;
     SymbolKind kind = SymbolKind::Value;
     Ty type = nullptr;
     Ty declared = nullptr;
@@ -106,6 +110,7 @@ bool leavesBlock(const Ast &node) {
 class Typer {
 public:
     std::vector<Diagnostic> diagnostics;
+    void setLoader(ModuleLoader value) { loader = std::move(value); }
 
     Typer() {
         scopes.emplace_back();
@@ -135,6 +140,9 @@ private:
     std::unordered_map<const Node *, std::shared_ptr<Signature>> signatureOf;
     std::unordered_map<const Node *, ClassInfo *> implTarget;
     std::set<std::string> assigned;
+    ModuleLoader loader;
+    std::map<std::string, std::shared_ptr<Exports>> modules;
+    std::set<std::string> loading;
     bool builtinMode = false;
     Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
     ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr, *iterableInfo = nullptr;
@@ -220,7 +228,7 @@ private:
     }
 
     Ty resolveNamed(const TypeAst &type) {
-        const std::string &name = type->name;
+        const std::string name = type->name.rfind("System.", 0) == 0 ? type->name.substr(7) : type->name;
         std::vector<Ty> arguments; for (const auto &item : type->items) arguments.push_back(resolveType(item));
         auto plain = [&](Ty result) { if (!arguments.empty()) error(type->span, name + " takes no type arguments"); return result; };
         if (name == "Int") return plain(ty.integer());
@@ -230,6 +238,14 @@ private:
         if (name == "Object") return plain(ty.object());
         if (name == "Never") return plain(ty.never());
         Symbol *symbol = lookup(name);
+        if (!symbol && name.rfind("System.", 0) == 0) symbol = lookup(name.substr(7));
+        if (!symbol && name.find('.') != std::string::npos) {
+            size_t dot = name.find('.'); Symbol *space = lookup(name.substr(0, dot));
+            if (space && space->kind == SymbolKind::Module) {
+                auto found = space->exports->find(name.substr(dot + 1));
+                if (found != space->exports->end()) symbol = &found->second;
+            }
+        }
         if (!symbol && name.find('.') != std::string::npos) { std::string nested = name; std::replace(nested.begin(), nested.end(), '.', '_'); symbol = lookup(nested); }
         if (!symbol) { error(type->span, "Unknown type '" + name + "'"); return ty.error(); }
         switch (symbol->kind) {
@@ -580,6 +596,7 @@ private:
     // ---- statements -------------------------------------------------------------------------
 
     void blockStatements(const std::vector<Ast> &statements) {
+        for (const auto &statement : statements) if (statement->kind == "import" || statement->kind == "from_import") importStatement(statement);
         for (const auto &statement : statements) {
             if (statement->kind == "class" || statement->kind == "record" || statement->kind == "trait" || statement->kind == "enum") declareClass(statement);
             else if (statement->kind == "type_alias") { Symbol symbol; symbol.kind = SymbolKind::Alias; symbol.declaration = statement; declareSymbol(statement->text, std::move(symbol), statement->span); }
@@ -641,8 +658,9 @@ private:
     }
 
     void importStatement(const Ast &node) {
-        Symbol *module = lookup(node->text);
-        if (!module || module->kind != SymbolKind::Class) { error(node->span, "Module '" + node->text + "' was not found; importing user modules is not supported by the typer yet"); return; }
+        auto builtin = scopes[0].symbols.find(node->text);
+        if (builtin == scopes[0].symbols.end() || builtin->second.kind != SymbolKind::Class) { importUserModule(node); return; }
+        Symbol *module = &builtin->second;
         if (node->kind == "import") { Symbol alias = *module; declareSymbol(node->names[0], std::move(alias), node->span); return; }
         for (size_t index = 0; index + 1 < node->names.size(); index += 2) {
             const Member *member = findMember(module->info, node->names[index]);
@@ -656,6 +674,75 @@ private:
             else { symbol.type = symbol.declared = member->type; symbol.global = true; }
             declareSymbol(node->names[index + 1], std::move(symbol), node->span);
         }
+    }
+
+    std::shared_ptr<Exports> loadModule(const std::string &name, const Span &span) {
+        auto cached = modules.find(name); if (cached != modules.end()) return cached->second;
+        if (loading.count(name)) { error(span, "Import cycle through module '" + name + "'"); return nullptr; }
+        if (!loader) { error(span, "Module '" + name + "' was not found"); return nullptr; }
+        std::shared_ptr<const Source> source; Ast program;
+        try { source = loader(name); if (source) program = parse(source); }
+        catch (const Error &failure) { error(failure.span.source ? failure.span : span, failure.what()); return nullptr; }
+        catch (const std::exception &failure) { error(span, "Module '" + name + "' could not be loaded: " + failure.what()); return nullptr; }
+        if (!program) { error(span, "Module '" + name + "' was not found"); return nullptr; }
+        loading.insert(name);
+        Scope prelude = scopes[0];
+        auto savedScopes = std::move(scopes); auto savedFunctions = std::move(functions); auto savedAssigned = std::move(assigned);
+        scopes.clear(); scopes.push_back(std::move(prelude)); scopes.emplace_back(); functions.clear(); assigned.clear();
+        walk(program, [&](const Ast &node) {
+            if (node->kind == "assignment" && node->children[0]->kind == "name") assigned.insert(node->children[0]->text);
+            return true;
+        });
+        blockStatements(program->children);
+        auto exports = std::make_shared<Exports>();
+        for (const auto &statement : program->children) {
+            if (!statement->exported) continue;
+            auto found = scopes[1].symbols.find(statement->text);
+            if (found == scopes[1].symbols.end()) continue;
+            if (found->second.kind == SymbolKind::Alias) resolveAlias(found->second);
+            exports->emplace(statement->text, found->second);
+        }
+        scopes = std::move(savedScopes); functions = std::move(savedFunctions); assigned = std::move(savedAssigned);
+        loading.erase(name); modules[name] = exports;
+        return exports;
+    }
+
+    void importUserModule(const Ast &node) {
+        auto exports = loadModule(node->text, node->span);
+        if (!exports) return;
+        if (node->kind == "import") {
+            Symbol space; space.kind = SymbolKind::Module; space.exports = exports;
+            declareSymbol(node->names[0], std::move(space), node->span); return;
+        }
+        for (size_t index = 0; index + 1 < node->names.size(); index += 2) {
+            auto found = exports->find(node->names[index]);
+            if (found == exports->end()) { error(node->span, "Module '" + node->text + "' does not export '" + node->names[index] + "'"); continue; }
+            declareSymbol(node->names[index + 1], found->second, node->span);
+        }
+    }
+
+    // The exported symbol named by `space.name` when `space` is an imported module namespace.
+    Symbol *moduleMember(const Ast &node, bool report) {
+        if (node->kind != "member" || node->children[0]->kind != "name") return nullptr;
+        Symbol *owner = lookup(node->children[0]->text);
+        if (!owner || owner->kind != SymbolKind::Module) return nullptr;
+        auto found = owner->exports->find(node->text);
+        if (found == owner->exports->end()) { if (report) error(node->span, "Module '" + node->children[0]->text + "' does not export '" + node->text + "'"); return nullptr; }
+        return &found->second;
+    }
+
+    bool isModuleAccess(const Ast &node) {
+        if (node->kind != "member" || node->children[0]->kind != "name") return false;
+        Symbol *owner = lookup(node->children[0]->text);
+        return owner && owner->kind == SymbolKind::Module;
+    }
+
+    Ty moduleValue(const Ast &node) {
+        Symbol *symbol = moduleMember(node, true);
+        if (!symbol) return ty.error();
+        if (symbol->kind == SymbolKind::Function) return symbol->signature->type;
+        if (symbol->kind != SymbolKind::Value) { error(node->span, "'" + node->text + "' is a type, not a value"); return ty.error(); }
+        return symbol->type;
     }
 
     void implHeader(const Ast &node) {
@@ -709,7 +796,7 @@ private:
         else if (kind == "function") functionStatement(node);
         else if (classOf.count(node.get())) checkClassBodies(node);
         else if (kind == "type_alias") { Symbol *symbol = lookup(node->text); if (symbol && symbol->kind == SymbolKind::Alias) resolveAlias(*symbol); }
-        else if (kind == "import" || kind == "from_import") importStatement(node);
+        else if (kind == "import" || kind == "from_import") return;
         else if (kind == "impl") checkImplBodies(node);
         else if (kind == "yield") yieldStatement(node);
         else error(node->span, "Unsupported statement '" + kind + "'");
@@ -912,7 +999,7 @@ private:
         if (kind == "binary") return binaryExpression(node, expected);
         if (kind == "unary") return unaryExpression(node);
         if (kind == "call") return callExpression(node, expected);
-        if (kind == "member") return memberExpression(node, expected);
+        if (kind == "member") return isModuleAccess(node) ? moduleValue(node) : memberExpression(node, expected);
         if (kind == "index") return indexExpression(node);
         if (kind == "slice") return sliceExpression(node);
         if (kind == "list" || kind == "tuple") return listExpression(node, expected);
@@ -957,6 +1044,7 @@ private:
             return symbol->type;
         }
         case SymbolKind::Function: return symbol->signature ? symbol->signature->type : symbol->type;
+        case SymbolKind::Class: case SymbolKind::Alias: return classType("Type");
         default: error(node->span, "'" + node->text + "' is a type, not a value"); return ty.error();
         }
     }
@@ -1091,9 +1179,11 @@ private:
     ClassInfo *classReference(const Ast &node) {
         if (node->kind == "name") { Symbol *symbol = lookup(node->text); return symbol && symbol->kind == SymbolKind::Class ? symbol->info : nullptr; }
         if (node->kind != "member") return nullptr;
+        if (Symbol *exported = moduleMember(node, false)) return exported->kind == SymbolKind::Class ? exported->info : nullptr;
         ClassInfo *owner = classReference(node->children[0]);
         if (!owner) return nullptr;
         Symbol *nested = lookup(owner->name + "_" + node->text);
+        if (!nested && owner->name == "IO") nested = lookup(node->text);
         return nested && nested->kind == SymbolKind::Class ? nested->info : nullptr;
     }
 
@@ -1236,7 +1326,13 @@ private:
             if (symbol && symbol->kind == SymbolKind::Class) return construct(node, symbol->info, callee->typeArgs, expected);
             if (symbol && symbol->kind == SymbolKind::Function) { callee->resolved = symbol->signature->type; return applyCall(node, symbol->signature->type, symbol->signature, callee->typeArgs, expected); }
         }
-        if (callee->kind == "member") {
+        if (callee->kind == "member" && isModuleAccess(callee)) {
+            Symbol *symbol = moduleMember(callee, true);
+            if (!symbol) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return ty.error(); }
+            if (symbol->kind == SymbolKind::Class) return construct(node, symbol->info, callee->typeArgs, expected);
+            if (symbol->kind == SymbolKind::Function) { callee->resolved = symbol->signature->type; return applyCall(node, symbol->signature->type, symbol->signature, callee->typeArgs, expected); }
+        }
+        if (callee->kind == "member" && !isModuleAccess(callee)) {
             Resolved resolved = resolveMember(callee);
             if (!resolved.found) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return ty.error(); }
             callee->resolved = resolved.type;
@@ -1293,8 +1389,8 @@ private:
 
 }
 
-std::vector<Diagnostic> typeCheck(const Ast &program) {
-    Typer typer; typer.check(program);
+std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader) {
+    Typer typer; typer.setLoader(loader); typer.check(program);
     return typer.diagnostics;
 }
 

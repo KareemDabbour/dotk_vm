@@ -76,6 +76,8 @@ class Tuple<T> implements Collections_Sized, Iterable<T> {
 }
 class Generator<T> implements Iterable<T> {
 }
+class Type {
+}
 class Task<T> {
     let status: String
     let done: Bool
@@ -133,8 +135,7 @@ class Math {
     static fn round(value: Float) -> Int
 }
 class Collections {
-    static fn range(stop: Int) -> List<Int>
-    static fn rangeFrom(start: Int, stop: Int, step: Int = 1) -> List<Int>
+    static fn range(first: Int, second: Int? = null, step: Int = 1) -> List<Int>
     static fn len(value: Collections.Sized) -> Int
 }
 class Text {
@@ -145,8 +146,7 @@ class Text {
 class Random {
     static fn seed(value: Int) -> Null
     static fn float() -> Float
-    static fn int(stop: Int) -> Int
-    static fn intRange(start: Int, stop: Int) -> Int
+    static fn int(first: Int, second: Int? = null) -> Int
     static fn choice<T>(items: List<T>) -> T
     static fn shuffle<T>(items: List<T>) -> Null
 }
@@ -166,6 +166,47 @@ class Tasks {
     static fn pump(turns: Int) -> Int
     static fn cancel<T>(task: Task<T>) -> Null
     static fn close<T>(generator: Generator<T>) -> Null
+}
+class IO {
+    static fn write(value: String | Bytes) -> Null
+    static fn readLine() -> String?
+}
+class Files {
+    static fn readText(path: String) -> String
+    static fn readBytes(path: String) -> Bytes
+    static fn exists(path: String) -> Bool
+    static fn size(path: String) -> Int
+}
+class Terminal {
+    static fn open() -> Null
+    static fn close() -> Null
+    static fn isOpen() -> Bool
+    static fn readKey(timeoutMs: Int = 0) -> Int?
+}
+class Sockets {
+    static fn listen(host: String, port: Int) -> Resource
+    static fn connect(host: String, port: Int, timeoutMs: Int = 0) -> Resource
+    static fn accept(listener: Resource, timeoutMs: Int = 0) -> Resource?
+    static fn receive(socket: Resource, maximum: Int, timeoutMs: Int = 0) -> Bytes?
+    static fn send(socket: Resource, bytes: String | Bytes, timeoutMs: Int = 0) -> Int
+    static fn close(socket: Resource) -> Null
+    static fn port(socket: Resource) -> Int
+}
+class Http {
+    static fn readRequest(socket: Resource, timeoutMs: Int = 1000) -> Map<String, Object?>?
+    static fn readResponse(socket: Resource, timeoutMs: Int = 1000) -> Map<String, Object?>?
+    static fn writeRequest(socket: Resource, method: String, target: String, body: String | Bytes = '', timeoutMs: Int = 1000) -> Int
+    static fn writeResponse(socket: Resource, status: Int, body: String | Bytes, contentType: String = 'text/plain; charset=utf-8', timeoutMs: Int = 1000) -> Int
+}
+class Requests {
+    static fn request(method: String, url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn get(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn head(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn delete(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn post(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn put(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn patch(url: String, options: Map<String, Object?> = {}) -> Map<String, Object?>
+    static fn json(response: Map<String, Object?>) -> Object?
 }
 )STUB";
 }
