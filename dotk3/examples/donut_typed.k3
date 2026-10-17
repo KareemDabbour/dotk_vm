@@ -1,0 +1,66 @@
+class Ansi {
+    static let RESET: String = "\x1b[0m"
+    static let RED: String = "\x1b[0;31m"
+    static let GREEN: String = "\x1b[0;32m"
+    static let BLUE: String = "\x1b[0;34m"
+    static let PURPLE: String = "\x1b[0;35m"
+    static let CYAN: String = "\x1b[0;36m"
+    static let WHITE: String = "\x1b[0;37m"
+}
+
+fn wrap(glyph: String, color: String) -> String => color + glyph + Ansi.RESET
+
+let SHADES: List<String> = [
+    wrap(".", Ansi.RED), wrap(",", Ansi.RED), wrap("-", Ansi.GREEN), wrap("~", Ansi.GREEN),
+    wrap(":", Ansi.BLUE), wrap(";", Ansi.BLUE), wrap("=", Ansi.PURPLE), wrap("!", Ansi.PURPLE),
+    wrap("*", Ansi.CYAN), wrap("#", Ansi.CYAN), wrap("$", Ansi.WHITE), wrap("@", Ansi.WHITE)
+]
+
+let SIZE: Int = 22
+
+fn textGrid() -> List<List<String>> {
+    return Collections.range(SIZE).map(fn(row) => Collections.range(SIZE).map(fn(column) => " "))
+}
+
+fn depthGrid() -> List<List<Float>> {
+    return Collections.range(SIZE).map(fn(row) => Collections.range(SIZE).map(fn(column) => 0.0))
+}
+
+fn renderFrame(angleA: Float, angleB: Float) -> List<List<String>> {
+    let output = textGrid()
+    let depth = depthGrid()
+    let cosA = Math.cos(angleA)
+    let sinA = Math.sin(angleA)
+    let cosB = Math.cos(angleB)
+    let sinB = Math.sin(angleB)
+    for (var theta = 0.0; theta < 6.28; theta += 0.07) {
+        let cosTheta = Math.cos(theta)
+        let sinTheta = Math.sin(theta)
+        for (var phi = 0.0; phi < 6.28; phi += 0.02) {
+            let cosPhi = Math.cos(phi)
+            let sinPhi = Math.sin(phi)
+            let circleX = 2 + cosTheta
+            let x = circleX * (cosB * cosPhi + sinA * sinB * sinPhi) - sinTheta * cosA * sinB
+            let y = circleX * (sinB * cosPhi - sinA * cosB * sinPhi) + sinTheta * cosA * cosB
+            let inverseDepth = 1 / (5 + cosA * circleX * sinPhi + sinTheta * sinA)
+            let column: Int = Math.floor(11 + 13.75 * inverseDepth * x)
+            let row: Int = Math.floor(11 - 13.75 * inverseDepth * y)
+            let light = cosPhi * cosTheta * sinB - cosA * cosTheta * sinPhi - sinA * sinTheta + cosB * (cosA * sinTheta - cosTheta * sinA * sinPhi)
+            if light > 0 and inverseDepth > depth[row][column] {
+                depth[row][column] = inverseDepth
+                output[row][column] = SHADES[Math.toInt(light * 8)]
+            }
+        }
+    }
+    return output
+}
+
+var angleA = 0.0
+var angleB = 0.0
+for frame in Collections.range(3) {
+    let output = renderFrame(angleA, angleB)
+    System.print("frame", frame)
+    for row in output { System.print("".join(row)) }
+    angleA += 0.4
+    angleB += 0.2
+}

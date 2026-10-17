@@ -135,6 +135,7 @@ test-network: $(BUILD)/dotk3
 
 test-static: $(BUILD)/dotk3
 	sh tests/static.sh $(BUILD)/dotk3
+	sh tests/static_examples.sh $(BUILD)/dotk3
 
 test-editor: $(BUILD)/dotk3-lsp
 	ruby tests/editor.rb
