@@ -51,13 +51,15 @@ typedef struct {
     const DK3Value *parent;
 } DK3Resource;
 
+/* `signature` is the declaration tail the type checker sees, e.g. "(a: Int, b: String = 'x') -> Int". */
 typedef struct {
     const char *name;
+    const char *signature;
     DK3Native function;
     void *userdata;
     const char *documentation;
 } DK3NativeExport;
-#define DK3_MODULE_ABI_VERSION 1u
+#define DK3_MODULE_ABI_VERSION 2u
 typedef struct {
     size_t size;
     uint32_t abi_version;
@@ -123,7 +125,7 @@ DK3Status dk3_task_state(const DK3Value *task, DK3TaskState *state);
 DK3Status dk3_task_value(DK3VM *vm, const DK3Value *task, int *available, DK3Value **result);
 DK3Status dk3_release(DK3Value *value);
 DK3Status dk3_collect(DK3VM *vm);
-DK3Status dk3_define_native(DK3VM *vm, const char *name, DK3Native function, void *userdata);
+DK3Status dk3_define_native(DK3VM *vm, const char *name, const char *signature, DK3Native function, void *userdata);
 size_t dk3_native_count(const DK3Call *call);
 DK3VM *dk3_native_vm(const DK3Call *call);
 DK3Status dk3_native_argument(DK3Call *call, size_t index, DK3Value **result);

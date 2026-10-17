@@ -1,4 +1,5 @@
 #include "runtime.hpp"
+#include "typer.hpp"
 #include "../include/dotk3.h"
 #include <mutex>
 #include <cmath>
@@ -22,6 +23,7 @@ struct DK3Value {
     bool alive = true;
 };
 struct DK3VM {
+    std::unique_ptr<dk3::TypeSession> session;
     std::unique_ptr<dk3::Runtime> runtime;
     std::vector<std::unique_ptr<DK3Value>> values;
     std::vector<std::shared_ptr<ResourceState>> resources;
@@ -158,10 +160,14 @@ DK3Status dk3_register_module(DK3VM *vm, const DK3NativeModule *module) {
         std::vector<dk3::NativeExport> exports;
         for (size_t index = 0; index < module->count; index++) {
             const auto &entry = module->exports[index];
-            if (!entry.name || !entry.function) return DK3_INVALID;
+            if (!entry.name || !entry.function || !entry.signature) return DK3_INVALID;
             exports.push_back({entry.name, entry.documentation ? entry.documentation : "", nativeFunction(vm, entry.function, entry.userdata, true)});
         }
-        vm->runtime->registerModule(module->name, module->documentation ? module->documentation : "", exports); return DK3_OK;
+        vm->runtime->registerModule(module->name, module->documentation ? module->documentation : "", exports);
+        std::vector<std::pair<std::string, std::string>> signatures; std::string problem;
+        for (size_t index = 0; index < module->count; index++) signatures.emplace_back(module->exports[index].name, module->exports[index].signature);
+        if (!vm->session->declareModule(module->name, signatures, problem)) { vm->diagnostic = "Invalid native signature: " + problem; return DK3_INVALID; }
+        return DK3_OK;
     });
 }
 void dk3_resource_init(DK3Resource *resource) {
@@ -274,6 +280,15 @@ DK3VM *dk3_create(const DK3Config *provided) {
         if (config.resolve) options.resolveModule = [config](const std::string &name) {
             const char *source = config.resolve(config.userdata, name.c_str()); return source ? std::string(source) : std::string{};
         };
+        dk3::ModuleLoader loader = [config](const std::string &name) -> std::shared_ptr<const dk3::Source> {
+            if (!config.resolve) return nullptr;
+            const char *source = config.resolve(config.userdata, name.c_str());
+            return source ? std::make_shared<const dk3::Source>(dk3::Source{name + ".k3", source}) : nullptr;
+        };
+        instance->session = std::make_unique<dk3::TypeSession>(loader);
+        dk3::TypeSession *session = instance->session.get();
+        options.enforceContracts = false;
+        options.resolveProgram = [session](const std::string &name) { return session->module(name); };
         instance->runtime = std::make_unique<dk3::Runtime>(std::move(options)); return instance.release();
     } catch (...) { return nullptr; }
 }
@@ -287,7 +302,16 @@ DK3Status dk3_destroy(DK3VM *vm) {
 const char *dk3_diagnostic(const DK3VM *vm) { return vm ? vm->diagnostic.c_str() : "Invalid VM"; }
 DK3Status dk3_eval(DK3VM *vm, const char *source, const char *file) {
     if (!source) return DK3_INVALID;
-    return protect(vm, [&] { vm->runtime->run(source, file ? file : "<host>"); return DK3_OK; });
+    return protect(vm, [&] {
+        auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{file ? file : "<host>", source}));
+        std::string problems;
+        for (const auto &found : vm->session->check(program, false)) {
+            if (found.warning) continue;
+            problems += (problems.empty() ? "" : "\n") + dk3::formatDiagnostic(found);
+        }
+        if (!problems.empty()) { vm->diagnostic = problems; return DK3_ERROR; }
+        vm->runtime->run(program); return DK3_OK;
+    });
 }
 DK3Status dk3_get(DK3VM *vm, const char *name, DK3Value **result) {
     if (!name || !result) return DK3_INVALID; *result = nullptr;
@@ -548,10 +572,13 @@ DK3Status dk3_task_value(DK3VM *vm, const DK3Value *task, int *available, DK3Val
         *available = 1; return retain(vm, instance->taskValue, result);
     });
 }
-DK3Status dk3_define_native(DK3VM *vm, const char *name, DK3Native function, void *userdata) {
-    if (!name || !function) return DK3_INVALID;
+DK3Status dk3_define_native(DK3VM *vm, const char *name, const char *signature, DK3Native function, void *userdata) {
+    if (!name || !signature || !function) return DK3_INVALID;
     return protect(vm, [&] {
-        vm->runtime->registerNative(name, nativeFunction(vm, function, userdata)); return DK3_OK;
+        vm->runtime->registerNative(name, nativeFunction(vm, function, userdata));
+        std::string problem;
+        if (!vm->session->declareNative(name, signature, problem)) { vm->diagnostic = "Invalid native signature: " + problem; return DK3_INVALID; }
+        return DK3_OK;
     });
 }
 size_t dk3_native_count(const DK3Call *call) { return call && activeCall == call ? call->arguments->size() : 0; }

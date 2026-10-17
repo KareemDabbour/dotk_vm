@@ -67,11 +67,11 @@ int main(void) {
     DK3Config config; dk3_config_init(&config); config.write = output;
     DK3VM *vm = dk3_create(&config);
     if (!vm) return 1;
-    DK3Status result = dk3_define_native(vm, "host.records", records, NULL);
+    DK3Status result = dk3_define_native(vm, "host.records", "() -> List<Map<String, Int>>", records, NULL);
     if (result == DK3_OK)
-        result = dk3_eval(vm, "let rows: List[Map[String, Int]] = host.records()\nSystem.gc()\nrows[0]['value'] += 10\nSystem.print(Json.stringify(rows))", "structured-host.k3");
-    DK3NativeExport exports[] = {{"create", create_counter, NULL, "Create a host-owned Counter."},
-        {"next", next_counter, NULL, "Increment a live Counter."}, {"close", close_counter, NULL, "Close an opaque resource explicitly."}};
+        result = dk3_eval(vm, "let rows: List<Map<String, Int>> = host.records()\nSystem.gc()\nrows[0]['value'] += 10\nSystem.print(Json.stringify(rows))", "structured-host.k3");
+    DK3NativeExport exports[] = {{"create", "() -> Resource", create_counter, NULL, "Create a host-owned Counter."},
+        {"next", "(counter: Resource) -> Int", next_counter, NULL, "Increment a live Counter."}, {"close", "(counter: Resource) -> Null", close_counter, NULL, "Close an opaque resource explicitly."}};
     DK3NativeModule module; dk3_module_init(&module);
     module.name = "Counters"; module.documentation = "A native resource adapter."; module.count = 3; module.exports = exports;
     if (result == DK3_OK) result = dk3_register_module(vm, &module);

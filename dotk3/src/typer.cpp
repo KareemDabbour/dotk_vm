@@ -134,6 +134,22 @@ public:
         blockStatements(program->children);
     }
 
+    // Declares host-provided natives from stub syntax in the core scope; false (with `problem`) leaves nothing declared.
+    bool declareHost(const std::string &stubText, std::string &problem) {
+        Ast stubs;
+        try { stubs = parseStub(std::make_shared<Source>(Source{"<host>", stubText})); }
+        catch (const Error &failure) { problem = failure.what(); return false; }
+        std::vector<Scope> rest(std::make_move_iterator(scopes.begin() + 1), std::make_move_iterator(scopes.end()));
+        scopes.resize(1);
+        size_t before = diagnostics.size();
+        builtinMode = false; replacingCore = true;
+        blockStatements(stubs->children);
+        replacingCore = false;
+        for (auto &scope : rest) scopes.push_back(std::move(scope));
+        if (diagnostics.size() == before) return true;
+        problem = diagnostics[before].message; diagnostics.resize(before); return false;
+    }
+
     // One REPL submission: globals persist and may be redeclared; a failed submission leaves no trace.
     std::vector<Diagnostic> checkSubmission(const Ast &program, bool allowRedeclaration) {
         diagnostics.clear();
@@ -157,7 +173,7 @@ private:
     std::map<std::string, Ast> programs;
     std::set<std::string> loading;
     bool builtinMode = false;
-    bool sessionMode = false;
+    bool sessionMode = false, replacingCore = false;
     Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
     ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr, *iterableInfo = nullptr;
 
@@ -182,7 +198,7 @@ private:
     }
 
     void declareSymbol(const std::string &name, Symbol symbol, const Span &span) {
-        if (scopes.back().symbols.count(name) && !(sessionMode && scopes.size() == 2)) { error(span, "Duplicate declaration '" + name + "'"); return; }
+        if (scopes.back().symbols.count(name) && !(sessionMode && scopes.size() == 2) && !replacingCore) { error(span, "Duplicate declaration '" + name + "'"); return; }
         scopes.back().symbols.insert_or_assign(name, std::move(symbol));
     }
 
@@ -1513,11 +1529,35 @@ std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader
     return typer.diagnostics;
 }
 
-struct TypeSession::Impl { Typer typer; };
+struct TypeSession::Impl {
+    Typer typer;
+    std::map<std::string, std::vector<std::string>> namespaces;  // namespace -> member stubs
+};
 
 TypeSession::TypeSession(ModuleLoader loader) : impl(std::make_unique<Impl>()) { impl->typer.setLoader(std::move(loader)); }
 TypeSession::~TypeSession() = default;
 std::vector<Diagnostic> TypeSession::check(const Ast &program, bool allowRedeclaration) { return impl->typer.checkSubmission(program, allowRedeclaration); }
+bool TypeSession::declareNative(const std::string &name, const std::string &signature, std::string &problem) {
+    size_t dot = name.find('.');
+    if (dot == std::string::npos) return impl->typer.declareHost("fn " + name + signature + "\n", problem);
+    if (name.find('.', dot + 1) != std::string::npos) { problem = "Native names support one namespace level"; return false; }
+    std::string space = name.substr(0, dot);
+    auto members = impl->namespaces[space];
+    members.push_back("static fn " + name.substr(dot + 1) + signature + "\n");
+    std::string stub = "class " + space + " {\n";
+    for (const auto &member : members) stub += member;
+    stub += "}\n";
+    if (!impl->typer.declareHost(stub, problem)) return false;
+    impl->namespaces[space] = std::move(members); return true;
+}
+bool TypeSession::declareModule(const std::string &name, const std::vector<std::pair<std::string, std::string>> &exports, std::string &problem) {
+    std::vector<std::string> members;
+    std::string stub = "class " + name + " {\n";
+    for (const auto &entry : exports) { members.push_back("static fn " + entry.first + entry.second + "\n"); stub += members.back(); }
+    stub += "}\n";
+    if (!impl->typer.declareHost(stub, problem)) return false;
+    impl->namespaces[name] = std::move(members); return true;
+}
 Ast TypeSession::module(const std::string &name) const {
     auto found = impl->typer.loadedPrograms().find(name);
     return found == impl->typer.loadedPrograms().end() ? nullptr : found->second;

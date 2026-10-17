@@ -54,8 +54,8 @@ int main() {
     DK3VM *first = dk3_create(nullptr), *second = dk3_create(nullptr);
     assert(first && second);
     Rendezvous rendezvous;
-    assert(dk3_define_native(first, "meet", meet, &rendezvous) == DK3_OK);
-    assert(dk3_define_native(second, "meet", meet, &rendezvous) == DK3_OK);
+    assert(dk3_define_native(first, "meet", "() -> Int", meet, &rendezvous) == DK3_OK);
+    assert(dk3_define_native(second, "meet", "() -> Int", meet, &rendezvous) == DK3_OK);
     auto run = [](DK3VM *vm) {
         assert(dk3_eval(vm, "let answer = meet()", "worker.k3") == DK3_OK);
         DK3Value *value = nullptr; int64_t answer = 0;

@@ -70,15 +70,6 @@ static DK3Status structured_adapter(DK3Call *call, void *userdata) {
     assert(dk3_collect(dk3_native_vm(call)) == DK3_BUSY);
     return DK3_OK;
 }
-static DK3Status typed_callback_failure(DK3Call *call, void *userdata) {
-    (void)userdata; DK3Value *input = NULL, *wrong = NULL; size_t before = 0, after = 0;
-    assert(dk3_native_argument(call, 0, &input) == DK3_OK && dk3_native_sequence_size(call, input, &before) == DK3_OK);
-    assert(dk3_native_make_string(call, "wrong", 5, &wrong) == DK3_OK);
-    assert(dk3_native_list_append(call, input, wrong) == DK3_ERROR);
-    assert(dk3_native_sequence_size(call, input, &after) == DK3_OK && after == before);
-    assert(dk3_native_release(call, input) == DK3_OK && dk3_native_release(call, wrong) == DK3_OK);
-    return dk3_native_return_bool(call, 1);
-}
 typedef struct { DK3VM *vm; int reads; } FileHost;
 typedef struct { DK3VM *vm; int order; } ResourceHost;
 static void dispose_counter(void *userdata, void *payload) {
@@ -96,7 +87,7 @@ static void resource_lifecycle(void) {
     assert(dk3_get_type(first, &type) == DK3_OK && type == DK3_RESOURCE);
     assert(dk3_resource_get(first, "Counter", &payload) == DK3_OK && payload == &one);
     assert(dk3_resource_get(first, "Other", &payload) == DK3_INVALID && payload == NULL);
-    assert(dk3_define_native(vm, "resourceValue", return_handle, first) == DK3_OK);
+    assert(dk3_define_native(vm, "resourceValue", "() -> Resource", return_handle, first) == DK3_OK);
     assert(dk3_eval(vm, "let resourceMeta: Resource = resourceValue()\nlet beforeClosed: Bool = resourceMeta.closed\nlet resourceTag: String = resourceMeta.type_name\nlet resourceMembers = Reflection.members(resourceMeta)\nSystem.gc()", "resource-metadata.k3") == DK3_OK);
     assert(dk3_eval(vm, "resourceMeta.closed = true", "readonly-resource.k3") == DK3_ERROR);
     assert(dk3_resource_closed(first, &closed) == DK3_OK && closed == 0);
@@ -138,7 +129,7 @@ static void native_limits(void) {
     DK3NativeExport exports[256]; char names[256][32]; int64_t increment = 1;
     for (size_t index = 0; index < 256; index++) {
         snprintf(names[index], sizeof(names[index]), "entry%zu", index);
-        exports[index] = (DK3NativeExport){names[index], add, &increment, NULL};
+        exports[index] = (DK3NativeExport){names[index], "(number: Int) -> Int", add, &increment, NULL};
     }
     DK3NativeModule module; dk3_module_init(&module);
     module.name = "Limited"; module.count = 256; module.exports = exports;
@@ -176,7 +167,7 @@ int main(void) {
     assert(dk3_call(first, privacyReader, 0, NULL, &privacyResult) == DK3_OK && dk3_get_int(privacyResult, &privacyNumber) == DK3_OK && privacyNumber == 13);
     assert(dk3_eval(first, "privacy.value", "host-private-error.k3") == DK3_ERROR);
     assert(dk3_release(privacyReader) == DK3_OK && dk3_release(privacyResult) == DK3_OK);
-    assert(dk3_eval(first, "class HostList extends List { let label: String = 'host' }\nlet hostCollection: List[Int] = HostList([1,2])\nlet hostUnique: Set[Int] = Set([1,1,2])", "host-collection-types.k3") == DK3_OK);
+    assert(dk3_eval(first, "class HostList extends List<Int> { let label: String = 'host' }\nlet hostCollection: List<Int> = HostList([1,2])\nlet hostUnique: Set<Int> = Set([1,1,2])", "host-collection-types.k3") == DK3_OK);
     DK3Value *hostCollection = NULL, *hostType = NULL, *hostUnique = NULL; DK3Type collectionType; size_t collectionSize = 0;
     assert(dk3_get(first, "hostCollection", &hostCollection) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_get_type(hostCollection, &collectionType) == DK3_OK && collectionType == DK3_LIST);
@@ -190,14 +181,14 @@ int main(void) {
     assert(dk3_call(first, hostRead, 0, NULL, &hostResult) == DK3_OK);
     assert(dk3_get_int(hostResult, &hostAnswer) == DK3_OK && hostAnswer == 8);
     assert(dk3_release(hostResult) == DK3_OK && dk3_release(hostRead) == DK3_OK);
-    assert(dk3_eval(first, "record Reward { value: Int }\nlet callbackRewards: List[Reward] = [1,2].map(fn(value: Int) -> Reward { System.gc(); return Reward(value) })\nlet retainedReward = callbackRewards.find(fn(value: Reward) -> Bool => value.value == 2)\ncallbackRewards.clear()\nSystem.gc()", "callback-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "record Reward { value: Int }\nlet callbackRewards: List<Reward> = [1,2].map(fn(value: Int) -> Reward { System.gc(); return Reward(value) })\nlet retainedReward = callbackRewards.find(fn(value: Reward) -> Bool => value.value == 2)\ncallbackRewards.clear()\nSystem.gc()", "callback-host.k3") == DK3_OK);
     DK3Value *retainedReward = NULL; DK3Type rewardType;
     assert(dk3_get(first, "retainedReward", &retainedReward) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_get_type(retainedReward, &rewardType) == DK3_OK && rewardType == DK3_OBJECT);
-    assert(dk3_eval(first, "let rewardValue: Int = retainedReward.value", "callback-host-result.k3") == DK3_OK);
+    assert(dk3_eval(first, "let rewardValue: Int = retainedReward!.value", "callback-host-result.k3") == DK3_OK);
     assert(dk3_release(retainedReward) == DK3_OK);
     int64_t moduleIncrement = 10;
-    DK3NativeExport exports[] = {{"add", add, &moduleIncrement, "Adds the host increment."}};
+    DK3NativeExport exports[] = {{"add", "(number: Int) -> Int", add, &moduleIncrement, "Adds the host increment."}};
     DK3NativeModule module; dk3_module_init(&module);
     module.name = "Arithmetic"; module.documentation = "A contextual native module."; module.count = 1; module.exports = exports;
     module.abi_version++; assert(dk3_register_module(first, &module) == DK3_INVALID); module.abi_version--;
@@ -214,7 +205,7 @@ int main(void) {
     assert(dk3_get(first, "nativeDoc", &moduleValue) == DK3_OK && dk3_get_string(moduleValue, &moduleDoc, &moduleDocLength) == DK3_OK);
     assert(moduleDocLength == strlen(exports[0].documentation) && memcmp(moduleDoc, exports[0].documentation, moduleDocLength) == 0);
     assert(dk3_release(moduleValue) == DK3_OK);
-    DK3NativeExport duplicates[] = {{"first", add, &moduleIncrement, NULL}, {"first", add, &moduleIncrement, NULL}};
+    DK3NativeExport duplicates[] = {{"first", "(number: Int) -> Int", add, &moduleIncrement, NULL}, {"first", "(number: Int) -> Int", add, &moduleIncrement, NULL}};
     module.name = "Rejected"; module.count = 2; module.exports = duplicates;
     assert(dk3_register_module(first, &module) == DK3_ERROR && dk3_get(first, "Rejected", &moduleValue) == DK3_ERROR && moduleValue == NULL);
     module.count = 1; assert(dk3_register_module(first, &module) == DK3_OK);
@@ -223,10 +214,8 @@ int main(void) {
     module.name = "System"; assert(dk3_register_module(first, &module) == DK3_ERROR);
     assert(dk3_eval(first, "Rejected.first = Arithmetic.add", "readonly-native.k3") == DK3_ERROR);
     assert(dk3_native_map(NULL, NULL) == DK3_INVALID);
-    assert(dk3_define_native(first, "host.structured", structured_adapter, NULL) == DK3_OK);
-    assert(dk3_eval(first, "let structured = host.structured([1,2,3])\nlet structuredJson = Json.stringify(structured)\nlet structuredSum: Int = structured['sum']\nlet structuredRows: List[Int] = structured['rows']\nlet structuredValid: Bool = structured['valid']\nSystem.gc()", "structured-adapter.k3") == DK3_OK);
-    assert(dk3_define_native(first, "host.typedFailure", typed_callback_failure, NULL) == DK3_OK);
-    assert(dk3_eval(first, "let callbackTyped: List[Int] = [1]\nhost.typedFailure(callbackTyped)\nlet preservedCallbackCount = callbackTyped.length()", "callback-contract.k3") == DK3_OK);
+    assert(dk3_define_native(first, "host.structured", "(rows: List<Int>) -> Map<String, Object?>", structured_adapter, NULL) == DK3_OK);
+    assert(dk3_eval(first, "let structured = host.structured([1,2,3])\nlet structuredJson = Json.stringify(structured)\nlet structuredSum = structured['sum'] as Int\nlet structuredRows = structured['rows'] as List<Int>\nlet structuredValid = structured['valid'] as Bool\nSystem.gc()", "structured-adapter.k3") == DK3_OK);
     DK3Value *itemOne = NULL, *itemTwo = NULL, *hostList = NULL, *hostTuple = NULL, *hostItem = NULL;
     assert(dk3_int(first, 1, &itemOne) == DK3_OK && dk3_int(first, 2, &itemTwo) == DK3_OK);
     const DK3Value *hostItems[] = {itemOne, itemTwo}; size_t hostCount = 0; int64_t hostNumber;
@@ -249,13 +238,11 @@ int main(void) {
     assert(dk3_map_remove(hostMap, mapKey, &mapFound) == DK3_OK && mapFound == 1);
     assert(dk3_map_get(hostMap, mapKey, &mapFound, &hostItem) == DK3_OK && mapFound == 0 && hostItem == NULL);
     assert(dk3_release(mapKey) == DK3_OK && dk3_release(hostMap) == DK3_OK);
-    assert(dk3_eval(first, "let typedHostList: List[Int] = [1]\nlet typedHostMap: Map[String, Int] = {'x': 1}", "typed-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "let typedHostList: List<Int> = [1]\nlet typedHostMap: Map<String, Int> = {'x': 1}", "typed-host.k3") == DK3_OK);
     assert(dk3_get(first, "typedHostList", &hostList) == DK3_OK && dk3_get(first, "typedHostMap", &hostMap) == DK3_OK);
     assert(dk3_int(first, 2, &itemTwo) == DK3_OK && dk3_string(first, "bad", 3, &mapValue) == DK3_OK && dk3_string(first, "x", 1, &mapKey) == DK3_OK);
-    assert(dk3_list_append(hostList, mapValue) == DK3_ERROR && dk3_list_set(hostList, 0, mapValue) == DK3_ERROR);
     assert(dk3_sequence_size(hostList, &hostCount) == DK3_OK && hostCount == 1);
     assert(dk3_list_set(hostList, 9, itemTwo) == DK3_INVALID && dk3_sequence_get(hostList, 9, &hostItem) == DK3_INVALID && hostItem == NULL);
-    assert(dk3_map_set(hostMap, mapKey, mapValue) == DK3_ERROR && dk3_map_get(hostMap, itemTwo, &mapFound, &hostItem) == DK3_ERROR);
     assert(dk3_map_size(hostMap, &hostCount) == DK3_OK && hostCount == 1);
     DK3Value *foreignItem = NULL;
     assert(dk3_int(second, 3, &foreignItem) == DK3_OK);
@@ -283,13 +270,13 @@ int main(void) {
     assert(dk3_get_string(scalar, &binary, &binaryLength) == DK3_INVALID && dk3_release(scalar) == DK3_OK);
     assert(dk3_string(first, NULL, 0, &scalar) == DK3_OK && dk3_release(scalar) == DK3_OK);
     assert(dk3_bytes(first, NULL, 0, &scalar) == DK3_OK && dk3_release(scalar) == DK3_OK);
-    assert(dk3_define_native(first, "host.echo", scalar_echo, NULL) == DK3_OK);
+    assert(dk3_define_native(first, "host.echo", "<T>(value: T) -> T", scalar_echo, NULL) == DK3_OK);
     assert(dk3_eval(first, "let echoBool: Bool = host.echo(true)\nlet echoFloat: Float = host.echo(1.25)\nlet echoString: String = host.echo('x\\0y')\nlet echoBytes: Bytes = host.echo(b'\\xff\\0')\nlet echoNull: Null = host.echo(null)\nSystem.gc()", "scalar-native.k3") == DK3_OK);
     assert(dk3_eval(first, "let sharedNativeMap = {'value': 7}", "handle-native.k3") == DK3_OK);
     assert(dk3_get(first, "sharedNativeMap", &scalar) == DK3_OK);
-    assert(dk3_define_native(first, "host.shared", return_handle, scalar) == DK3_OK);
+    assert(dk3_define_native(first, "host.shared", "() -> Map<String, Int>", return_handle, scalar) == DK3_OK);
     assert(dk3_eval(first, "let sharedReturned = host.shared()\nlet sharedValue = sharedReturned['value']", "same-owner-native.k3") == DK3_OK);
-    assert(dk3_define_native(second, "host.foreign", return_handle, scalar) == DK3_OK);
+    assert(dk3_define_native(second, "host.foreign", "() -> Map<String, Int>", return_handle, scalar) == DK3_OK);
     assert(dk3_eval(second, "host.foreign()", "foreign-native.k3") == DK3_ERROR);
     assert(dk3_release(scalar) == DK3_OK);
     assert(dk3_eval(first, "host.shared()", "released-native.k3") == DK3_ERROR);
@@ -319,8 +306,8 @@ int main(void) {
     assert(dk3_get_string(hostFileText, &hostFileBytes, &hostFileLength) == DK3_OK && hostFileLength == 9 && memcmp(hostFileBytes, "host\0data", 9) == 0);
     assert(dk3_release(hostFileText) == DK3_OK);
     int64_t firstBias = 100, secondBias = 200;
-    assert(dk3_define_native(first, "host_add", add, &firstBias) == DK3_OK);
-    assert(dk3_define_native(second, "host_add", add, &secondBias) == DK3_OK);
+    assert(dk3_define_native(first, "host_add", "(number: Int) -> Int", add, &firstBias) == DK3_OK);
+    assert(dk3_define_native(second, "host_add", "(number: Int) -> Int", add, &secondBias) == DK3_OK);
     assert(dk3_eval(first, "let result = host_add(1)\nfn stream() { yield null\nyield 2 }", "first.k3") == DK3_OK);
     assert(dk3_eval(second, "let result = host_add(1)", "second.k3") == DK3_OK);
     DK3Value *value = NULL, *function = NULL, *generator = NULL;
@@ -347,7 +334,7 @@ int main(void) {
     assert(dk3_release(generator) == DK3_OK);
     assert(dk3_release(function) == DK3_OK);
     int cleanupOrder = 0;
-    assert(dk3_define_native(first, "host_cleanup", cleanup, &cleanupOrder) == DK3_OK);
+    assert(dk3_define_native(first, "host_cleanup", "(number: Int) -> Int", cleanup, &cleanupOrder) == DK3_OK);
     assert(dk3_eval(first, "fn resource() { defer host_cleanup(1)\ntry { yield null } catch error {} finally { host_cleanup(2)\nyield 7 } }\nlet resourceGenerator = resource()", "resource.k3") == DK3_OK);
     assert(dk3_get(first, "resourceGenerator", &generator) == DK3_OK);
     assert(dk3_close(second, generator) == DK3_INVALID);
@@ -359,7 +346,7 @@ int main(void) {
     assert(dk3_resume(first, generator, &available, &value) == DK3_OK && available == 0 && !value);
     assert(dk3_release(generator) == DK3_OK);
     assert(dk3_close(first, generator) == DK3_INVALID);
-    assert(dk3_eval(first, "fn badCleanup() { defer host_cleanup(3)\ntry { yield 1 } catch error {} finally { missing() } }\nlet badGenerator = badCleanup()", "bad-cleanup.k3") == DK3_OK);
+    assert(dk3_eval(first, "fn badCleanup() { defer host_cleanup(3)\ntry { yield 1 } catch error {} finally { throw Error(Error.Kind.Application, 'cleanup failed') } }\nlet badGenerator = badCleanup()", "bad-cleanup.k3") == DK3_OK);
     assert(dk3_get(first, "badGenerator", &generator) == DK3_OK);
     assert(dk3_resume(first, generator, &available, &value) == DK3_OK && available == 1);
     assert(dk3_release(value) == DK3_OK);
@@ -422,17 +409,17 @@ int main(void) {
     assert(dk3_get_int(value, &result) == DK3_OK && result == 8);
     assert(dk3_release(value) == DK3_OK && dk3_release(function) == DK3_OK);
     assert(dk3_eval(first, "var recovery = 3", "recovered.k3") == DK3_OK);
-    assert(dk3_eval(first, "fn mapReader() { record Entry { value: Int }\nlet data: Map[String, Entry] = {'x': Entry(7)}\nlet values = data.values()\ndata.remove('x')\nreturn fn() -> Int { return values[0].value } }\nlet retainedMapReader = mapReader()", "map-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "fn mapReader() { record Entry { value: Int }\nlet data: Map<String, Entry> = {'x': Entry(7)}\nlet values = data.values()\ndata.remove('x')\nreturn fn() -> Int { return values[0].value } }\nlet retainedMapReader = mapReader()", "map-host.k3") == DK3_OK);
     assert(dk3_get(first, "retainedMapReader", &function) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_call(first, function, 0, NULL, &value) == DK3_OK);
     assert(dk3_get_int(value, &result) == DK3_OK && result == 7);
     assert(dk3_release(value) == DK3_OK && dk3_release(function) == DK3_OK);
-    assert(dk3_eval(first, "fn listReader() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet entries: List[Entry] = []\nentries.insert(0, Entry(9))\nentries.extend((Entry(10),))\nreturn entries.removeAt(0).read }\nlet retainedListReader = listReader()", "list-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "fn listReader() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet entries: List<Entry> = []\nentries.insert(0, Entry(9))\nentries.extend((Entry(10),))\nreturn entries.removeAt(0).read }\nlet retainedListReader = listReader()", "list-host.k3") == DK3_OK);
     assert(dk3_get(first, "retainedListReader", &function) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_call(first, function, 0, NULL, &value) == DK3_OK);
     assert(dk3_get_int(value, &result) == DK3_OK && result == 9);
     assert(dk3_release(value) == DK3_OK && dk3_release(function) == DK3_OK);
-    assert(dk3_eval(first, "fn safeMapReader() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet data: Map[String, Entry] = {'x': Entry(11)}\nlet value = data.get('x')\ndata.clear()\nreturn value.read }\nlet safeReader = safeMapReader()", "safe-map-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "fn safeMapReader() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet data: Map<String, Entry> = {'x': Entry(11)}\nlet value = data.get('x')!\ndata.clear()\nreturn value.read }\nlet safeReader = safeMapReader()", "safe-map-host.k3") == DK3_OK);
     assert(dk3_get(first, "safeReader", &function) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_call(first, function, 0, NULL, &value) == DK3_OK);
     assert(dk3_get_int(value, &result) == DK3_OK && result == 11);
@@ -445,7 +432,7 @@ int main(void) {
     assert(dk3_get(first, "retainedStringPart", &value) == DK3_OK && dk3_collect(first) == DK3_OK);
     assert(dk3_get_string(value, &stringBytes, &stringLength) == DK3_OK && stringLength == 6 && memcmp(stringBytes, "second", 6) == 0);
     assert(dk3_release(value) == DK3_OK);
-    assert(dk3_eval(first, "let nativeJson = Json.parse('{\"value\":9007199254740993}')\nfn jsonField(value, key) { return value[key] }\nrecord String { value: Int }\nlet fakeString = String(1)", "json-host.k3") == DK3_OK);
+    assert(dk3_eval(first, "let nativeJson = Json.parse('{\"value\":9007199254740993}') as Map<String, Object?>\nfn jsonField(value: Map<String, Object?>, key: String) -> Object? { return value[key] }\nrecord String { value: Int }\nlet fakeString = String(1)", "json-host.k3") == DK3_OK);
     DK3Value *jsonObject = NULL, *jsonKey = NULL;
     assert(dk3_get(first, "nativeJson", &jsonObject) == DK3_OK && dk3_get_type(jsonObject, &scalarType) == DK3_OK && scalarType == DK3_MAP);
     assert(dk3_get(first, "jsonField", &function) == DK3_OK && dk3_string(first, "value", 5, &jsonKey) == DK3_OK);

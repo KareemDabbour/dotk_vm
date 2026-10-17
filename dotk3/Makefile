@@ -81,7 +81,7 @@ $(BUILD)/typer-test: tests/typer.cpp $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)
 test-typer: $(BUILD)/typer-test
 	$(BUILD)/typer-test
 
-$(BUILD)/libdotk3.a: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/debugger.o $(BUILD)/embedding.o
+$(BUILD)/libdotk3.a: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/embedding.o
 	$(AR) rcs $@ $^
 
 library: $(BUILD)/libdotk3.a
