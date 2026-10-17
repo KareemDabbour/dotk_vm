@@ -183,7 +183,7 @@ Timeout.timeout(20) do
     expect(game.player == pausedAt and game.ticks == ticks, 'pause')
     game.action('start'); game.action('up'); game.tick()
     expect(game.headingX == 1 and game.desiredY == -1, 'buffered blocked turn')
-    game.reset(); System.gc(); game.action('start'); game.player = 29; game.tick()
+    game.reset(); System.gc(); game.action('start'); game.ghosts[3].position = game.spawn; game.player = 29; game.tick()
     expect(game.power == 40 and game.score == 50 and game.lives == 3, 'power pellet')
     game.player = game.ghosts[1].position; game.collide()
     expect(game.score == 250 and game.ghosts[1].cooldown == 12, 'edible ghost')
@@ -197,7 +197,7 @@ Timeout.timeout(20) do
     game.action('next'); System.gc(); expect(game.level == 2 and game.status == 'playing' and game.score == 10, 'next level')
     for turn in Collections.range(16) { game.tick(); System.gc() }
     for ghost in game.ghosts { expect(game.board[ghost.position] != '#', 'ghost movement') }
-    let state = game.snapshot(); expect((state['ghosts'] as List<Object?>).length() == 3 and state['width'] == 28, 'snapshot')
+    let state = game.snapshot(); expect((state['ghosts'] as List<Object?>).length() == 4 and state['width'] == 28, 'snapshot')
     expect(game.render().contains('PAC-MAN'), 'terminal render')
     System.print('Pac-Man model: PASS')
   DOTK

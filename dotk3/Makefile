@@ -15,13 +15,13 @@ else
 CXXFLAGS += -O2
 endif
 
-.PHONY: all library lsp example-native test test-lexer test-parser test-runtime test-profiler test-checker test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
+.PHONY: all library lsp example-native test test-lexer test-parser test-runtime test-profiler test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
 all: $(BUILD)/dotk3 $(BUILD)/dotk3-lsp
 
-$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/checker.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/main.o
+$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/main.o
 	$(CXX) $^ $(LDFLAGS) $(CLI_LIBS) -o $@
 
-$(BUILD)/dotk3-lsp: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/checker.o $(BUILD)/semantic.o $(BUILD)/lsp_main.o
+$(BUILD)/dotk3-lsp: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/semantic.o $(BUILD)/lsp_main.o
 	$(CXX) $^ $(LDFLAGS) -o $@
 
 lsp: $(BUILD)/dotk3-lsp
@@ -74,12 +74,6 @@ $(BUILD)/tasks-test: tests/tasks.cpp $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)
 
 test-tasks: $(BUILD)/tasks-test
 	$(BUILD)/tasks-test
-
-$(BUILD)/checker-test: tests/checker.cpp $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/checker.o
-	$(CXX) $(CXXFLAGS) -I src $^ $(LDFLAGS) -o $@
-
-test-checker: $(BUILD)/checker-test
-	$(BUILD)/checker-test
 
 $(BUILD)/typer-test: tests/typer.cpp $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/types.o $(BUILD)/typer.o
 	$(CXX) $(CXXFLAGS) -I src $^ $(LDFLAGS) -o $@
@@ -143,7 +137,7 @@ test-editor: $(BUILD)/dotk3-lsp
 	node --check examples/browser_ui/app.js
 	node tests/editor_client.js
 
-test: test-lexer test-parser test-runtime test-profiler test-checker test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-network test-debugger test-editor test-lsp
+test: test-lexer test-parser test-runtime test-profiler test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-network test-debugger test-editor test-lsp
 
 clean:
 	rm -rf build

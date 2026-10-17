@@ -198,7 +198,7 @@ grep -Eq 'running[[:space:]]+[0-9]+[[:space:]]+worker' "$work/debug-output"
 grep -Eq 'ready[[:space:]]+[0-9]+[[:space:]]+worker' "$work/debug-output"
 mkdir -p "$work/checks/nested"
 printf '%s\n' 'record Point { x: Int }' 'let point = Point(1)' "System.print('CHECK_MUST_NOT_EXECUTE')" >"$work/checks/good.k3"
-printf '%s\n' 'enum Event { Move(Int), Quit }' 'let event = Event.Quit()' 'let result = match event { Event.Move(value) => value }' >"$work/checks/nested/missing.k3"
+printf '%s\n' 'enum Event { Move(Int), Quit }' 'let event = Event.Quit' 'let result = match event { Event.Move(value) => value }' >"$work/checks/nested/missing.k3"
 printf '%s\n' 'record Point { x: Int }' "let point = Point('bad')" >"$work/checks/wrong.k3"
 printf '%s\n' 'invalid language text' >"$work/checks/ignored.txt"
 if "$binary" --check "$work/checks" >"$work/output" 2>"$work/error"; then
@@ -207,7 +207,7 @@ else
     exit_code=$?; test "$exit_code" -eq 65
 fi
 grep -Fq 'missing Event.Quit' "$work/error"
-grep -Fq 'Expected Int, inferred String' "$work/error"
+grep -Fq 'Expected Int, got String' "$work/error"
 grep -Fq 'check: 1/3 files passed' "$work/output"
 if grep -Fq 'CHECK_MUST_NOT_EXECUTE' "$work/output"; then
     printf '%s\n' 'Checker executed script output' >&2; exit 1
