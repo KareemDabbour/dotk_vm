@@ -279,8 +279,10 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 function = instruction.cache;
             }
             Value result;
-            if (function && function->nativeMethod) result = callNativeMethod(receiver, *function->nativeMethod, values, location);
-            else { MethodTarget target; Value bound = member(receiverValue, method, location, false, &target); result = call(bound, values, location, target.receiver, target.owner); }
+            if (function && function->nativeMethod) {
+                struct Scratch { std::vector<Value> &roots; size_t start; ~Scratch() { roots.resize(start); } } scratch{roots, roots.size()};
+                result = callNativeMethod(receiver, *function->nativeMethod, values, location);
+            } else { MethodTarget target; Value bound = member(receiverValue, method, location, false, &target); result = call(bound, values, location, target.receiver, target.owner); }
             frame.stack.resize(begin); frame.stack.push_back(result); break;
         }
         case ByteOp::Call: case ByteOp::InvokeMethod: {
