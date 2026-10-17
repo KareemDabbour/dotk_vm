@@ -127,9 +127,9 @@ static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
 }
 
 // Prints every diagnostic and returns true when there were no errors.
-static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory) {
+static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory, std::map<std::string, dk3::Ast> *modules = nullptr) {
     bool clean = true;
-    for (const auto &diagnostic : dk3::typeCheck(program, moduleLoader(directory))) {
+    for (const auto &diagnostic : dk3::typeCheck(program, moduleLoader(directory), modules)) {
         bool color = false;
 #ifndef _WIN32
         const char *term = std::getenv("TERM");
@@ -425,12 +425,15 @@ int main(int argc, char **argv) {
                 printAst(dk3::parse(source)); return 0;
             }
             runtime = std::make_unique<dk3::Runtime>(config);
+            dk3::Ast checked;
             if (staticTyping) {
-                if (!staticCheck(dk3::parse(source), directory)) { runtime.reset(); return 65; }
+                std::map<std::string, dk3::Ast> modules; checked = dk3::parse(source);
+                if (!staticCheck(checked, directory, &modules)) { runtime.reset(); return 65; }
                 config.enforceContracts = false;
+                config.resolveProgram = [modules](const std::string &name) -> dk3::Ast { auto found = modules.find(name); return found == modules.end() ? nullptr : found->second; };
                 runtime = std::make_unique<dk3::Runtime>(config);
             }
-            runtime->run(text, filename);
+            if (checked) runtime->run(checked); else runtime->run(text, filename);
         } else runtime = std::make_unique<dk3::Runtime>(config);
         if (repl || interactiveAfter) exitCode = shell(runtime, config, terminal);
     } catch (const dk3::Error &error) {

@@ -1,6 +1,7 @@
 #pragma once
 #include "syntax.hpp"
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -16,7 +17,7 @@ struct Diagnostic {
 // nodes with their resolved types. Returns every diagnostic found; empty means well-typed.
 // The loader supplies the source of imported user modules (it may throw std::exception).
 using ModuleLoader = std::function<std::shared_ptr<const Source>(const std::string &)>;
-std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader = nullptr);
+std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader = nullptr, std::map<std::string, Ast> *modules = nullptr);
 std::string formatDiagnostic(const Diagnostic &diagnostic, bool color = false);
 
 }

@@ -181,7 +181,24 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         case ByteOp::Binary: {
             Value right = frame.stack.back(), left = frame.stack[frame.stack.size() - 2];
             Value value; using Math = ByteInstruction::Math;
-            if (instruction.math != Math::Generic && std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
+            bool floatOperation = instruction.math >= Math::AddF;
+            if (floatOperation && std::holds_alternative<double>(left) && std::holds_alternative<double>(right)) {
+                if constexpr (profiled) config.profiler->floatSpecializations++;
+                double first = std::get<double>(left), second = std::get<double>(right);
+                switch (instruction.math) {
+                case Math::AddF: value = first + second; break;
+                case Math::SubtractF: value = first - second; break;
+                case Math::MultiplyF: value = first * second; break;
+                case Math::DivideF: if (second == 0) throw Error(location, "Division by zero", "value"); value = first / second; break;
+                case Math::EqualF: value = first == second; break;
+                case Math::NotEqualF: value = first != second; break;
+                case Math::LessF: value = first < second; break;
+                case Math::GreaterF: value = first > second; break;
+                case Math::LessEqualF: value = first <= second; break;
+                case Math::GreaterEqualF: value = first >= second; break;
+                default: break;
+                }
+            } else if (!floatOperation && instruction.math != Math::Generic && std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
                 if constexpr (profiled) config.profiler->integerSpecializations++;
                 int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0; bool overflow = false;
                 switch (instruction.math) {
@@ -201,7 +218,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 case Math::Greater: value = first > second; break;
                 case Math::LessEqual: value = first <= second; break;
                 case Math::GreaterEqual: value = first >= second; break;
-                case Math::Generic: break;
+                default: break;
                 }
                 if (overflow) throw Error(location, "Int overflow", "overflow");
             } else {

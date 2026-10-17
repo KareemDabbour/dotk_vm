@@ -94,6 +94,8 @@ struct Node {
     bool needsScope = true;
     bool safe = false;
     bool widen = false;
+    // Set by the typer on numeric operations: 1 = both operands Int, 2 = both operands Float (after widening).
+    unsigned char numeric = 0;
     const TypeData *resolved = nullptr;
     Visibility visibility = Visibility::Public;
     std::string baseClass;

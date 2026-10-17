@@ -111,6 +111,7 @@ class Typer {
 public:
     std::vector<Diagnostic> diagnostics;
     void setLoader(ModuleLoader value) { loader = std::move(value); }
+    const std::map<std::string, Ast> &loadedPrograms() const { return programs; }
 
     Typer() {
         scopes.emplace_back();
@@ -142,6 +143,7 @@ private:
     std::set<std::string> assigned;
     ModuleLoader loader;
     std::map<std::string, std::shared_ptr<Exports>> modules;
+    std::map<std::string, Ast> programs;
     std::set<std::string> loading;
     bool builtinMode = false;
     Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
@@ -685,6 +687,7 @@ private:
         catch (const Error &failure) { error(failure.span.source ? failure.span : span, failure.what()); return nullptr; }
         catch (const std::exception &failure) { error(span, "Module '" + name + "' could not be loaded: " + failure.what()); return nullptr; }
         if (!program) { error(span, "Module '" + name + "' was not found"); return nullptr; }
+        programs[name] = program;
         loading.insert(name);
         Scope prelude = scopes[0];
         auto savedScopes = std::move(scopes); auto savedFunctions = std::move(functions); auto savedAssigned = std::move(assigned);
@@ -1065,6 +1068,14 @@ private:
         }
     }
 
+    // Records the operand kind so the compiler can pick typed opcodes; Int operands of a Float operation are widened.
+    void markNumeric(const Ast &node, Ty left, Ty right, bool forceFloat) {
+        bool floating = forceFloat || left == ty.floating() || right == ty.floating();
+        node->numeric = floating ? 2 : 1;
+        if (!floating) return;
+        for (const auto &operand : node->children) if (operand && operand->resolved == ty.integer()) operand->widen = true;
+    }
+
     Ty bounded(Ty type) {
         for (int depth = 0; type->tag == TypeTag::Var && type->result && depth < 16; depth++) type = type->result;
         return type;
@@ -1106,8 +1117,14 @@ private:
         Ty left = expr(node->children[0]), right = expr(node->children[1]);
         bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
         if (left->tag == TypeTag::Error || right->tag == TypeTag::Error) return comparison ? ty.boolean() : ty.error();
-        if (op == "==" || op == "!=") return ty.boolean();
+        if (op == "==" || op == "!=") {
+            Ty first = bounded(left), second = bounded(right);
+            if (ty.isNumeric(first) && ty.isNumeric(second)) markNumeric(node, first, second, false);
+            return ty.boolean();
+        }
         left = bounded(left); right = bounded(right);
+        if (comparison && ty.isNumeric(left) && ty.isNumeric(right)) markNumeric(node, left, right, false);
+        if (!comparison && ty.isNumeric(left) && ty.isNumeric(right)) markNumeric(node, left, right, op == "/");
         if (comparison) {
             if (ty.isNumeric(left) && ty.isNumeric(right)) return ty.boolean();
             if (left == stringType && right == stringType) return ty.boolean();
@@ -1160,6 +1177,7 @@ private:
         if (targetType->tag == TypeTag::Error || value->tag == TypeTag::Error) return ty.null();
         if (op == "=") { assignable(value, targetType, node->children[1]->span); return ty.null(); }
         Ty combined = compoundResult(op.substr(0, 1), targetType, value, node->span);
+        if (ty.isNumeric(bounded(targetType)) && ty.isNumeric(bounded(value))) markNumeric(node, bounded(targetType), bounded(value), op == "/=");
         assignable(combined, targetType, node->span);
         return ty.null();
     }
@@ -1405,8 +1423,9 @@ private:
 
 }
 
-std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader) {
+std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader, std::map<std::string, Ast> *modules) {
     Typer typer; typer.setLoader(loader); typer.check(program);
+    if (modules) *modules = typer.loadedPrograms();
     return typer.diagnostics;
 }
 

@@ -34,6 +34,10 @@ class Compiler {
         if (!code.optimization) return;
         const std::string symbol = compound ? node->text.substr(0, 1) : node->text;
         using Math = ByteInstruction::Math;
+        if (node->numeric == 2) {
+            for (const auto &entry : std::vector<std::pair<std::string, Math>>{{"+", Math::AddF}, {"-", Math::SubtractF}, {"*", Math::MultiplyF}, {"/", Math::DivideF}, {"==", Math::EqualF}, {"!=", Math::NotEqualF}, {"<", Math::LessF}, {">", Math::GreaterF}, {"<=", Math::LessEqualF}, {">=", Math::GreaterEqualF}})
+                if (entry.first == symbol) { code.instructions[position].math = entry.second; return; }
+        } 
         for (const auto &entry : std::vector<std::pair<std::string, Math>>{{"+", Math::Add}, {"-", Math::Subtract}, {"*", Math::Multiply}, {"//", Math::FloorDivide}, {"%", Math::Modulo}, {"==", Math::Equal}, {"!=", Math::NotEqual}, {"<", Math::Less}, {">", Math::Greater}, {"<=", Math::LessEqual}, {">=", Math::GreaterEqual}})
             if (entry.first == symbol) { code.instructions[position].math = entry.second; return; }
     }

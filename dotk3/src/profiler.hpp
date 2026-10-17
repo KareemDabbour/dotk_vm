@@ -41,7 +41,7 @@ public:
     std::vector<uint64_t> gcPauses;
     uint64_t allocations = 0, estimatedAllocatedBytes = 0, reclaimed = 0, gcCollections = 0, gcNanos = 0, gcMaxNanos = 0;
     uint64_t bytecodeCalls = 0, lexicalCalls = 0, cacheHits = 0, cacheMisses = 0, cacheInvalidations = 0;
-    uint64_t integerSpecializations = 0, genericBinaryOperations = 0;
+    uint64_t integerSpecializations = 0, floatSpecializations = 0, genericBinaryOperations = 0;
     uint64_t droppedSamples = 0, droppedFrames = 0, droppedEvents = 0, droppedSites = 0;
     size_t peakObjects = 0, liveObjects = 0, peakFrames = 0, peakOperandValues = 0;
     unsigned optimizationLevel = 2;

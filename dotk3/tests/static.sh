@@ -66,4 +66,7 @@ code=$?
 set -e
 [ "$code" -eq 65 ] && [ "$(cat "$dir/out")" = "1" ] && grep -q 'Cannot cast String to Int' "$dir/errors" || { echo 'failed cast must throw at run time' >&2; exit 1; }
 
+printf 'fn half(v: Int) -> Float { return v / 2 }\nlet x: Float = 3\nlet y: Float = x + 1\nSystem.print(Reflection.type(x), Reflection.type(y), Reflection.type(2 * 1.5), half(3), Reflection.type(half(4)))\n' > "$dir/widen.k3"
+[ "$("$bin" --static "$dir/widen.k3")" = 'Float Float Float 1.5 Float' ] || { echo 'Int values must widen to Float' >&2; exit 1; }
+
 echo 'static: PASS'

@@ -172,6 +172,8 @@ struct Config {
     uint64_t stepLimit = 1000000;
     // False once a program has passed the static type checker: annotations are then erased at run time.
     bool enforceContracts = true;
+    // Pre-parsed (and type-annotated) module programs, preferred over resolveSource.
+    std::function<Ast(const std::string &)> resolveProgram;
     size_t objectLimit = 10000000;
     unsigned optimizationLevel = 2;
     std::shared_ptr<Profiler> profiler;

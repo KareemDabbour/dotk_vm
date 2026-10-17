@@ -15,7 +15,8 @@ struct ByteInstruction {
     size_t operand = 0;
     int64_t integer = 0;
     double floating = 0;
-    enum class Math { Generic, Add, Subtract, Multiply, FloorDivide, Modulo, Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual } math = Math::Generic;
+    enum class Math { Generic, Add, Subtract, Multiply, FloorDivide, Modulo, Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual,
+        AddF, SubtractF, MultiplyF, DivideF, EqualF, NotEqualF, LessF, GreaterF, LessEqualF, GreaterEqualF } math = Math::Generic;
 };
 struct ByteLocal { std::string name, type; bool mutableBinding = false; };
 struct Bytecode;

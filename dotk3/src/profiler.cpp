@@ -151,7 +151,7 @@ std::string Profiler::report(bool verbose) const {
         }
         if (verbose) {
             output << "Binding cache: " << cacheHits << " hits, " << cacheMisses << " misses, " << cacheInvalidations << " invalidations\n";
-            output << "Arithmetic paths: " << integerSpecializations << " checked integer specializations, " << genericBinaryOperations << " generic operations\nOpcodes:\n";
+            output << "Arithmetic paths: " << integerSpecializations << " checked integer specializations, " << floatSpecializations << " float specializations, " << genericBinaryOperations << " generic operations\nOpcodes:\n";
             std::vector<std::pair<std::string, uint64_t>> ordered(opcodes.begin(), opcodes.end()); std::sort(ordered.begin(), ordered.end(), [](const auto &first, const auto &second) { return first.second > second.second; });
             for (const auto &entry : ordered) output << "  " << entry.first << ": " << entry.second << '\n';
             output << "Allocation kinds:\n"; for (const auto &entry : allocationKinds) output << "  " << entry.first << ": " << entry.second.objects << " objects, estimated " << entry.second.estimatedBytes << " bytes\n";

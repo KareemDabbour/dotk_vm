@@ -1573,15 +1573,19 @@ Object *Runtime::loadModule(const std::string &name, const Span &span) {
         if (module->kind == Kind::Module) return module;
     }
     auto cached = modules.find(name); if (cached != modules.end()) return cached->second;
-    if (!config.resolveModule && !config.resolveSource) throw Error(span, "No host resolver for module '" + name + "'", "import");
-    std::shared_ptr<const Source> source;
-    try {
-        source = config.resolveSource ? config.resolveSource(name) :
-            std::make_shared<Source>(Source{name + ".k3", config.resolveModule(name)});
+    Ast program = config.resolveProgram ? config.resolveProgram(name) : nullptr;
+    if (!program) {
+        if (!config.resolveModule && !config.resolveSource) throw Error(span, "No host resolver for module '" + name + "'", "import");
+        std::shared_ptr<const Source> source;
+        try {
+            source = config.resolveSource ? config.resolveSource(name) :
+                std::make_shared<Source>(Source{name + ".k3", config.resolveModule(name)});
+        }
+        catch (const std::exception &error) { throw Error(span, "Module resolution failed: " + std::string(error.what()), "import"); }
+        if (!source || source->text.empty()) throw Error(span, "Module not provided: '" + name + "'", "import");
+        program = parse(source);
     }
-    catch (const std::exception &error) { throw Error(span, "Module resolution failed: " + std::string(error.what()), "import"); }
-    if (!source || source->text.empty()) throw Error(span, "Module not provided: '" + name + "'", "import");
-    Ast program = parse(source); Object *environment = allocate(Kind::Environment, span); environment->parent = prelude;
+    Object *environment = allocate(Kind::Environment, span); environment->parent = prelude;
     Object *module = allocate(Kind::Module, span); module->text = name; modules[name] = module; module->parent = environment;
     FrameScope frame(*this, "<module>", program->span, environment);
     try {
