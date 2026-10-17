@@ -9,7 +9,7 @@ enum class ByteOp {
     Call, List, Tuple, Map, Pop, Dup, Jump, JumpFalse, JumpTrue, JumpPresent, SafePoint, Return,
     Literal, Closure, Format, Slice, Match, PrepareMember, SetMember, Swap, DeclareType, Import, Throw, PrepareSlice, ResolveMethod, InvokeMethod,
     InstanceOf, Cast, NonNull, JumpNull, IntToFloat,
-    MakeClosure, IterInit, IterNext, MatchTest, MatchBind, MatchFail, CallNative
+    MakeClosure, IterInit, IterNext, MatchTest, MatchBind, MatchFail, CallNative, CallMethod
 };
 struct ByteInstruction {
     ByteOp op;
@@ -18,6 +18,7 @@ struct ByteInstruction {
     int64_t integer = 0;
     double floating = 0;
     mutable Object *cache = nullptr;
+    mutable int64_t cachedKind = -1;
     enum class Math { Generic, Add, Subtract, Multiply, FloorDivide, Modulo, Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual,
         AddF, SubtractF, MultiplyF, DivideF, EqualF, NotEqualF, LessF, GreaterF, LessEqualF, GreaterEqualF } math = Math::Generic;
 };

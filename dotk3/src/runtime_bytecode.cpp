@@ -257,6 +257,29 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             }
             frame.stack.resize(begin); frame.stack.push_back(result); break;
         }
+        case ByteOp::CallMethod: {
+            size_t begin = frame.stack.size() - instruction.operand - 1;
+            Value receiverValue = frame.stack[begin]; const std::string &method = node->children[0]->text;
+            Object *receiver = std::holds_alternative<Object *>(receiverValue) ? std::get<Object *>(receiverValue) : nullptr;
+            size_t poolIndex = argumentDepth++;
+            struct Release { size_t &depth; ~Release() { depth--; } } release{argumentDepth};
+            if (argumentPool.size() <= poolIndex) argumentPool.emplace_back();
+            std::vector<Argument> &values = argumentPool[poolIndex]; values.clear();
+            for (size_t index = 0; index < instruction.operand; index++) values.push_back({std::string(), frame.stack[begin + 1 + index]});
+            Object *function = nullptr;
+            if (receiver && !receiver->origin && !config.profiler) {
+                if (instruction.cachedKind != static_cast<int64_t>(receiver->kind)) {
+                    instruction.cache = nullptr; instruction.cachedKind = static_cast<int64_t>(receiver->kind);
+                    auto methods = nativeMethods.find(receiver->kind);
+                    if (methods != nativeMethods.end()) { auto found = methods->second.find(method); if (found != methods->second.end()) instruction.cache = found->second; }
+                }
+                function = instruction.cache;
+            }
+            Value result;
+            if (function && function->nativeMethod) result = callNativeMethod(receiver, *function->nativeMethod, values, location);
+            else { MethodTarget target; Value bound = member(receiverValue, method, location, false, &target); result = call(bound, values, location, target.receiver, target.owner); }
+            frame.stack.resize(begin); frame.stack.push_back(result); break;
+        }
         case ByteOp::Call: case ByteOp::InvokeMethod: {
             size_t begin = frame.stack.size() - instruction.operand - 1; std::vector<Argument> values; values.reserve(instruction.operand);
             for (size_t index = 0; index < instruction.operand; index++) values.push_back({node->names[index], frame.stack[begin + index + 1]});

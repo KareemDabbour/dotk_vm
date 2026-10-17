@@ -116,8 +116,9 @@ class Compiler {
             const auto &callee = node->children[0];
             bool positionalOnly = std::all_of(node->names.begin(), node->names.end(), [](const std::string &argument) { return argument.empty(); });
             if (slotClosures && !lexical && !node->target.empty() && positionalOnly) {
+                if (node->target[0] == '.') expression(callee->children[0]);
                 for (size_t index = 1; index < node->children.size(); index++) expression(node->children[index]);
-                emit(ByteOp::CallNative, node, node->children.size() - 1);
+                emit(node->target[0] == '.' ? ByteOp::CallMethod : ByteOp::CallNative, node, node->children.size() - 1);
             } else if (callee->kind == "member") {
                 if (ticksPerExpression()) emit(ByteOp::Tick, callee);
                 expression(callee->children[0]);
@@ -349,7 +350,7 @@ std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimi
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization) { return Compiler{}.expressionCode(node, optimization); }
 std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization) { return Compiler{}.statementCode(node, optimization); }
 const char *byteOpName(ByteOp op) {
-    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat", "MakeClosure", "IterInit", "IterNext", "MatchTest", "MatchBind", "MatchFail", "CallNative"};
+    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat", "MakeClosure", "IterInit", "IterNext", "MatchTest", "MatchBind", "MatchFail", "CallNative", "CallMethod"};
     return names[static_cast<size_t>(op)];
 }
 }

@@ -236,6 +236,8 @@ class Runtime {
         uint64_t epoch = 0;
     };
     std::deque<ByteFrame> byteFrames;
+    std::deque<std::vector<Argument>> argumentPool;
+    size_t argumentDepth = 0;
     size_t byteFrameDepth = 0;
     struct ExecutionFrame { uint64_t id, task; std::string name; Span location; Object *environment; Object *generator; };
     std::vector<ExecutionFrame> debugFrames;

@@ -1375,8 +1375,10 @@ private:
             Resolved resolved = resolveMember(callee);
             if (!resolved.found) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return ty.error(); }
             callee->resolved = resolved.type;
-            if (ClassInfo *owner = classReference(callee->children[0]))
+            if (ClassInfo *owner = classReference(callee->children[0])) {
                 if (owner->builtin && owner->name.find('_') == std::string::npos && resolved.signature && !callee->safe) node->target = owner->name + "." + callee->text;
+            } else if (Ty receiverType = callee->children[0]->resolved; receiverType && receiverType->tag == TypeTag::Named && receiverType->info->builtin && resolved.signature && !callee->safe)
+                node->target = "." + callee->text;
             if (resolved.type->tag != TypeTag::Function) { error(node->span, "'" + callee->text + "' is not callable"); return ty.error(); }
             Ty result = applyCall(node, resolved.type, resolved.signature, callee->typeArgs, expected);
             return callee->safe ? ty.nullable(result) : result;
