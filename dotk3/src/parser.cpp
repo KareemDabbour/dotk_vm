@@ -66,6 +66,7 @@ class Parser {
     std::vector<Token> tokens;
     size_t position = 0;
     bool speculativeTypes = false;
+    bool stubMode = false;
     const Token &peek(size_t distance = 0) const { return tokens.at(std::min(position + distance, tokens.size() - 1)); }
     bool at(const std::string &text) const { return (peek().kind == TokenKind::Name || peek().kind == TokenKind::Symbol) && peek().text == text; }
     bool take(const std::string &text) { if (!at(text)) return false; position++; return true; }
@@ -186,6 +187,8 @@ class Parser {
             body->needsScope = false;
             returned->children.push_back(expression()); body->children.push_back(returned);
             result->children.push_back(body);
+        } else if (stubMode && !at("{")) {
+            // Declaration stub: a function node without a body child.
         } else {
             Ast body = block();
             if (!body->children.empty()) {
@@ -273,7 +276,8 @@ class Parser {
                     identifier = name().text;
                     Ast field = node("binding", location.span, identifier); field->staticMember = true; field->mutableBinding = mutableMember;
                     field->visibility = visibility;
-                    consume(":"); field->type = typeName(&field->typeExpr); consume("="); field->children.push_back(expression());
+                    consume(":"); field->type = typeName(&field->typeExpr);
+                    if (!stubMode || at("=")) { consume("="); field->children.push_back(expression()); }
                     result->children.push_back(field);
                 } else {
                     Parameter field;
@@ -573,6 +577,7 @@ class Parser {
     }
 public:
     explicit Parser(std::shared_ptr<const Source> source) : tokens(lex(std::move(source))) {}
+    void allowStubs() { stubMode = true; }
     Ast run() {
         Ast result = node("block", peek().span); separators();
         while (peek().kind != TokenKind::End) {
@@ -585,4 +590,5 @@ public:
 };
 }
 Ast parse(std::shared_ptr<const Source> source) { return Parser(std::move(source)).run(); }
+Ast parseStub(std::shared_ptr<const Source> source) { Parser parser(std::move(source)); parser.allowStubs(); return parser.run(); }
 }

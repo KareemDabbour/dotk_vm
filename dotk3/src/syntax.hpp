@@ -48,6 +48,7 @@ std::string diagnose(const Error &error, bool color = false);
 struct Node;
 using Ast = std::shared_ptr<Node>;
 enum class Visibility { Public, Protected, Private };
+struct TypeData;
 
 enum class TypeKind { Named, Nullable, Union, Intersection, Function, Wildcard };
 enum class WildcardBound { None, Extends, Super };
@@ -92,6 +93,7 @@ struct Node {
     bool constructor = false;
     bool needsScope = true;
     bool safe = false;
+    const TypeData *resolved = nullptr;
     Visibility visibility = Visibility::Public;
     std::string baseClass;
     TypeAst typeExpr;
@@ -103,6 +105,7 @@ struct Node {
     std::vector<Parameter> parameters;
 };
 Ast parse(std::shared_ptr<const Source> source);
+Ast parseStub(std::shared_ptr<const Source> source);
 std::string typeText(const TypeAst &type);
 std::vector<std::string> typeArguments(const std::string &type);
 std::vector<std::string> typeIntersections(const std::string &type);

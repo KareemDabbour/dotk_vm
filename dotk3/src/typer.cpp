@@ -1,0 +1,1194 @@
+#include "typer.hpp"
+#include "prelude.hpp"
+#include "types.hpp"
+#include <algorithm>
+#include <functional>
+#include <set>
+#include <unordered_map>
+
+namespace dk3 {
+namespace {
+
+enum class SymbolKind { Value, Function, Class, Alias, TypeVar };
+
+struct Symbol {
+    SymbolKind kind = SymbolKind::Value;
+    Ty type = nullptr;
+    Ty declared = nullptr;
+    bool mutableBinding = false;
+    bool global = false;
+    std::shared_ptr<Signature> signature;
+    ClassInfo *info = nullptr;
+    Ast declaration;
+    Ty alias = nullptr;
+    std::vector<Ty> aliasParams;
+    bool resolving = false;
+};
+
+struct Scope {
+    std::unordered_map<std::string, Symbol> symbols;
+};
+
+struct FunctionContext {
+    Ty declaredResult = nullptr;
+    std::vector<Ty> returned;
+    size_t scopeBase = 0;
+    bool constructor = false;
+    ClassInfo *owner = nullptr;
+};
+
+struct Refinement {
+    std::map<std::string, Ty> whenTrue, whenFalse;
+};
+
+void walk(const Ast &node, const std::function<bool(const Ast &)> &visit) {
+    if (!node || !visit(node)) return;
+    for (const auto &child : node->children) walk(child, visit);
+    for (const auto &parameter : node->parameters) walk(parameter.defaultValue, visit);
+}
+
+bool hasValueReturn(const Ast &body) {
+    bool found = false;
+    walk(body, [&](const Ast &node) {
+        if (node->kind == "function") return false;
+        if (node->kind == "return" && !node->children.empty()) found = true;
+        return true;
+    });
+    return found;
+}
+
+bool containsYield(const Ast &body) {
+    bool found = false;
+    walk(body, [&](const Ast &node) {
+        if (node->kind == "function") return false;
+        if (node->kind == "yield") found = true;
+        return true;
+    });
+    return found;
+}
+
+bool containsBreak(const Ast &body) {
+    bool found = false;
+    walk(body, [&](const Ast &node) {
+        if (node->kind == "function" || node->kind == "while" || node->kind == "for" || node->kind == "for_c") return false;
+        if (node->kind == "break") found = true;
+        return true;
+    });
+    return found;
+}
+
+bool isTrueLiteral(const Ast &node) { return node && node->kind == "literal" && node->text == "true" && node->literalKind == TokenKind::Name; }
+
+// True when control never reaches the end of the statement.
+bool alwaysExits(const Ast &node) {
+    if (!node) return false;
+    if (node->kind == "return" || node->kind == "throw") return true;
+    if (node->kind == "block") { for (const auto &child : node->children) if (alwaysExits(child)) return true; return false; }
+    if (node->kind == "if") return node->children.size() > 2 && alwaysExits(node->children[1]) && alwaysExits(node->children[2]);
+    if (node->kind == "while") return isTrueLiteral(node->children[0]) && !containsBreak(node->children[1]);
+    if (node->kind == "for_c") return (!node->children[1] || isTrueLiteral(node->children[1])) && !containsBreak(node->children[3]);
+    if (node->kind == "try") return alwaysExits(node->children[0]) && alwaysExits(node->children[1]);
+    return false;
+}
+
+// Leaves the current block without falling through.
+bool leavesBlock(const Ast &node) {
+    if (!node) return false;
+    if (alwaysExits(node) || node->kind == "break" || node->kind == "continue") return true;
+    if (node->kind == "block") { for (const auto &child : node->children) if (leavesBlock(child)) return true; return false; }
+    if (node->kind == "if") return node->children.size() > 2 && leavesBlock(node->children[1]) && leavesBlock(node->children[2]);
+    return false;
+}
+
+class Typer {
+public:
+    std::vector<Diagnostic> diagnostics;
+
+    Typer() {
+        scopes.emplace_back();
+        Ast stubs = parseStub(std::make_shared<Source>(Source{"<prelude>", preludeSource()}));
+        builtinMode = true;
+        blockStatements(stubs->children);
+        builtinMode = false;
+        stringType = classType("String"); bytesType = classType("Bytes");
+        listInfo = classInfo("List"); mapInfo = classInfo("Map"); setInfo = classInfo("Set"); tupleInfo = classInfo("Tuple");
+        generatorInfo = classInfo("Generator"); errorType = classType("Error");
+        scopes.emplace_back();
+    }
+
+    void check(const Ast &program) {
+        walk(program, [&](const Ast &node) {
+            if (node->kind == "assignment" && node->children[0]->kind == "name") assigned.insert(node->children[0]->text);
+            return true;
+        });
+        blockStatements(program->children);
+    }
+
+private:
+    Types ty;
+    std::vector<Scope> scopes;
+    std::vector<FunctionContext> functions;
+    std::unordered_map<const Node *, ClassInfo *> classOf;
+    std::unordered_map<const Node *, std::shared_ptr<Signature>> signatureOf;
+    std::set<std::string> assigned;
+    bool builtinMode = false;
+    Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
+    ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr;
+
+    // ---- diagnostics and scopes -------------------------------------------------------------
+
+    void error(const Span &span, const std::string &message) { diagnostics.push_back({span, message, false}); }
+    void warn(const Span &span, const std::string &message) { diagnostics.push_back({span, message, true}); }
+    std::string show(Ty type) const { return ty.show(type); }
+
+    ClassInfo *classInfo(const std::string &name) { return scopes[0].symbols.at(name).info; }
+    Ty classType(const std::string &name) { return ty.named(classInfo(name)); }
+
+    void pushScope() { scopes.emplace_back(); }
+    void popScope() { scopes.pop_back(); }
+
+    Symbol *lookup(const std::string &name, size_t *index = nullptr) {
+        for (size_t position = scopes.size(); position-- > 0;) {
+            auto found = scopes[position].symbols.find(name);
+            if (found != scopes[position].symbols.end()) { if (index) *index = position; return &found->second; }
+        }
+        return nullptr;
+    }
+
+    void declareSymbol(const std::string &name, Symbol symbol, const Span &span) {
+        if (scopes.back().symbols.count(name)) { error(span, "Duplicate declaration '" + name + "'"); return; }
+        scopes.back().symbols.emplace(name, std::move(symbol));
+    }
+
+    void declareValue(const std::string &name, Ty type, bool mutableBinding, const Span &span) {
+        Symbol symbol; symbol.type = symbol.declared = type; symbol.mutableBinding = mutableBinding; symbol.global = scopes.size() == 2;
+        declareSymbol(name, std::move(symbol), span);
+    }
+
+    // ---- type expressions -------------------------------------------------------------------
+
+    std::vector<Ty> declareTypeParams(const std::vector<TypeParam> &params, const Span &span) {
+        std::vector<Ty> variables;
+        for (const auto &parameter : params) {
+            Ty variable = ty.variable(parameter.name); variables.push_back(variable);
+            Symbol symbol; symbol.kind = SymbolKind::TypeVar; symbol.type = variable;
+            declareSymbol(parameter.name, std::move(symbol), span);
+        }
+        for (size_t index = 0; index < params.size(); index++) if (params[index].bound) ty.setBound(variables[index], resolveType(params[index].bound));
+        return variables;
+    }
+
+    void enterTypeParams(const std::vector<Ty> &variables) {
+        for (Ty variable : variables) { Symbol symbol; symbol.kind = SymbolKind::TypeVar; symbol.type = variable; scopes.back().symbols[variable->name] = std::move(symbol); }
+    }
+
+    void resolveAlias(Symbol &symbol) {
+        if (symbol.alias) return;
+        if (symbol.resolving) { error(symbol.declaration->span, "Type alias '" + symbol.declaration->text + "' is cyclic"); symbol.alias = ty.error(); return; }
+        symbol.resolving = true;
+        pushScope(); symbol.aliasParams = declareTypeParams(symbol.declaration->typeParams, symbol.declaration->span);
+        symbol.alias = resolveType(symbol.declaration->typeExpr); popScope();
+        symbol.resolving = false;
+    }
+
+    Ty resolveType(const TypeAst &type) {
+        if (!type) return ty.error();
+        switch (type->kind) {
+        case TypeKind::Named: return resolveNamed(type);
+        case TypeKind::Nullable: return ty.nullable(resolveType(type->inner));
+        case TypeKind::Union: { std::vector<Ty> members; for (const auto &item : type->items) members.push_back(resolveType(item)); return ty.unite(std::move(members)); }
+        case TypeKind::Function: {
+            std::vector<Ty> parameters; for (const auto &item : type->items) parameters.push_back(resolveType(item));
+            return ty.function(std::move(parameters), resolveType(type->inner));
+        }
+        case TypeKind::Wildcard: return ty.wildcard(type->bound, type->inner ? resolveType(type->inner) : nullptr);
+        case TypeKind::Intersection: error(type->span, "Intersection types are not supported yet"); return ty.error();
+        }
+        return ty.error();
+    }
+
+    Ty resolveNamed(const TypeAst &type) {
+        const std::string &name = type->name;
+        std::vector<Ty> arguments; for (const auto &item : type->items) arguments.push_back(resolveType(item));
+        auto plain = [&](Ty result) { if (!arguments.empty()) error(type->span, name + " takes no type arguments"); return result; };
+        if (name == "Int") return plain(ty.integer());
+        if (name == "Float") return plain(ty.floating());
+        if (name == "Bool") return plain(ty.boolean());
+        if (name == "Null") return plain(ty.null());
+        if (name == "Object") return plain(ty.object());
+        if (name == "Never") return plain(ty.never());
+        Symbol *symbol = lookup(name);
+        if (!symbol) { error(type->span, "Unknown type '" + name + "'"); return ty.error(); }
+        switch (symbol->kind) {
+        case SymbolKind::TypeVar: return plain(symbol->type);
+        case SymbolKind::Class: {
+            size_t expected = symbol->info->params.size();
+            if (arguments.size() != expected) {
+                error(type->span, name + " expects " + std::to_string(expected) + " type argument(s), got " + std::to_string(arguments.size()));
+                return ty.error();
+            }
+            return ty.named(symbol->info, std::move(arguments));
+        }
+        case SymbolKind::Alias: {
+            resolveAlias(*symbol);
+            if (arguments.size() != symbol->aliasParams.size()) { error(type->span, name + " expects " + std::to_string(symbol->aliasParams.size()) + " type argument(s)"); return ty.error(); }
+            std::map<Ty, Ty> replacements; for (size_t index = 0; index < arguments.size(); index++) replacements[symbol->aliasParams[index]] = arguments[index];
+            return ty.substitute(symbol->alias, replacements);
+        }
+        default: error(type->span, "'" + name + "' is not a type"); return ty.error();
+        }
+    }
+
+    // ---- declarations -----------------------------------------------------------------------
+
+    std::shared_ptr<Signature> makeSignature(const Ast &function, bool lambda) {
+        auto signature = std::make_shared<Signature>(); signature->declaration = function;
+        pushScope();
+        signature->typeParams = declareTypeParams(function->typeParams, function->span);
+        std::vector<Ty> parameters;
+        for (const auto &parameter : function->parameters) {
+            Ty type = ty.error();
+            if (parameter.typeExpr) type = resolveType(parameter.typeExpr);
+            else if (!lambda) error(function->span, "Parameter '" + parameter.name + "' requires a type annotation");
+            parameters.push_back(type); signature->names.push_back(parameter.name); signature->defaults.push_back(static_cast<bool>(parameter.defaultValue));
+            if (parameter.rest) signature->hasRest = true;
+        }
+        Ty result;
+        if (function->typeExpr) result = resolveType(function->typeExpr);
+        else if (function->constructor) result = ty.null();
+        else if (!function->children.empty() && hasValueReturn(function->children[0])) { result = ty.error(); signature->pendingResult = true; }
+        else result = ty.null();
+        popScope();
+        signature->type = ty.function(std::move(parameters), result);
+        signatureOf[function.get()] = signature;
+        return signature;
+    }
+
+    void declareClass(const Ast &node) {
+        ClassKind kind = node->kind == "class" ? ClassKind::Class : node->kind == "record" ? ClassKind::Record : node->kind == "trait" ? ClassKind::Trait : ClassKind::Enum;
+        ClassInfo *info = ty.newClass(node->text, kind); info->declaration = node; info->builtin = builtinMode; classOf[node.get()] = info;
+        Symbol symbol; symbol.kind = SymbolKind::Class; symbol.info = info; symbol.declaration = node;
+        declareSymbol(node->text, std::move(symbol), node->span);
+    }
+
+    void classHeader(const Ast &node) {
+        ClassInfo *info = classOf[node.get()];
+        pushScope(); info->params = declareTypeParams(node->typeParams, node->span); info->self = ty.named(info, info->params);
+        if (!node->baseClass.empty()) {
+            Ty base = resolveType(node->typeExpr);
+            if (base->tag == TypeTag::Named && base->info->kind == ClassKind::Class && !ty.asSuper(base, info)) info->super = base;
+            else if (base->tag != TypeTag::Error) error(node->span, "'" + node->baseClass + "' cannot be extended by '" + info->name + "'");
+        }
+        for (const auto &trait : node->typeExprs) {
+            Ty resolved = resolveType(trait);
+            if (resolved->tag == TypeTag::Named && resolved->info->kind == ClassKind::Trait) info->traits.push_back(resolved);
+            else if (resolved->tag != TypeTag::Error) error(node->span, "'" + typeText(trait) + "' is not a trait");
+        }
+        popScope();
+    }
+
+    void addMember(ClassInfo *info, const std::string &name, Member member, const Span &span) {
+        member.owner = info;
+        if (!info->members.emplace(name, std::move(member)).second) error(span, "Duplicate member '" + name + "' in " + info->name);
+    }
+
+    void classMembers(const Ast &node) {
+        ClassInfo *info = classOf[node.get()];
+        pushScope(); enterTypeParams(info->params);
+        if (info->kind == ClassKind::Enum) {
+            for (const auto &child : node->children) {
+                if (child->kind != "variant") continue;
+                Variant variant; variant.name = child->text;
+                for (const auto &payload : child->typeExprs) variant.payload.push_back(resolveType(payload));
+                Member member; member.isStatic = true;
+                if (variant.payload.empty()) member.type = info->self;
+                else {
+                    member.type = ty.function(variant.payload, info->self);
+                    member.signature = std::make_shared<Signature>(); member.signature->type = member.type; member.signature->typeParams = info->params;
+                    member.signature->names.assign(variant.payload.size(), ""); member.signature->defaults.assign(variant.payload.size(), false);
+                }
+                info->variants.push_back(variant); addMember(info, child->text, std::move(member), child->span);
+            }
+        } else {
+            for (const auto &field : node->parameters) {
+                Member member; member.type = field.typeExpr ? resolveType(field.typeExpr) : ty.error();
+                member.mutableBinding = info->kind == ClassKind::Class && field.mutableBinding; member.visibility = field.visibility; member.hasDefault = static_cast<bool>(field.defaultValue);
+                info->fieldOrder.push_back(field.name); addMember(info, field.name, std::move(member), node->span);
+            }
+            for (const auto &child : node->children) {
+                if (child->kind == "binding") {
+                    Member member; member.isStatic = true; member.type = resolveType(child->typeExpr); member.mutableBinding = child->mutableBinding; member.visibility = child->visibility;
+                    addMember(info, child->text, std::move(member), child->span);
+                } else if (child->kind == "function" || child->kind == "signature") {
+                    Member member; member.isMethod = true; member.signature = makeSignature(child, false); member.type = member.signature->type;
+                    member.isStatic = child->staticMember; member.visibility = child->visibility;
+                    addMember(info, child->text, std::move(member), child->span);
+                }
+            }
+        }
+        popScope();
+    }
+
+    Signature *constructorOf(ClassInfo *info) {
+        if (info->constructor) return info->constructor.get();
+        auto signature = std::make_shared<Signature>(); signature->typeParams = info->params; info->constructor = signature;
+        std::vector<Ty> parameters;
+        auto init = info->members.find("init");
+        if (info->kind == ClassKind::Class && init != info->members.end() && init->second.isMethod &&
+            (init->second.signature->declaration->constructor || !init->second.signature->declaration->parameters.empty())) {
+            const Signature &source = *init->second.signature;
+            parameters = source.type->args; signature->names = source.names; signature->defaults = source.defaults; signature->hasRest = source.hasRest;
+        } else {
+            if (info->super) {
+                Signature *inherited = constructorOf(info->super->info); std::map<Ty, Ty> replacements;
+                for (size_t index = 0; index < info->super->info->params.size() && index < info->super->args.size(); index++) replacements[info->super->info->params[index]] = info->super->args[index];
+                for (Ty parameter : inherited->type->args) parameters.push_back(ty.substitute(parameter, replacements));
+                signature->names = inherited->names; signature->defaults = inherited->defaults;
+            }
+            for (const auto &name : info->fieldOrder) {
+                const Member &field = info->members.at(name);
+                parameters.push_back(field.type); signature->names.push_back(name); signature->defaults.push_back(field.hasDefault);
+            }
+        }
+        signature->type = ty.function(std::move(parameters), info->self);
+        return signature.get();
+    }
+
+    const Member *findMember(ClassInfo *info, const std::string &name, int depth = 0) {
+        if (depth > 64) return nullptr;
+        auto found = info->members.find(name);
+        if (found != info->members.end()) return &found->second;
+        if (info->super) if (const Member *member = findMember(info->super->info, name, depth + 1)) return member;
+        for (Ty trait : info->traits) if (const Member *member = findMember(trait->info, name, depth + 1)) return member;
+        return nullptr;
+    }
+
+    bool isBodiless(const Member &member) {
+        if (!member.isMethod || !member.signature || !member.signature->declaration) return false;
+        const Ast &declaration = member.signature->declaration;
+        return declaration->kind == "signature" || declaration->children.empty();
+    }
+
+    void checkImplements(ClassInfo *info, const Span &span) {
+        if (info->kind == ClassKind::Trait || info->kind == ClassKind::Enum || info->builtin) return;
+        for (Ty trait : info->traits) {
+            std::map<Ty, Ty> traitArguments;
+            for (size_t index = 0; index < trait->info->params.size() && index < trait->args.size(); index++) traitArguments[trait->info->params[index]] = trait->args[index];
+            for (const auto &entry : trait->info->members) {
+                const Member &required = entry.second;
+                if (!isBodiless(required)) continue;
+                const Member *provided = findMember(info, entry.first);
+                if (!provided || !provided->isMethod || isBodiless(*provided)) { error(span, info->name + " does not implement " + trait->info->name + "." + entry.first); continue; }
+                Ty up = ty.asSuper(info->self, provided->owner); std::map<Ty, Ty> own;
+                for (size_t index = 0; up && index < provided->owner->params.size() && index < up->args.size(); index++) own[provided->owner->params[index]] = up->args[index];
+                Ty actual = ty.substitute(provided->signature->type, own), expected = ty.substitute(required.signature->type, traitArguments);
+                if (!ty.isSubtype(actual, expected)) error(span, info->name + "." + entry.first + " has type " + show(actual) + " but " + trait->info->name + " requires " + show(expected));
+            }
+        }
+    }
+
+    // ---- inference and calls ----------------------------------------------------------------
+
+    bool containsVar(Ty type, const std::vector<Ty> &variables) {
+        if (std::find(variables.begin(), variables.end(), type) != variables.end()) return true;
+        for (Ty argument : type->args) if (containsVar(argument, variables)) return true;
+        return type->result && containsVar(type->result, variables);
+    }
+
+    void unify(Ty pattern, Ty actual, std::map<Ty, Ty> &bindings, const std::vector<Ty> &variables) {
+        if (actual->tag == TypeTag::Error) return;
+        if (pattern->tag == TypeTag::Var && std::find(variables.begin(), variables.end(), pattern) != variables.end()) {
+            if (actual->tag == TypeTag::Never) return;
+            auto bound = bindings.find(pattern);
+            if (bound == bindings.end()) bindings[pattern] = actual;
+            else if (!ty.isSubtype(actual, bound->second)) bound->second = ty.join(bound->second, actual);
+            return;
+        }
+        if (pattern->tag == TypeTag::Named && actual->tag == TypeTag::Named) {
+            Ty up = ty.asSuper(actual, pattern->info);
+            if (up && up->args.size() == pattern->args.size())
+                for (size_t index = 0; index < up->args.size(); index++) unify(pattern->args[index]->tag == TypeTag::Wildcard && pattern->args[index]->result ? pattern->args[index]->result : pattern->args[index], up->args[index], bindings, variables);
+        } else if (pattern->tag == TypeTag::Function && actual->tag == TypeTag::Function && pattern->args.size() == actual->args.size()) {
+            for (size_t index = 0; index < actual->args.size(); index++) unify(pattern->args[index], actual->args[index], bindings, variables);
+            unify(pattern->result, actual->result, bindings, variables);
+        } else if (pattern->tag == TypeTag::Union) {
+            std::vector<Ty> others; for (Ty member : pattern->args) if (member->tag != TypeTag::Null) others.push_back(member);
+            if (others.size() == 1 && actual->tag != TypeTag::Null) unify(others[0], ty.stripNull(actual), bindings, variables);
+        }
+    }
+
+    bool isLambdaNeedingContext(const Ast &node) {
+        if (node->kind != "function") return false;
+        for (const auto &parameter : node->parameters) if (!parameter.typeExpr) return true;
+        return !node->typeExpr;
+    }
+
+    bool assignable(Ty actual, Ty expected, const Span &span, const std::string &context = "") {
+        if (ty.isSubtype(actual, expected)) return true;
+        std::string message = "Expected " + show(expected) + ", got " + show(actual) + context;
+        if (ty.isNullable(actual) && ty.isSubtype(ty.stripNull(actual), expected)) message += " (value may be null)";
+        error(span, message); return false;
+    }
+
+    Ty applyCall(const Ast &node, Ty function, const std::shared_ptr<Signature> &signature, const std::vector<TypeAst> &explicitArguments, Ty expected) {
+        const std::vector<Ty> &parameters = function->args; size_t count = node->children.size() - 1;
+        std::vector<Ty> variables = signature ? signature->typeParams : std::vector<Ty>{};
+        std::map<Ty, Ty> bindings;
+        if (signature && signature->pendingResult) {
+            error(node->span, signature->inferring ? "Recursive function needs an explicit return type" : "Add a return type to this function; it is called before its return type can be inferred");
+            return ty.error();
+        }
+        if (!explicitArguments.empty()) {
+            if (explicitArguments.size() != variables.size()) error(node->span, "Expected " + std::to_string(variables.size()) + " type argument(s), got " + std::to_string(explicitArguments.size()));
+            else for (size_t index = 0; index < variables.size(); index++) bindings[variables[index]] = resolveType(explicitArguments[index]);
+        }
+        bool rest = signature && signature->hasRest;
+        std::vector<int> target(count, -1); std::vector<bool> supplied(parameters.size(), false);
+        size_t positional = 0;
+        for (size_t index = 0; index < count; index++) {
+            const std::string &name = node->names.size() > index ? node->names[index] : std::string();
+            if (name.empty()) {
+                if (rest && positional >= parameters.size() - 1) { target[index] = static_cast<int>(parameters.size() - 1); supplied.back() = true; continue; }
+                if (positional >= parameters.size()) { error(node->children[index + 1]->span, "Too many arguments (expected " + std::to_string(parameters.size()) + ")"); continue; }
+                target[index] = static_cast<int>(positional); supplied[positional++] = true;
+            } else {
+                auto found = signature ? std::find(signature->names.begin(), signature->names.end(), name) : std::vector<std::string>::iterator{};
+                if (!signature || found == signature->names.end()) { error(node->children[index + 1]->span, "Unknown argument '" + name + "'"); continue; }
+                size_t slot = static_cast<size_t>(found - signature->names.begin());
+                if (supplied[slot]) error(node->children[index + 1]->span, "Argument '" + name + "' supplied more than once");
+                target[index] = static_cast<int>(slot); supplied[slot] = true;
+            }
+        }
+        for (size_t slot = 0; slot < parameters.size(); slot++) {
+            bool optional = signature && (signature->defaults[slot] || (rest && slot + 1 == parameters.size()));
+            if (!supplied[slot] && !optional) error(node->span, signature && !signature->names[slot].empty() ? "Missing argument '" + signature->names[slot] + "'" : "Missing argument " + std::to_string(slot + 1));
+        }
+        std::vector<Ty> argumentTypes(count, nullptr);
+        auto resolvedParameter = [&](int slot) { return ty.substitute(parameters[static_cast<size_t>(slot)], bindings); };
+        for (int pass = 0; pass < 2; pass++) {
+            for (size_t index = 0; index < count; index++) {
+                if (target[index] < 0) continue;
+                const Ast &argument = node->children[index + 1];
+                bool deferred = isLambdaNeedingContext(argument);
+                if (deferred != (pass == 1)) continue;
+                Ty parameter = resolvedParameter(target[index]);
+                if (deferred && parameter->tag == TypeTag::Function) {
+                    std::vector<Ty> hints = parameter->args; Ty resultHint = parameter->result;
+                    if (containsVar(resultHint, variables)) resultHint = nullptr;
+                    argumentTypes[index] = lambdaExpression(argument, hints, resultHint);
+                } else argumentTypes[index] = expr(argument, containsVar(parameter, variables) ? nullptr : parameter);
+                unify(parameters[static_cast<size_t>(target[index])], argumentTypes[index], bindings, variables);
+            }
+        }
+        Ty result = function->result;
+        if (expected && !variables.empty()) {
+            std::map<Ty, Ty> fromExpected; unify(result, expected, fromExpected, variables);
+            for (const auto &entry : fromExpected) bindings.emplace(entry.first, entry.second);
+        }
+        for (Ty variable : variables) {
+            if (bindings.count(variable)) {
+                if (variable->result && !ty.isSubtype(bindings[variable], ty.substitute(variable->result, bindings))) error(node->span, "Type " + show(bindings[variable]) + " does not satisfy the bound " + show(variable->result) + " of " + variable->name);
+                continue;
+            }
+            error(node->span, "Cannot infer type argument '" + variable->name + "'; provide it explicitly"); bindings[variable] = ty.error();
+        }
+        for (size_t index = 0; index < count; index++) {
+            if (target[index] < 0 || !argumentTypes[index]) continue;
+            Ty parameter = ty.substitute(parameters[static_cast<size_t>(target[index])], bindings);
+            assignable(argumentTypes[index], parameter, node->children[index + 1]->span);
+        }
+        return ty.substitute(result, bindings);
+    }
+
+    Ty lambdaExpression(const Ast &node, const std::vector<Ty> &hints, Ty resultHint) {
+        std::vector<Ty> parameters;
+        for (size_t index = 0; index < node->parameters.size(); index++) {
+            const Parameter &parameter = node->parameters[index];
+            if (parameter.typeExpr) parameters.push_back(resolveType(parameter.typeExpr));
+            else if (index < hints.size() && hints[index]->tag != TypeTag::Var) parameters.push_back(hints[index]);
+            else { error(node->span, "Cannot infer the type of parameter '" + parameter.name + "'; annotate it"); parameters.push_back(ty.error()); }
+        }
+        Ty declared = node->typeExpr ? resolveType(node->typeExpr) : resultHint;
+        Ty result = checkFunctionBody(node, parameters, declared, {}, nullptr, false, nullptr);
+        return ty.function(std::move(parameters), result);
+    }
+
+    Ty checkFunctionBody(const Ast &function, const std::vector<Ty> &parameterTypes, Ty declaredResult, const std::vector<Ty> &typeParams, ClassInfo *owner, bool constructor, Ty self, bool isStatic = false) {
+        if (function->children.empty()) return declaredResult ? declaredResult : ty.null();
+        if (containsYield(function->children[0])) { error(function->span, "Generators are not supported by the typer yet"); return ty.error(); }
+        pushScope(); enterTypeParams(typeParams);
+        FunctionContext context; context.declaredResult = declaredResult; context.scopeBase = scopes.size() - 1; context.constructor = constructor;
+        context.owner = owner ? owner : (functions.empty() ? nullptr : functions.back().owner);
+        functions.push_back(context);
+        if (self && !isStatic) {
+            declareValue("self", self, false, function->span);
+            if (owner && owner->super) declareValue("super", owner->super, false, function->span);
+        }
+        for (size_t index = 0; index < function->parameters.size() && index < parameterTypes.size(); index++) {
+            const Parameter &parameter = function->parameters[index];
+            Ty type = parameterTypes[index];
+            if (parameter.rest) type = ty.named(listInfo, {type});
+            if (parameter.defaultValue) { Ty value = expr(parameter.defaultValue, parameterTypes[index]); assignable(value, parameterTypes[index], parameter.defaultValue->span); }
+            declareValue(parameter.name, type, false, function->span);
+        }
+        const Ast &body = function->children[0];
+        blockStatements(body->children);
+        FunctionContext finished = functions.back(); functions.pop_back(); popScope();
+        Ty result = declaredResult;
+        if (!result) {
+            if (finished.returned.empty()) result = ty.null();
+            else { result = finished.returned[0]; for (size_t index = 1; index < finished.returned.size(); index++) result = ty.join(result, finished.returned[index]); }
+        } else if (result->tag != TypeTag::Null && result->tag != TypeTag::Never && result->tag != TypeTag::Error && !alwaysExits(body))
+            error(function->span, "Function may reach its end without returning " + show(result));
+        return result;
+    }
+
+    // ---- statements -------------------------------------------------------------------------
+
+    void blockStatements(const std::vector<Ast> &statements) {
+        for (const auto &statement : statements) {
+            if (statement->kind == "class" || statement->kind == "record" || statement->kind == "trait" || statement->kind == "enum") declareClass(statement);
+            else if (statement->kind == "type_alias") { Symbol symbol; symbol.kind = SymbolKind::Alias; symbol.declaration = statement; declareSymbol(statement->text, std::move(symbol), statement->span); }
+        }
+        for (const auto &statement : statements) if (classOf.count(statement.get())) classHeader(statement);
+        for (const auto &statement : statements) if (classOf.count(statement.get())) classMembers(statement);
+        for (const auto &statement : statements) {
+            if (classOf.count(statement.get())) checkImplements(classOf[statement.get()], statement->span);
+            else if (statement->kind == "function" && !statement->text.empty()) {
+                Symbol symbol; symbol.kind = SymbolKind::Function; symbol.signature = makeSignature(statement, false); symbol.type = symbol.signature->type; symbol.declaration = statement;
+                declareSymbol(statement->text, std::move(symbol), statement->span);
+            }
+        }
+        for (const auto &statement : statements) this->statement(statement);
+    }
+
+    void block(const Ast &node) { pushScope(); blockStatements(node->children); popScope(); }
+
+    void checkClassBodies(const Ast &node) {
+        ClassInfo *info = classOf[node.get()];
+        if (info->builtin) return;
+        pushScope(); enterTypeParams(info->params);
+        pushScope();
+        for (const auto &field : node->parameters) {
+            const Member &member = info->members.at(field.name);
+            if (field.defaultValue) { Ty value = expr(field.defaultValue, member.type); assignable(value, member.type, field.defaultValue->span); }
+            declareValue(field.name, member.type, false, node->span);
+        }
+        popScope();
+        for (const auto &child : node->children) {
+            if (child->kind == "binding") {
+                if (child->children.empty()) continue;
+                Ty type = resolveType(child->typeExpr), value = expr(child->children[0], type); assignable(value, type, child->children[0]->span);
+            } else if (child->kind == "function" && info->kind != ClassKind::Enum) {
+                auto signature = signatureOf[child.get()];
+                if (signature->pendingResult) signature->inferring = true;
+                Ty declared = signature->pendingResult ? nullptr : signature->type->result;
+                bool constructor = child->constructor || child->text == "init";
+                Ty result = checkFunctionBody(child, signature->type->args, declared, signature->typeParams, info, constructor, info->self, child->staticMember);
+                finishSignature(signature, result);
+            }
+        }
+        popScope();
+    }
+
+    void finishSignature(const std::shared_ptr<Signature> &signature, Ty result) {
+        if (!signature->pendingResult) return;
+        signature->pendingResult = false; signature->inferring = false; signature->type = ty.function(signature->type->args, result);
+    }
+
+    void statement(const Ast &node) {
+        const std::string &kind = node->kind;
+        if (kind == "binding") bindingStatement(node);
+        else if (kind == "expression") expr(node->children[0]);
+        else if (kind == "block") block(node);
+        else if (kind == "if") ifStatement(node);
+        else if (kind == "while") whileStatement(node);
+        else if (kind == "for_c") forCStatement(node);
+        else if (kind == "for") forInStatement(node);
+        else if (kind == "return") returnStatement(node);
+        else if (kind == "break" || kind == "continue") return;
+        else if (kind == "throw") expr(node->children[0]);
+        else if (kind == "defer") expr(node->children[0]);
+        else if (kind == "try") tryStatement(node);
+        else if (kind == "function") functionStatement(node);
+        else if (classOf.count(node.get())) checkClassBodies(node);
+        else if (kind == "type_alias") { Symbol *symbol = lookup(node->text); if (symbol && symbol->kind == SymbolKind::Alias) resolveAlias(*symbol); }
+        else if (kind == "import" || kind == "from_import") error(node->span, "Module imports are not supported by the typer yet");
+        else if (kind == "impl") error(node->span, "impl blocks are not supported by the typer yet");
+        else if (kind == "yield") error(node->span, "Generators are not supported by the typer yet");
+        else error(node->span, "Unsupported statement '" + kind + "'");
+    }
+
+    void functionStatement(const Ast &node) {
+        if (node->text.empty() || builtinMode) return;
+        Symbol *symbol = lookup(node->text);
+        if (!symbol || !symbol->signature || symbol->signature != signatureOf[node.get()]) return;
+        std::shared_ptr<Signature> signature = symbol->signature;
+        if (signature->pendingResult) signature->inferring = true;
+        Ty declared = signature->pendingResult ? nullptr : signature->type->result;
+        Ty result = checkFunctionBody(node, signature->type->args, declared, signature->typeParams, nullptr, false, nullptr);
+        finishSignature(signature, result);
+        if (Symbol *refreshed = lookup(node->text)) refreshed->type = signature->type;
+    }
+
+    void bindingStatement(const Ast &node) {
+        Ty declared = node->typeExpr ? resolveType(node->typeExpr) : nullptr;
+        Ty value = expr(node->children[0], declared);
+        Ty type = declared;
+        if (!type) {
+            type = value;
+            if (value->tag == TypeTag::Null && !node->mutableBinding) type = value;
+        } else assignable(value, type, node->children[0]->span);
+        declareValue(node->text, type, node->mutableBinding, node->span);
+    }
+
+    void returnStatement(const Ast &node) {
+        if (functions.empty()) { error(node->span, "return outside of a function"); return; }
+        Ty declared = functions.back().declaredResult; bool constructor = functions.back().constructor;
+        Ty value = node->children.empty() ? ty.null() : expr(node->children[0], declared);
+        if (declared) {
+            if (constructor && !node->children.empty()) error(node->span, "A constructor cannot return a value");
+            else assignable(value, declared, node->children.empty() ? node->span : node->children[0]->span);
+        } else functions.back().returned.push_back(value);
+    }
+
+    void applyRefinement(const std::map<std::string, Ty> &narrowed) {
+        for (const auto &entry : narrowed) {
+            Symbol *symbol = lookup(entry.first);
+            if (!symbol || symbol->kind != SymbolKind::Value) continue;
+            Symbol copy = *symbol; copy.type = entry.second; scopes.back().symbols[entry.first] = std::move(copy);
+        }
+    }
+
+    void guarded(const std::map<std::string, Ty> &narrowed, const Ast &body) {
+        pushScope(); applyRefinement(narrowed);
+        if (body->kind == "block") blockStatements(body->children); else statement(body);
+        popScope();
+    }
+
+    void ifStatement(const Ast &node) {
+        Refinement refinement = condition(node->children[0]);
+        guarded(refinement.whenTrue, node->children[1]);
+        bool hasElse = node->children.size() > 2;
+        if (hasElse) guarded(refinement.whenFalse, node->children[2]);
+        if (!leavesBlock(node->children[1])) { if (hasElse && leavesBlock(node->children[2])) applyRefinement(refinement.whenTrue); }
+        else if (!hasElse || !leavesBlock(node->children[2])) applyRefinement(refinement.whenFalse);
+    }
+
+    void resetAssigned(const Ast &body) {
+        walk(body, [&](const Ast &node) {
+            if (node->kind == "assignment" && node->children[0]->kind == "name") {
+                Symbol *symbol = lookup(node->children[0]->text);
+                if (symbol && symbol->kind == SymbolKind::Value && symbol->type != symbol->declared) { Symbol copy = *symbol; copy.type = copy.declared; scopes.back().symbols[node->children[0]->text] = std::move(copy); }
+            }
+            return true;
+        });
+    }
+
+    void whileStatement(const Ast &node) {
+        pushScope(); resetAssigned(node);
+        Refinement refinement = condition(node->children[0]);
+        guarded(refinement.whenTrue, node->children[1]);
+        popScope();
+    }
+
+    void forCStatement(const Ast &node) {
+        pushScope();
+        if (node->children[0]) statement(node->children[0]);
+        resetAssigned(node);
+        if (node->children[1]) { Refinement refinement = condition(node->children[1]); guarded(refinement.whenTrue, node->children[3]); }
+        else block(node->children[3]);
+        if (node->children[2]) statement(node->children[2]);
+        popScope();
+    }
+
+    Ty elementType(Ty iterable) {
+        if (iterable->tag == TypeTag::Var) return elementType(iterable->result);
+        if (iterable->tag != TypeTag::Named) return nullptr;
+        ClassInfo *info = iterable->info;
+        if ((info == listInfo || info == setInfo || info == tupleInfo || info == generatorInfo || info == mapInfo) && !iterable->args.empty()) return iterable->args[0];
+        if (iterable == stringType) return stringType;
+        if (iterable == bytesType) return ty.integer();
+        return nullptr;
+    }
+
+    void forInStatement(const Ast &node) {
+        Ty iterable = expr(node->children[0]); Ty element = ty.error();
+        if (iterable->tag != TypeTag::Error) {
+            Ty found = elementType(ty.isNullable(iterable) ? ty.stripNull(iterable) : iterable);
+            if (!found) error(node->children[0]->span, show(iterable) + " is not iterable"); else element = found;
+        }
+        pushScope(); resetAssigned(node);
+        declareValue(node->text, element, false, node->span);
+        block(node->children[1]);
+        popScope();
+    }
+
+    void tryStatement(const Ast &node) {
+        block(node->children[0]);
+        pushScope(); declareValue(node->text, errorType, false, node->span); block(node->children[1]); popScope();
+        if (node->children.size() > 2) block(node->children[2]);
+    }
+
+    // ---- conditions and narrowing -----------------------------------------------------------
+
+    Ty narrowTo(Ty declared, Ty target) {
+        if (declared->tag == TypeTag::Union) {
+            std::vector<Ty> kept;
+            for (Ty member : declared->args) { if (ty.isSubtype(member, target)) kept.push_back(member); else if (ty.isSubtype(target, member)) kept.push_back(target); }
+            return kept.empty() ? target : ty.unite(std::move(kept));
+        }
+        return ty.isSubtype(declared, target) ? declared : target;
+    }
+
+    Ty excludeType(Ty declared, Ty target) {
+        if (declared->tag != TypeTag::Union) return ty.isSubtype(declared, target) ? ty.never() : declared;
+        std::vector<Ty> kept; for (Ty member : declared->args) if (!ty.isSubtype(member, target)) kept.push_back(member);
+        return ty.unite(std::move(kept));
+    }
+
+    Symbol *narrowableSymbol(const Ast &node) {
+        if (node->kind != "name") return nullptr;
+        Symbol *symbol = lookup(node->text);
+        return symbol && symbol->kind == SymbolKind::Value ? symbol : nullptr;
+    }
+
+    Refinement condition(const Ast &node) {
+        Refinement result;
+        const std::string &op = node->text;
+        if (node->kind == "binary" && (op == "&&" || op == "and")) {
+            Refinement left = condition(node->children[0]);
+            pushScope(); applyRefinement(left.whenTrue); Refinement right = condition(node->children[1]); popScope();
+            result.whenTrue = left.whenTrue; for (const auto &entry : right.whenTrue) result.whenTrue[entry.first] = entry.second;
+            node->resolved = ty.boolean(); return result;
+        }
+        if (node->kind == "binary" && (op == "||" || op == "or")) {
+            Refinement left = condition(node->children[0]);
+            pushScope(); applyRefinement(left.whenFalse); Refinement right = condition(node->children[1]); popScope();
+            result.whenFalse = left.whenFalse; for (const auto &entry : right.whenFalse) result.whenFalse[entry.first] = entry.second;
+            node->resolved = ty.boolean(); return result;
+        }
+        if (node->kind == "unary" && (op == "!" || op == "not")) {
+            Refinement inner = condition(node->children[0]);
+            result.whenTrue = inner.whenFalse; result.whenFalse = inner.whenTrue; node->resolved = ty.boolean(); return result;
+        }
+        Ty type = expr(node);
+        assignable(type, ty.boolean(), node->span);
+        if (node->kind == "binary" && (op == "==" || op == "!=")) {
+            const Ast *name = &node->children[0], *other = &node->children[1];
+            if ((*name)->kind != "name") std::swap(name, other);
+            bool nullCheck = (*other)->kind == "literal" && (*other)->text == "null" && (*other)->literalKind == TokenKind::Name;
+            Symbol *symbol = nullCheck ? narrowableSymbol(*name) : nullptr;
+            if (symbol) {
+                std::map<std::string, Ty> isNull{{(*name)->text, ty.null()}}, notNull{{(*name)->text, ty.stripNull(symbol->type)}};
+                if (op == "==") { result.whenTrue = isNull; result.whenFalse = notNull; } else { result.whenTrue = notNull; result.whenFalse = isNull; }
+            }
+        } else if (node->kind == "is") {
+            Symbol *symbol = narrowableSymbol(node->children[0]);
+            if (symbol && node->typeExpr) {
+                Ty target = resolveType(node->typeExpr);
+                result.whenTrue[node->children[0]->text] = narrowTo(symbol->type, target);
+                result.whenFalse[node->children[0]->text] = excludeType(symbol->type, target);
+            }
+        }
+        return result;
+    }
+
+    // ---- expressions ------------------------------------------------------------------------
+
+    Ty expr(const Ast &node, Ty expected = nullptr) {
+        Ty type = exprInner(node, expected);
+        node->resolved = type; return type;
+    }
+
+    Ty hint(Ty expected, ClassInfo *info) {
+        if (!expected) return nullptr;
+        if (expected->tag == TypeTag::Named && expected->info == info) return expected;
+        if (expected->tag == TypeTag::Union) { Ty stripped = ty.stripNull(expected); if (stripped != expected) return hint(stripped, info); }
+        return nullptr;
+    }
+
+    Ty exprInner(const Ast &node, Ty expected) {
+        const std::string &kind = node->kind;
+        if (kind == "literal") return literal(node);
+        if (kind == "name") return nameExpression(node);
+        if (kind == "binary") return binaryExpression(node, expected);
+        if (kind == "unary") return unaryExpression(node);
+        if (kind == "call") return callExpression(node, expected);
+        if (kind == "member") return memberExpression(node, expected);
+        if (kind == "index") return indexExpression(node);
+        if (kind == "slice") return sliceExpression(node);
+        if (kind == "list" || kind == "tuple") return listExpression(node, expected);
+        if (kind == "map") return mapExpression(node, expected);
+        if (kind == "format") { for (size_t index = 0; index < node->children.size(); index++) expr(node->children[index]); return stringType; }
+        if (kind == "function") {
+            Ty hinted = expected && expected->tag == TypeTag::Function ? expected : nullptr;
+            return lambdaExpression(node, hinted ? hinted->args : std::vector<Ty>{}, hinted ? hinted->result : nullptr);
+        }
+        if (kind == "assignment") return assignmentExpression(node);
+        if (kind == "is") { expr(node->children[0]); resolveType(node->typeExpr); return ty.boolean(); }
+        if (kind == "cast") return castExpression(node);
+        if (kind == "nonnull") {
+            Ty operand = expr(node->children[0]);
+            if (operand->tag != TypeTag::Error && !ty.isNullable(operand)) warn(node->span, "Non-null assertion on a value that is never null");
+            return ty.stripNull(operand);
+        }
+        if (kind == "match") return matchExpression(node, expected);
+        error(node->span, "Unsupported expression '" + kind + "'"); return ty.error();
+    }
+
+    Ty literal(const Ast &node) {
+        switch (node->literalKind) {
+        case TokenKind::Integer: return ty.integer();
+        case TokenKind::Float: return ty.floating();
+        case TokenKind::String: return stringType;
+        case TokenKind::Bytes: return bytesType;
+        default: return node->text == "null" ? ty.null() : ty.boolean();
+        }
+    }
+
+    Ty nameExpression(const Ast &node) {
+        size_t index = 0; Symbol *symbol = lookup(node->text, &index);
+        if (!symbol) { error(node->span, "Undefined name '" + node->text + "'"); return ty.error(); }
+        switch (symbol->kind) {
+        case SymbolKind::Value: {
+            bool crossed = !functions.empty() && index < functions.back().scopeBase;
+            if (crossed && symbol->mutableBinding && !symbol->global) {
+                if (assigned.count(node->text)) error(node->span, "Captured variable '" + node->text + "' must be effectively final");
+                return symbol->declared;
+            }
+            return symbol->type;
+        }
+        case SymbolKind::Function: return symbol->signature ? symbol->signature->type : symbol->type;
+        default: error(node->span, "'" + node->text + "' is a type, not a value"); return ty.error();
+        }
+    }
+
+    Ty bounded(Ty type) {
+        for (int depth = 0; type->tag == TypeTag::Var && type->result && depth < 16; depth++) type = type->result;
+        return type;
+    }
+
+    Ty unaryExpression(const Ast &node) {
+        Ty operand = expr(node->children[0]); const std::string &op = node->text;
+        if (operand->tag == TypeTag::Error) return operand;
+        if (op == "!" || op == "not") { assignable(operand, ty.boolean(), node->span); return ty.boolean(); }
+        operand = bounded(operand);
+        if (ty.isNumeric(operand)) return operand;
+        if (Ty hooked = hookCall(operand, op == "-" ? "__neg__" : "__pos__", {}, node->span)) return hooked;
+        error(node->span, "Operator '" + op + "' cannot be applied to " + show(operand)); return ty.error();
+    }
+
+    // Returns the hook result type, or null when the receiver has no such method.
+    Ty hookCall(Ty receiver, const char *hook, const std::vector<Ty> &arguments, const Span &span) {
+        if (receiver->tag != TypeTag::Named) return nullptr;
+        const Member *member = findMember(receiver->info, hook);
+        if (!member || !member->isMethod || member->isStatic) return nullptr;
+        Ty up = ty.asSuper(receiver, member->owner); std::map<Ty, Ty> replacements;
+        for (size_t index = 0; up && index < member->owner->params.size() && index < up->args.size(); index++) replacements[member->owner->params[index]] = up->args[index];
+        Ty function = ty.substitute(member->signature->type, replacements);
+        if (function->args.size() != arguments.size()) return nullptr;
+        for (size_t index = 0; index < arguments.size(); index++) if (!assignable(arguments[index], function->args[index], span)) return ty.error();
+        return function->result;
+    }
+
+    Ty binaryExpression(const Ast &node, Ty expected) {
+        const std::string &op = node->text;
+        if (op == "&&" || op == "||" || op == "and" || op == "or") { condition(node); return ty.boolean(); }
+        if (op == "??") {
+            Ty left = expr(node->children[0]);
+            Ty right = expr(node->children[1], expected ? expected : (left->tag == TypeTag::Error ? nullptr : ty.stripNull(left)));
+            if (left->tag == TypeTag::Error || right->tag == TypeTag::Error) return ty.error();
+            if (!ty.isNullable(left)) { warn(node->span, "Left operand of ?? is never null"); return left; }
+            return ty.join(ty.stripNull(left), right);
+        }
+        Ty left = expr(node->children[0]), right = expr(node->children[1]);
+        bool comparison = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=";
+        if (left->tag == TypeTag::Error || right->tag == TypeTag::Error) return comparison ? ty.boolean() : ty.error();
+        if (op == "==" || op == "!=") return ty.boolean();
+        left = bounded(left); right = bounded(right);
+        if (comparison) {
+            if (ty.isNumeric(left) && ty.isNumeric(right)) return ty.boolean();
+            if (left == stringType && right == stringType) return ty.boolean();
+            const char *hook = op == "<" ? "__lt__" : op == ">" ? "__gt__" : op == "<=" ? "__le__" : "__ge__";
+            if (hookCall(left, hook, {right}, node->span)) return ty.boolean();
+            error(node->span, "Cannot compare " + show(left) + " with " + show(right)); return ty.boolean();
+        }
+        if (ty.isNumeric(left) && ty.isNumeric(right)) {
+            bool floating = left == ty.floating() || right == ty.floating();
+            if (op == "/") return ty.floating();
+            return floating ? ty.floating() : ty.integer();
+        }
+        if (op == "+") {
+            if (left == stringType || right == stringType) return stringType;
+            if (left == right && left == bytesType) return bytesType;
+            if (left->tag == TypeTag::Named && left->info == listInfo && ty.isSubtype(right, left)) return left;
+        }
+        static const std::map<std::string, const char *> hooks{{"+", "__add__"}, {"-", "__sub__"}, {"*", "__mul__"}, {"/", "__div__"}, {"//", "__floordiv__"}, {"%", "__mod__"}, {"**", "__pow__"}};
+        auto hook = hooks.find(op);
+        if (hook != hooks.end()) if (Ty hooked = hookCall(left, hook->second, {right}, node->span)) return hooked;
+        error(node->span, "Operator '" + op + "' cannot be applied to " + show(left) + " and " + show(right)); return ty.error();
+    }
+
+    Ty castExpression(const Ast &node) {
+        Ty operand = expr(node->children[0]), target = resolveType(node->typeExpr);
+        if (operand->tag == TypeTag::Error || target->tag == TypeTag::Error) return target;
+        if (!ty.isSubtype(operand, target) && !ty.isSubtype(target, operand) && !ty.isSubtype(ty.stripNull(target), ty.stripNull(operand)) && ty.stripNull(operand)->tag != TypeTag::Object)
+            error(node->span, "Cannot cast " + show(operand) + " to " + show(target));
+        else if (target->tag == TypeTag::Named && !target->args.empty() && !ty.isSubtype(operand, target)) warn(node->span, "Unchecked cast to " + show(target) + "; only the erased type is checked at run time");
+        return target;
+    }
+
+    Ty assignmentExpression(const Ast &node) {
+        const Ast &target = node->children[0]; const std::string &op = node->text;
+        Ty targetType = ty.error();
+        if (target->kind == "name") {
+            size_t index = 0; Symbol *symbol = lookup(target->text, &index);
+            if (!symbol) error(target->span, "Undefined name '" + target->text + "'");
+            else if (symbol->kind != SymbolKind::Value) error(target->span, "Cannot assign to '" + target->text + "'");
+            else {
+                if (!symbol->mutableBinding) error(target->span, "Cannot reassign '" + target->text + "'; it is not a var");
+                else if (!functions.empty() && index < functions.back().scopeBase && !symbol->global) error(target->span, "Cannot assign to captured variable '" + target->text + "'");
+                targetType = symbol->declared; target->resolved = targetType;
+                Symbol *current = lookup(target->text); if (current) current->type = current->declared;
+            }
+        } else if (target->kind == "member") targetType = memberTarget(target);
+        else if (target->kind == "index") targetType = indexTarget(target);
+        else error(target->span, "Invalid assignment target");
+        Ty value = expr(node->children[1], op == "=" ? targetType : nullptr);
+        if (targetType->tag == TypeTag::Error || value->tag == TypeTag::Error) return ty.null();
+        if (op == "=") { assignable(value, targetType, node->children[1]->span); return ty.null(); }
+        Ty combined = compoundResult(op.substr(0, 1), targetType, value, node->span);
+        assignable(combined, targetType, node->span);
+        return ty.null();
+    }
+
+    Ty compoundResult(const std::string &op, Ty left, Ty right, const Span &span) {
+        left = bounded(left); right = bounded(right);
+        if (ty.isNumeric(left) && ty.isNumeric(right)) return op == "/" ? ty.floating() : (left == ty.floating() || right == ty.floating() ? ty.floating() : ty.integer());
+        if (op == "+" && left == stringType) return stringType;
+        static const std::map<std::string, const char *> hooks{{"+", "__add__"}, {"-", "__sub__"}, {"*", "__mul__"}, {"/", "__div__"}};
+        auto hook = hooks.find(op);
+        if (hook != hooks.end()) if (Ty hooked = hookCall(left, hook->second, {right}, span)) return hooked;
+        error(span, "Operator '" + op + "=' cannot be applied to " + show(left) + " and " + show(right)); return ty.error();
+    }
+
+    struct Resolved {
+        Ty type = nullptr;
+        std::shared_ptr<Signature> signature;
+        bool found = false;
+        ClassInfo *genericConstant = nullptr;
+    };
+
+    bool visible(const Member &member, const Span &span, const std::string &name) {
+        if (member.visibility == Visibility::Public) return true;
+        ClassInfo *current = functions.empty() ? nullptr : functions.back().owner;
+        bool allowed = current && (current == member.owner || (member.visibility == Visibility::Protected && ty.asSuper(current->self, member.owner)));
+        if (!allowed) error(span, "'" + name + "' is " + (member.visibility == Visibility::Private ? "private" : "protected") + " in " + member.owner->name);
+        return allowed;
+    }
+
+    Resolved resolveMember(const Ast &node, bool forWrite = false) {
+        Resolved result; const Ast &receiverNode = node->children[0];
+        if (receiverNode->kind == "name") {
+            Symbol *symbol = lookup(receiverNode->text);
+            if (symbol && symbol->kind == SymbolKind::Class) {
+                const Member *member = findMember(symbol->info, node->text);
+                if (!member || !member->isStatic) { error(node->span, symbol->info->name + " has no static member '" + node->text + "'"); return result; }
+                visible(*member, node->span, node->text);
+                result.found = true; result.signature = member->signature; result.type = member->signature ? member->signature->type : member->type;
+                if (!member->signature && symbol->info->kind == ClassKind::Enum && !symbol->info->params.empty()) result.genericConstant = symbol->info;
+                if (forWrite && !member->mutableBinding) error(node->span, "Cannot assign to '" + node->text + "'");
+                return result;
+            }
+        }
+        Ty receiver = expr(receiverNode);
+        if (receiver->tag == TypeTag::Error) return result;
+        if (ty.isNullable(receiver)) {
+            if (!node->safe) error(node->span, "Value of type " + show(receiver) + " may be null; use ?. or check it first");
+            receiver = ty.stripNull(receiver);
+        }
+        while (receiver->tag == TypeTag::Var) receiver = receiver->result;
+        if (receiver->tag != TypeTag::Named) { error(node->span, show(receiver) + " has no member '" + node->text + "'"); return result; }
+        const Member *member = findMember(receiver->info, node->text);
+        if (!member || member->isStatic) { error(node->span, show(receiver) + " has no member '" + node->text + "'"); return result; }
+        visible(*member, node->span, node->text);
+        Ty up = ty.asSuper(receiver, member->owner); std::map<Ty, Ty> replacements;
+        for (size_t index = 0; up && index < member->owner->params.size() && index < up->args.size(); index++) replacements[member->owner->params[index]] = up->args[index];
+        result.found = true; result.signature = member->signature;
+        result.type = ty.substitute(member->signature ? member->signature->type : member->type, replacements);
+        if (member->signature && !replacements.empty()) {
+            auto substituted = std::make_shared<Signature>(*member->signature); substituted->type = result.type; result.signature = substituted;
+        }
+        if (forWrite) {
+            bool inConstructor = !functions.empty() && functions.back().constructor && functions.back().owner == member->owner && receiverNode->kind == "name" && receiverNode->text == "self";
+            if (member->isMethod) error(node->span, "Cannot assign to method '" + node->text + "'");
+            else if (!member->mutableBinding && !inConstructor) error(node->span, "Cannot assign to immutable field '" + node->text + "'");
+        }
+        return result;
+    }
+
+    Ty memberTarget(const Ast &node) {
+        Resolved resolved = resolveMember(node, true);
+        node->resolved = resolved.found ? resolved.type : ty.error();
+        return node->resolved;
+    }
+
+    Ty memberExpression(const Ast &node, Ty expected) {
+        Resolved resolved = resolveMember(node);
+        if (!resolved.found) return ty.error();
+        if (resolved.genericConstant) {
+            Ty wanted = hint(expected, resolved.genericConstant);
+            if (wanted) return wanted;
+            error(node->span, "Cannot infer the type arguments of " + node->text + "; add a type annotation"); return ty.error();
+        }
+        if (node->safe) return ty.nullable(resolved.type);
+        return resolved.type;
+    }
+
+    Ty indexResult(const Ast &node, Ty receiver, Ty index, bool write, Ty value) {
+        (void)write; (void)value;
+        if (receiver->tag == TypeTag::Error || index->tag == TypeTag::Error) return ty.error();
+        if (receiver->tag == TypeTag::Named) {
+            ClassInfo *info = receiver->info;
+            if (info == listInfo || info == tupleInfo) { assignable(index, ty.integer(), node->children[1]->span); return receiver->args[0]; }
+            if (info == mapInfo) { assignable(index, receiver->args[0], node->children[1]->span); return receiver->args[1]; }
+            if (receiver == stringType) { assignable(index, ty.integer(), node->children[1]->span); return stringType; }
+            if (receiver == bytesType) { assignable(index, ty.integer(), node->children[1]->span); return ty.integer(); }
+            if (Ty hooked = hookCall(receiver, "__getitem__", {index}, node->span)) return hooked;
+        }
+        error(node->span, show(receiver) + " cannot be indexed with " + show(index)); return ty.error();
+    }
+
+    Ty indexExpression(const Ast &node) {
+        Ty receiver = expr(node->children[0]);
+        if (ty.isNullable(receiver)) { error(node->span, "Value of type " + show(receiver) + " may be null"); receiver = ty.stripNull(receiver); }
+        return indexResult(node, receiver, expr(node->children[1]), false, nullptr);
+    }
+
+    Ty indexTarget(const Ast &node) {
+        Ty receiver = expr(node->children[0]);
+        if (ty.isNullable(receiver)) { error(node->span, "Value of type " + show(receiver) + " may be null"); receiver = ty.stripNull(receiver); }
+        Ty type = indexResult(node, receiver, expr(node->children[1]), true, nullptr);
+        if (receiver == stringType || receiver == bytesType || (receiver->tag == TypeTag::Named && receiver->info == tupleInfo)) { error(node->span, show(receiver) + " is immutable"); return ty.error(); }
+        node->resolved = type; return type;
+    }
+
+    Ty sliceExpression(const Ast &node) {
+        Ty receiver = expr(node->children[0]);
+        for (size_t index = 1; index < 4; index++) if (node->children[index]) assignable(expr(node->children[index]), ty.integer(), node->children[index]->span);
+        if (receiver->tag == TypeTag::Error) return receiver;
+        bool sliceable = receiver == stringType || receiver == bytesType || (receiver->tag == TypeTag::Named && (receiver->info == listInfo || receiver->info == tupleInfo));
+        if (!sliceable) { error(node->span, show(receiver) + " cannot be sliced"); return ty.error(); }
+        return receiver;
+    }
+
+    Ty listExpression(const Ast &node, Ty expected) {
+        ClassInfo *info = node->kind == "list" ? listInfo : tupleInfo;
+        Ty wanted = hint(expected, info); Ty element = wanted && !wanted->args.empty() ? wanted->args[0] : nullptr;
+        if (element && element->tag == TypeTag::Wildcard) element = element->result;
+        Ty joined = nullptr;
+        for (const auto &child : node->children) {
+            Ty type = expr(child, element);
+            if (type->tag == TypeTag::Error) { joined = ty.error(); continue; }
+            if (!element && joined != ty.error()) joined = joined ? ty.join(joined, type) : type;
+            if (element) assignable(type, element, child->span);
+        }
+        if (element) return ty.named(info, {element});
+        if (!joined) {
+            if (node->kind == "list") error(node->span, "Cannot infer the element type of an empty list; add a type annotation");
+            else return ty.named(info, {ty.never()});
+            return ty.error();
+        }
+        return joined->tag == TypeTag::Error ? joined : ty.named(info, {joined});
+    }
+
+    Ty mapExpression(const Ast &node, Ty expected) {
+        Ty wanted = hint(expected, mapInfo); Ty keyType = wanted ? wanted->args[0] : nullptr, valueType = wanted ? wanted->args[1] : nullptr;
+        Ty keys = nullptr, values = nullptr; bool failed = false;
+        for (size_t index = 0; index + 1 < node->children.size(); index += 2) {
+            Ty key = expr(node->children[index], keyType), value = expr(node->children[index + 1], valueType);
+            if (key->tag == TypeTag::Error || value->tag == TypeTag::Error) { failed = true; continue; }
+            if (keyType) assignable(key, keyType, node->children[index]->span); else keys = keys ? ty.join(keys, key) : key;
+            if (valueType) assignable(value, valueType, node->children[index + 1]->span); else values = values ? ty.join(values, value) : value;
+        }
+        if (failed) return ty.error();
+        if (keyType && valueType) return ty.named(mapInfo, {keyType, valueType});
+        if (!keys) { error(node->span, "Cannot infer the types of an empty map; add a type annotation"); return ty.error(); }
+        return ty.named(mapInfo, {keys, values});
+    }
+
+    Ty callExpression(const Ast &node, Ty expected) {
+        const Ast &callee = node->children[0];
+        if (callee->kind == "name") {
+            Symbol *symbol = lookup(callee->text);
+            if (symbol && symbol->kind == SymbolKind::Class) return construct(node, symbol->info, callee->typeArgs, expected);
+            if (symbol && symbol->kind == SymbolKind::Function) { callee->resolved = symbol->signature->type; return applyCall(node, symbol->signature->type, symbol->signature, callee->typeArgs, expected); }
+        }
+        if (callee->kind == "member") {
+            Resolved resolved = resolveMember(callee);
+            if (!resolved.found) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return ty.error(); }
+            callee->resolved = resolved.type;
+            if (resolved.type->tag != TypeTag::Function) { error(node->span, "'" + callee->text + "' is not callable"); return ty.error(); }
+            Ty result = applyCall(node, resolved.type, resolved.signature, callee->typeArgs, expected);
+            return callee->safe ? ty.nullable(result) : result;
+        }
+        Ty type = expr(callee);
+        if (type->tag == TypeTag::Error) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return type; }
+        if (ty.isNullable(type)) { error(node->span, "Cannot call a value of type " + show(type) + " that may be null"); type = ty.stripNull(type); }
+        if (type->tag != TypeTag::Function) { error(node->span, show(type) + " is not callable"); return ty.error(); }
+        return applyCall(node, type, nullptr, {}, expected);
+    }
+
+    Ty construct(const Ast &node, ClassInfo *info, const std::vector<TypeAst> &typeArguments, Ty expected) {
+        if (info->kind == ClassKind::Trait || info->kind == ClassKind::Enum) { error(node->span, info->name + " cannot be constructed directly"); return ty.error(); }
+        Signature *constructor = constructorOf(info);
+        std::shared_ptr<Signature> shared = info->constructor;
+        (void)constructor;
+        return applyCall(node, shared->type, shared, typeArguments, expected);
+    }
+
+    Ty matchExpression(const Ast &node, Ty expected) {
+        Ty subject = expr(node->children[0]);
+        if (subject->tag == TypeTag::Error) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]->children[0]); return subject; }
+        if (subject->tag != TypeTag::Named || subject->info->kind != ClassKind::Enum) { error(node->span, "match requires an enum value, got " + show(subject)); return ty.error(); }
+        ClassInfo *info = subject->info; std::map<Ty, Ty> replacements;
+        for (size_t index = 0; index < info->params.size() && index < subject->args.size(); index++) replacements[info->params[index]] = subject->args[index];
+        std::set<std::string> covered; bool wildcard = false; Ty result = nullptr;
+        for (size_t index = 1; index < node->children.size(); index++) {
+            const Ast &arm = node->children[index];
+            pushScope();
+            if (arm->text == "_") wildcard = true;
+            else {
+                size_t dot = arm->text.rfind('.'); std::string variantName = arm->text.substr(dot == std::string::npos ? 0 : dot + 1);
+                std::string owner = dot == std::string::npos ? "" : arm->text.substr(0, dot);
+                const Variant *found = nullptr; for (const auto &variant : info->variants) if (variant.name == variantName) found = &variant;
+                if (!found || (!owner.empty() && owner.substr(owner.rfind('.') == std::string::npos ? 0 : owner.rfind('.') + 1) != info->name)) error(arm->span, "'" + arm->text + "' is not a variant of " + info->name);
+                else {
+                    if (!covered.insert(variantName).second) error(arm->span, "Duplicate match arm '" + variantName + "'");
+                    if (found->payload.size() != arm->names.size()) error(arm->span, "Pattern binds " + std::to_string(arm->names.size()) + " value(s) but " + variantName + " carries " + std::to_string(found->payload.size()));
+                    for (size_t position = 0; position < arm->names.size() && position < found->payload.size(); position++) declareValue(arm->names[position], ty.substitute(found->payload[position], replacements), false, arm->span);
+                }
+            }
+            Ty value = expr(arm->children[0], expected);
+            popScope();
+            if (expected) assignable(value, expected, arm->children[0]->span);
+            result = result ? ty.join(result, value) : value;
+        }
+        if (!wildcard) for (const auto &variant : info->variants) if (!covered.count(variant.name)) error(node->span, "match is not exhaustive; missing " + info->name + "." + variant.name);
+        return expected && result && ty.isSubtype(result, expected) ? expected : (result ? result : ty.never());
+    }
+};
+
+}
+
+std::vector<Diagnostic> typeCheck(const Ast &program) {
+    Typer typer; typer.check(program);
+    return typer.diagnostics;
+}
+
+std::string formatDiagnostic(const Diagnostic &diagnostic, bool color) {
+    return diagnose(Error(diagnostic.span, diagnostic.message, "type"), color);
+}
+
+}
