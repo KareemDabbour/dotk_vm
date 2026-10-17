@@ -506,6 +506,8 @@ private:
             if (!supplied[slot] && !optional) error(node->span, signature && !signature->names[slot].empty() ? "Missing argument '" + signature->names[slot] + "'" : "Missing argument " + std::to_string(slot + 1));
         }
         std::vector<Ty> argumentTypes(count, nullptr);
+        std::map<Ty, Ty> fromExpected;
+        if (expected && !variables.empty()) unify(function->result, expected, fromExpected, variables);
         auto resolvedParameter = [&](int slot) { return ty.substitute(parameters[static_cast<size_t>(slot)], bindings); };
         for (int pass = 0; pass < 2; pass++) {
             for (size_t index = 0; index < count; index++) {
@@ -516,6 +518,7 @@ private:
                 Ty parameter = resolvedParameter(target[index]);
                 if (deferred && parameter->tag == TypeTag::Function) {
                     std::vector<Ty> hints = parameter->args; Ty resultHint = parameter->result;
+                    if (containsVar(resultHint, variables)) resultHint = ty.substitute(resultHint, fromExpected);
                     if (containsVar(resultHint, variables)) resultHint = nullptr;
                     argumentTypes[index] = lambdaExpression(argument, hints, resultHint);
                 } else argumentTypes[index] = expr(argument, containsVar(parameter, variables) ? nullptr : parameter);
@@ -523,10 +526,7 @@ private:
             }
         }
         Ty result = function->result;
-        if (expected && !variables.empty()) {
-            std::map<Ty, Ty> fromExpected; unify(result, expected, fromExpected, variables);
-            for (const auto &entry : fromExpected) bindings.emplace(entry.first, entry.second);
-        }
+        for (const auto &entry : fromExpected) bindings.emplace(entry.first, entry.second);
         for (Ty variable : variables) {
             if (bindings.count(variable)) {
                 if (variable->result && !ty.isSubtype(bindings[variable], ty.substitute(variable->result, bindings))) error(node->span, "Type " + show(bindings[variable]) + " does not satisfy the bound " + show(variable->result) + " of " + variable->name);
