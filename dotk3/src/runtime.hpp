@@ -23,6 +23,7 @@ struct TypeContract {
     std::shared_ptr<const TypeContract> key;
     std::shared_ptr<const TypeContract> element;
     std::vector<std::shared_ptr<const TypeContract>> all;
+    std::vector<std::shared_ptr<const TypeContract>> alternatives;
 };
 using Contract = std::shared_ptr<const TypeContract>;
 struct Binding { Value value; bool mutableBinding = false; std::string type; Contract contract = {}; bool staticMember = false; bool initialized = true; Visibility visibility = Visibility::Public; Object *declaringClass = nullptr; };
@@ -169,6 +170,8 @@ struct Config {
     std::function<bool()> interrupted;
     std::function<void(const DebugSnapshot &)> debug;
     uint64_t stepLimit = 1000000;
+    // False once a program has passed the static type checker: annotations are then erased at run time.
+    bool enforceContracts = true;
     size_t objectLimit = 10000000;
     unsigned optimizationLevel = 2;
     std::shared_ptr<Profiler> profiler;
@@ -210,6 +213,7 @@ class Runtime {
     bool collectionRequested = false;
     size_t nextCollection = 4096;
     uint64_t bindingEpoch = 0;
+    int contractForce = 0;
     size_t callDepth = 0;
     std::deque<Object *> readyTasks;
     std::vector<Object *> activeTasks;
@@ -256,9 +260,10 @@ class Runtime {
     bool boolean(Value value, const Span &span);
     int64_t integer(Value value, const Span &span);
     double floating(Value value, const Span &span, bool explicitConversion = false);
-    Contract resolveContract(const std::string &type, Object *environment, const Span &span, bool checkIntersectionMethods = true);
+    Contract resolveContract(const std::string &type, Object *environment, const Span &span, bool checkIntersectionMethods = true, bool forTest = false);
     Object *resolveObjectPath(const std::string &name, Object *environment, const Span &span);
     void requireType(Value value, const Contract &contract, const Span &span);
+    bool valueMatches(Value value, const Contract &contract, const Span &span);
     Value binary(const std::string &operation, Value left, Value right, const Span &span);
     std::string stringify(Value value, const Span &span);
     bool overloaded(const std::string &operation, Value receiver, const std::vector<Argument> &arguments, const Span &span, Value &result);

@@ -52,7 +52,7 @@ std::string typeText(const TypeAst &type) {
         bool wrap = type->inner->kind == TypeKind::Union || type->inner->kind == TypeKind::Function;
         return (wrap ? '(' + typeText(type->inner) + ')' : typeText(type->inner)) + '?';
     }
-    case TypeKind::Union: return join(type->items, "|", false);
+    case TypeKind::Union: return join(type->items, "|", true);
     case TypeKind::Intersection: return '(' + join(type->items, "&", true) + ')';
     case TypeKind::Function: return "fn(" + join(type->items, ",", false) + ")->" + typeText(type->inner);
     case TypeKind::Wildcard:
@@ -238,10 +238,12 @@ class Parser {
                 if (!classDeclaration) throw Error(start.span, "Only classes support inheritance");
                 result->baseClass = typeName(&result->typeExpr);
                 if (result->typeExpr->kind != TypeKind::Named) throw Error(start.span, "extends requires one qualified class name");
+                result->baseClass = result->typeExpr->name;
             }
             if (take("implements")) do {
-                newlines(); TypeAst traitType; std::string trait = typeName(&traitType);
+                newlines(); TypeAst traitType; typeName(&traitType);
                 if (traitType->kind != TypeKind::Named) throw Error(start.span, "implements requires plain qualified trait names");
+                const std::string trait = traitType->name;
                 if (std::find(result->names.begin(), result->names.end(), trait) != result->names.end())
                     throw Error(start.span, "Duplicate implemented trait '" + trait + "'");
                 result->names.push_back(trait); result->typeExprs.push_back(traitType); newlines();

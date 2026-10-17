@@ -46,6 +46,10 @@ class Compiler {
             for (const auto &binding : scopes[index - 1]) emit(ByteOp::ClearLocal, node, binding.second);
     }
     void expression(const Ast &node) {
+        expressionInner(node);
+        if (node->widen) emit(ByteOp::IntToFloat, node);
+    }
+    void expressionInner(const Ast &node) {
         emit(ByteOp::Tick, node);
         if (node->kind == "literal") {
             if (node->literalKind == TokenKind::Integer) {
@@ -76,14 +80,25 @@ class Compiler {
                 if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || value > uint64_t{1} << 63) { emit(ByteOp::Literal, node, 1); return; }
                 size_t position = emit(ByteOp::Int, node); code.instructions[position].integer = value == uint64_t{1} << 63 ? INT64_MIN : -static_cast<int64_t>(value);
             } else { expression(node->children[0]); emit(ByteOp::Unary, node); }
-        } else if (node->kind == "member") { expression(node->children[0]); emit(ByteOp::Member, node); }
+        } else if (node->kind == "member") {
+            expression(node->children[0]);
+            size_t skip = node->safe ? emit(ByteOp::JumpNull, node) : 0;
+            emit(ByteOp::Member, node);
+            if (node->safe) code.instructions[skip].operand = code.instructions.size();
+        }
+        else if (node->kind == "is") { expression(node->children[0]); emit(ByteOp::InstanceOf, node); }
+        else if (node->kind == "cast") { expression(node->children[0]); emit(ByteOp::Cast, node); }
+        else if (node->kind == "nonnull") { expression(node->children[0]); emit(ByteOp::NonNull, node); }
         else if (node->kind == "index") { expression(node->children[0]); expression(node->children[1]); emit(ByteOp::Index, node); }
         else if (node->kind == "call") {
             const auto &callee = node->children[0];
             if (callee->kind == "member") {
-                emit(ByteOp::Tick, callee); expression(callee->children[0]); emit(ByteOp::ResolveMethod, callee);
+                emit(ByteOp::Tick, callee); expression(callee->children[0]);
+                size_t skip = callee->safe ? emit(ByteOp::JumpNull, callee) : 0;
+                emit(ByteOp::ResolveMethod, callee);
                 for (size_t index = 1; index < node->children.size(); index++) expression(node->children[index]);
                 emit(ByteOp::InvokeMethod, node, node->children.size() - 1);
+                if (callee->safe) code.instructions[skip].operand = code.instructions.size();
             } else {
                 for (const auto &child : node->children) expression(child);
                 emit(ByteOp::Call, node, node->children.size() - 1);
@@ -145,6 +160,7 @@ class Compiler {
                 emit(ByteOp::DeclareLocal, node, slot);
             }
         } else if (node->kind == "function" && (lexical || (code.program && scopes.size() == 1))) emit(ByteOp::DefineFunction, node);
+        else if (node->kind == "type_alias") {}
         else if (lexical && (node->kind == "class" || node->kind == "record" || node->kind == "trait" || node->kind == "impl" || node->kind == "enum")) emit(ByteOp::DeclareType, node);
         else if (lexical && (node->kind == "import" || node->kind == "from_import")) emit(ByteOp::Import, node);
         else if (lexical && node->kind == "throw") { expression(node->children[0]); emit(ByteOp::Throw, node); }
@@ -224,7 +240,7 @@ std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimi
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization) { return Compiler{}.expressionCode(node, optimization); }
 std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization) { return Compiler{}.statementCode(node, optimization); }
 const char *byteOpName(ByteOp op) {
-    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod"};
+    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat"};
     return names[static_cast<size_t>(op)];
 }
 }

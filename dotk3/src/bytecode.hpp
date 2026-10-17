@@ -6,7 +6,8 @@ enum class ByteOp {
     Tick, Point, Null, Bool, Int, Float, Text, LoadLocal, StoreLocal, DeclareLocal, ClearLocal,
     LoadName, StoreName, CheckLocal, CheckName, CheckObject, DeclareName, DefineFunction, Member, Index, SetIndex, Binary, Unary,
     Call, List, Tuple, Map, Pop, Dup, Jump, JumpFalse, JumpTrue, JumpPresent, SafePoint, Return,
-    Literal, Closure, Format, Slice, Match, PrepareMember, SetMember, Swap, DeclareType, Import, Throw, PrepareSlice, ResolveMethod, InvokeMethod
+    Literal, Closure, Format, Slice, Match, PrepareMember, SetMember, Swap, DeclareType, Import, Throw, PrepareSlice, ResolveMethod, InvokeMethod,
+    InstanceOf, Cast, NonNull, JumpNull, IntToFloat
 };
 struct ByteInstruction {
     ByteOp op;

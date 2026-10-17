@@ -982,7 +982,18 @@ private:
 
     Ty expr(const Ast &node, Ty expected = nullptr) {
         Ty type = exprInner(node, expected);
-        node->resolved = type; return type;
+        node->resolved = type;
+        if (expected && type == ty.integer() && wantsFloat(expected)) node->widen = true;
+        return type;
+    }
+
+    // True when an Int flowing into `expected` must be converted to Float.
+    bool wantsFloat(Ty expected) {
+        if (expected == ty.floating()) return true;
+        if (expected->tag != TypeTag::Union) return false;
+        bool hasFloat = false;
+        for (Ty member : expected->args) { if (member == ty.integer()) return false; if (member == ty.floating()) hasFloat = true; }
+        return hasFloat;
     }
 
     Ty hint(Ty expected, ClassInfo *info) {
@@ -1010,7 +1021,12 @@ private:
             return lambdaExpression(node, hinted ? hinted->args : std::vector<Ty>{}, hinted ? hinted->result : nullptr);
         }
         if (kind == "assignment") return assignmentExpression(node);
-        if (kind == "is") { expr(node->children[0]); resolveType(node->typeExpr); return ty.boolean(); }
+        if (kind == "is") {
+            expr(node->children[0]); Ty target = resolveType(node->typeExpr);
+            if (target->tag == TypeTag::Named && !target->args.empty()) for (Ty argument : target->args)
+                if (argument->tag != TypeTag::Wildcard || argument->wildcard != WildcardBound::None) { error(node->span, "Type arguments are erased at run time; test against " + target->info->name + "<?> instead"); break; }
+            return ty.boolean();
+        }
         if (kind == "cast") return castExpression(node);
         if (kind == "nonnull") {
             Ty operand = expr(node->children[0]);

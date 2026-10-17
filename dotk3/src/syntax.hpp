@@ -93,6 +93,7 @@ struct Node {
     bool constructor = false;
     bool needsScope = true;
     bool safe = false;
+    bool widen = false;
     const TypeData *resolved = nullptr;
     Visibility visibility = Visibility::Public;
     std::string baseClass;

@@ -364,12 +364,44 @@ bool Runtime::equal(Value left, Value right) {
     return false;
 }
 namespace { bool sameContract(const Contract &first, const Contract &second); }
-Contract Runtime::resolveContract(const std::string &type, Object *environment, const Span &span, bool checkIntersectionMethods) {
+namespace {
+bool wrapsWhole(const std::string &text) {
+    if (text.size() < 2 || text.front() != '(' || text.back() != ')') return false;
+    int depth = 0;
+    for (size_t position = 0; position < text.size(); position++) {
+        if (text[position] == '(') depth++; else if (text[position] == ')') depth--;
+        if (!depth && position + 1 < text.size()) return false;
+    }
+    return true;
+}
+std::vector<std::string> splitUnion(const std::string &text) {
+    std::vector<std::string> parts; int depth = 0; size_t start = 0;
+    for (size_t position = 0; position < text.size(); position++) {
+        char symbol = text[position];
+        if (symbol == '[' || symbol == '(') depth++;
+        else if (symbol == ']' || symbol == ')') depth--;
+        else if (symbol == '|' && !depth) { parts.push_back(text.substr(start, position - start)); start = position + 1; }
+    }
+    if (parts.empty()) return {};
+    parts.push_back(text.substr(start)); return parts;
+}
+}
+Contract Runtime::resolveContract(const std::string &type, Object *environment, const Span &span, bool checkIntersectionMethods, bool forTest) {
     if (type.empty()) return {};
+    if (!config.enforceContracts && !forTest && !contractForce) return {};
+    struct Force { int &depth; bool active; Force(int &counter, bool enable) : depth(counter), active(enable) { if (active) depth++; } ~Force() { if (active) depth--; } } force(contractForce, forTest);
     static thread_local std::unordered_map<std::string, Contract> builtinContracts;
     if (auto cached = builtinContracts.find(type); cached != builtinContracts.end()) return cached->second;
     auto contract = std::make_shared<TypeContract>(); std::string text = type;
     if (text.back() == '?') { contract->nullable = true; text.pop_back(); }
+    std::string inner = text;
+    while (wrapsWhole(inner)) inner = inner.substr(1, inner.size() - 2);
+    if (inner.rfind("fn(", 0) == 0) { contract->name = "Function"; builtinContracts.emplace(type, contract); return contract; }
+    if (auto alternatives = splitUnion(inner); alternatives.size() > 1) {
+        contract->name = "Union";
+        for (const auto &alternative : alternatives) contract->alternatives.push_back(resolveContract(alternative, environment, span, checkIntersectionMethods));
+        return contract;
+    }
     auto components = typeIntersections(type);
     if (!components.empty()) {
         contract->name = "Intersection";
@@ -473,6 +505,13 @@ void Runtime::requireType(Value value, const Contract &contract, const Span &spa
         if (expected->nullable && std::holds_alternative<std::monostate>(candidate)) return;
         if (expected->name == "Object" && !expected->nominal) { if (std::holds_alternative<std::monostate>(candidate)) throw Error(span, "Object does not accept null; use Object?", "type"); return; }
         if (!expected->all.empty()) { for (const auto &part : expected->all) validate(candidate, part); return; }
+        if (!expected->alternatives.empty()) {
+            for (const auto &alternative : expected->alternatives) {
+                try { validate(candidate, alternative); return; }
+                catch (const Error &failure) { if (failure.category != "type") throw; }
+            }
+            throw Error(span, "Expected a union member, got " + typeOf(candidate), "type");
+        }
         bool valid = false; Object *instance = std::holds_alternative<Object *>(candidate) ? std::get<Object *>(candidate) : nullptr;
         if (expected->nominal && expected->nominal->kind == Kind::TraitType) {
             if (instance && instance->origin && (instance->origin->kind == Kind::ClassType || instance->origin->kind == Kind::RecordType)) {
@@ -522,6 +561,10 @@ void Runtime::requireType(Value value, const Contract &contract, const Span &spa
         attached.collection->keyContract = attached.key;
         attached.collection->elementContract = attached.element;
     }
+}
+bool Runtime::valueMatches(Value value, const Contract &contract, const Span &span) {
+    try { requireType(std::move(value), contract, span); return true; }
+    catch (const Error &failure) { if (failure.category != "type") throw; return false; }
 }
 Binding &Runtime::lookup(Object *environment, const std::string &name, const Span &span) {
     for (Object *scope = environment; scope; scope = scope->parent) {
@@ -655,6 +698,10 @@ Value Runtime::binary(const std::string &operation, Value left, Value right, con
             Object *result = allocate(Kind::List, span); result->items = first->items;
             result->items.insert(result->items.end(), second->items.begin(), second->items.end()); return result;
         }
+    }
+    if (!config.enforceContracts && operation == "+") {
+        auto isText = [&](const Value &value) { return std::holds_alternative<Object *>(value) && std::get<Object *>(value)->kind == Kind::String; };
+        if (isText(left) || isText(right)) return text(stringify(left, span) + stringify(right, span), false, span);
     }
     if (std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
         int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0;
@@ -1494,6 +1541,11 @@ void Runtime::executeDeclaration(const Ast &node, Object *environment) {
     else if (node->kind == "enum") {
         Object *enumeration = allocate(Kind::EnumType, node->span); enumeration->text = node->text; enumeration->code = node; enumeration->parent = environment;
         for (const Ast &variant : node->children) {
+            if (!config.enforceContracts && variant->names.empty()) {
+                Object *value = allocate(Kind::Variant, variant->span); value->origin = enumeration; value->text = variant->text;
+                define(enumeration, variant->text, value, false, "", variant->span);
+                continue;
+            }
             Object *constructor = allocate(Kind::Constructor, variant->span); constructor->origin = enumeration; constructor->text = variant->text; constructor->code = variant;
             define(enumeration, variant->text, constructor, false, "", variant->span);
         }

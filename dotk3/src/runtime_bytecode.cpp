@@ -109,9 +109,9 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 if (arm.pattern == "_") { wildcard = true; constructors.push_back(nullptr); continue; }
                 if (arm.pattern.find('.') == std::string::npos) throw Error(arm.span, "Expected qualified enum variant", "match");
                 Object *constructor = resolveObjectPath(arm.pattern, environment, arm.span);
-                if ((constructor->kind != Kind::Constructor && !(constructor->kind == Kind::Variant && constructor->origin == errorKindType)) || constructor->origin != value->origin) throw Error(location, "Pattern belongs to a different enum", "match");
+                if ((constructor->kind != Kind::Constructor && constructor->kind != Kind::Variant) || constructor->origin != value->origin) throw Error(location, "Pattern belongs to a different enum", "match");
                 if (!covered.insert(constructor).second) throw Error(location, "Duplicate match arm", "match");
-                if (arm.bindings.size() != constructor->code->names.size()) throw Error(arm.span, "Pattern payload arity mismatch", "match");
+                if (arm.bindings.size() != (constructor->code ? constructor->code->names.size() : 0)) throw Error(arm.span, "Pattern payload arity mismatch", "match");
                 constructors.push_back(constructor);
             }
             if (!wildcard) for (const auto &variant : value->origin->bindings) if (!covered.count(byteObject(variant.second.value, location))) throw Error(location, "Non-exhaustive match", "match");
@@ -245,6 +245,20 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         case ByteOp::JumpFalse: if (!boolean(frame.stack.back(), location)) cursor = instruction.operand; break;
         case ByteOp::JumpTrue: if (boolean(frame.stack.back(), location)) cursor = instruction.operand; break;
         case ByteOp::JumpPresent: if (!std::holds_alternative<std::monostate>(frame.stack.back())) cursor = instruction.operand; break;
+        case ByteOp::JumpNull: if (std::holds_alternative<std::monostate>(frame.stack.back())) cursor = instruction.operand; break;
+        case ByteOp::IntToFloat:
+            if (std::holds_alternative<int64_t>(frame.stack.back())) frame.stack.back() = static_cast<double>(std::get<int64_t>(frame.stack.back()));
+            break;
+        case ByteOp::NonNull:
+            if (std::holds_alternative<std::monostate>(frame.stack.back())) throw Error(location, "Non-null assertion failed: value is null", "value");
+            break;
+        case ByteOp::InstanceOf:
+            frame.stack.back() = valueMatches(frame.stack.back(), resolveContract(node->type, environment, location, true, true), location);
+            break;
+        case ByteOp::Cast:
+            if (!valueMatches(frame.stack.back(), resolveContract(node->type, environment, location, true, true), location))
+                throw Error(location, "Cannot cast " + typeOf(frame.stack.back()) + " to " + node->type, "type");
+            break;
         case ByteOp::SafePoint: collectionSafePoint(); break;
         case ByteOp::Return: return frame.stack.back();
         }

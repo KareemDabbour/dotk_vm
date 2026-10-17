@@ -15,10 +15,10 @@ else
 CXXFLAGS += -O2
 endif
 
-.PHONY: all library lsp example-native test test-lexer test-parser test-runtime test-profiler test-checker test-typer test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
+.PHONY: all library lsp example-native test test-lexer test-parser test-runtime test-profiler test-checker test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
 all: $(BUILD)/dotk3 $(BUILD)/dotk3-lsp
 
-$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/checker.o $(BUILD)/debugger.o $(BUILD)/main.o
+$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/checker.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/main.o
 	$(CXX) $^ $(LDFLAGS) $(CLI_LIBS) -o $@
 
 $(BUILD)/dotk3-lsp: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/checker.o $(BUILD)/semantic.o $(BUILD)/lsp_main.o
@@ -133,13 +133,16 @@ test-diagnostics: $(BUILD)/dotk3 test-lexer test-runtime
 test-network: $(BUILD)/dotk3
 	ruby tests/network.rb $(BUILD)/dotk3
 
+test-static: $(BUILD)/dotk3
+	sh tests/static.sh $(BUILD)/dotk3
+
 test-editor: $(BUILD)/dotk3-lsp
 	ruby tests/editor.rb
 	node --check editor/extension.js
 	node --check examples/browser_ui/app.js
 	node tests/editor_client.js
 
-test: test-lexer test-parser test-runtime test-profiler test-checker test-typer test-embedding test-generators test-tasks test-embedding-threads test-cli test-network test-debugger test-editor test-lsp
+test: test-lexer test-parser test-runtime test-profiler test-checker test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-network test-debugger test-editor test-lsp
 
 clean:
 	rm -rf build

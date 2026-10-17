@@ -116,7 +116,7 @@ int main() {
     assert(declarations->children[1]->typeParams.size() == 2 && declarations->children[2]->typeParams[0].name == "T" && declarations->children[3]->typeParams[0].name == "T");
     assert(declarations->children[4]->kind == "type_alias" && declarations->children[4]->text == "Point" && declarations->children[4]->typeExpr->items.size() == 2);
     assert(declarations->children[5]->kind == "type_alias" && declarations->children[5]->exported && declarations->children[5]->typeParams.size() == 1);
-    assert(declarations->children[6]->baseClass == "Base[Int]" && declarations->children[6]->typeExpr->name == "Base");
+    assert(declarations->children[6]->baseClass == "Base" && declarations->children[6]->typeExpr->items[0]->name == "Int");
 
     auto instantiation = parseSource("let a = first<Int>(items)\nlet b = Stack<Int>()\nlet c = List<Int>.of(1)\nlet d = x < y\nlet e = i < n && n > (j)\nlet f = (a < b) == (c > d)");
     assert(instantiation->children[0]->children[0]->kind == "call" && instantiation->children[0]->children[0]->children[0]->typeArgs.size() == 1);

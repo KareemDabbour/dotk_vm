@@ -1,5 +1,6 @@
 #include "runtime.hpp"
 #include "checker.hpp"
+#include "typer.hpp"
 #include "terminal.hpp"
 #include "socket_cli.hpp"
 #include "http_cli.hpp"
@@ -71,6 +72,7 @@ static const char *usage =
     "       dotk3 -e SOURCE [args...]\n"
     "       dotk3 - [args...]\n"
     "       dotk3 --check PATH [PATH...]\n"
+    "       dotk3 --static [usual CLI arguments] (type-check with the static typer; erases run-time type contracts)\n"
     "       dotk3 --ast FILE.k3\n"
     "       dotk3 --debug FILE.k3 [args...]\n"
     "       dotk3 --files-root DIR [usual CLI arguments]\n"
@@ -108,6 +110,37 @@ static bool debuggerStopped(const std::exception &error, const dk3::Debugger &de
     return debugger.quitting() && language && language->category == "cancelled" &&
         std::string(language->what()) == "Debugger stopped execution";
 }
+static bool staticTyping = false;
+
+static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
+    return [directory](const std::string &name) {
+        std::filesystem::path relative(name);
+        if (relative.is_absolute() || name.find("..") != std::string::npos)
+            throw std::runtime_error("Module paths must remain below the script directory");
+        std::string filename = name;
+        if (relative.extension() != ".k3") {
+            std::replace(filename.begin(), filename.end(), '.', '/'); filename += ".k3";
+        }
+        std::filesystem::path path = directory / filename;
+        return std::make_shared<const dk3::Source>(dk3::Source{path.string(), readFile(path)});
+    };
+}
+
+// Prints every diagnostic and returns true when there were no errors.
+static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory) {
+    bool clean = true;
+    for (const auto &diagnostic : dk3::typeCheck(program, moduleLoader(directory))) {
+        bool color = false;
+#ifndef _WIN32
+        const char *term = std::getenv("TERM");
+        color = isatty(STDERR_FILENO) && !std::getenv("NO_COLOR") && (!term || std::string(term) != "dumb");
+#endif
+        std::cerr << dk3::formatDiagnostic(diagnostic, color) << '\n';
+        if (!diagnostic.warning) clean = false;
+    }
+    return clean;
+}
+
 static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
     std::vector<std::filesystem::path> files; std::set<std::filesystem::path> seen;
     int exitCode = 0; bool expanded = inputs.size() > 1;
@@ -134,7 +167,12 @@ static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
             std::string text, filename = file == "-" ? "<stdin>" : file.string();
             if (file == "-") { std::ostringstream contents; contents << std::cin.rdbuf(); text = contents.str(); }
             else text = readFile(file);
-            dk3::check(dk3::parse(std::make_shared<dk3::Source>(dk3::Source{filename, text}))); passed++;
+            auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{filename, text}));
+            if (staticTyping) {
+                std::filesystem::path directory = file == "-" ? std::filesystem::current_path() : std::filesystem::absolute(file).parent_path();
+                if (!staticCheck(program, directory)) { if (!exitCode) exitCode = 65; continue; }
+            } else dk3::check(program);
+            passed++;
             std::cout << "check: PASS" << (expanded ? " " + filename : "") << '\n';
         } catch (const dk3::Error &error) { report(error); if (!exitCode) exitCode = 65; }
         catch (const std::exception &error) { report(error); exitCode = 70; }
@@ -243,6 +281,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> profileOutput, profileTrace;
     while (start < argc) {
         if (std::string(argv[start]) == "--net") { networkEnabled = true; start++; }
+        else if (std::string(argv[start]) == "--static") { staticTyping = true; start++; }
         else if (std::string(argv[start]) == "--profile") { profileOptions.source = true; start++; }
         else if (std::string(argv[start]) == "--profile-vm") {
             if (start + 1 >= argc || (std::string(argv[start + 1]) != "simple" && std::string(argv[start + 1]) != "verbose")) { std::cerr << usage; return 64; }
@@ -385,7 +424,13 @@ int main(int argc, char **argv) {
             if (astOnly) {
                 printAst(dk3::parse(source)); return 0;
             }
-            runtime = std::make_unique<dk3::Runtime>(config); runtime->run(text, filename);
+            runtime = std::make_unique<dk3::Runtime>(config);
+            if (staticTyping) {
+                if (!staticCheck(dk3::parse(source), directory)) { runtime.reset(); return 65; }
+                config.enforceContracts = false;
+                runtime = std::make_unique<dk3::Runtime>(config);
+            }
+            runtime->run(text, filename);
         } else runtime = std::make_unique<dk3::Runtime>(config);
         if (repl || interactiveAfter) exitCode = shell(runtime, config, terminal);
     } catch (const dk3::Error &error) {
