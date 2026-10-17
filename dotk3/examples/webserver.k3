@@ -1,14 +1,14 @@
-fn reply(client) -> Null {
+fn reply(client: Resource) -> Null {
     defer Sockets.close(client)
     let request = Http.readRequest(client)
     if request == null { return }
-    let path = request["target"]
+    let path = request["target"] as String
     if request["method"] == "GET" and path == "/" {
         Http.writeResponse(client, 200, "DotK 3 web server\n")
     } else if request["method"] == "GET" and path == "/health" {
         Http.writeResponse(client, 200, Json.stringify({"ok": true, "language": "DotK 3"}), "application/json")
     } else if request["method"] == "POST" and path == "/echo" {
-        Http.writeResponse(client, 200, request["body"], "application/octet-stream")
+        Http.writeResponse(client, 200, request["body"] as Bytes, "application/octet-stream")
     } else { Http.writeResponse(client, 404, "Not found\n") }
 }
 
@@ -32,7 +32,7 @@ if System.args.length() == 0 { System.print("webserver: use --net --steps 0 webs
 else {
     var port = 8080
     var limit = 0
-    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
-    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) as Int }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) as Int }
     serve(port, limit)
 }

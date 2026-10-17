@@ -1,27 +1,27 @@
 import model_types as model
 
-let scores: Map[String, Int] = {"Ada": 3, "Grace": 5}
+let scores: Map<String, Int> = {"Ada": 3, "Grace": 5}
 scores["Ada"] += 2
 scores["Linus"] = 7
 System.print(scores["Ada"], scores["Linus"])
 
-let groups: Map[String, List[Int]] = {"first": [1, 2]}
+let groups: Map<String, List<Int>> = {"first": [1, 2]}
 groups["first"].append(3)
 System.print(groups["first"])
 
-let positions: Map[String, model.Point?] = {
+let positions: Map<String, model.Point?> = {
     "origin": model.Point(0)
 }
 positions["missing"] = null
 positions["next"] = model.Point(4)
-System.print(positions["next"].x)
+System.print(positions["next"]!.x)
 
-fn dynamicValue() -> Any {
+fn dynamicValue() -> Object {
     return "not an Int"
 }
 
 try {
-    scores["wrong"] = dynamicValue()
+    scores["wrong"] = dynamicValue() as Int
 } catch error {
     System.print(error.kind, error.message)
 }

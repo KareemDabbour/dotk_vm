@@ -26,9 +26,9 @@ record Snapshot {
     """A snapshot of a counter`s state."""
     label: String, value: Int }
 let counter = Counter(label: "jobs", value: 2)
-let increment: Function = counter.add
+let increment: fn(Int) -> Int = counter.add
 System.gc()
-print(increment(amount: 3))
+print(increment(3))
 counter.value = 7
 for value in counter.values() { print(value) }
 print(counter.same() == counter, counter == Counter("jobs", 8))

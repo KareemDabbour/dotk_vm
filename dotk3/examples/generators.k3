@@ -28,7 +28,7 @@ fn guardedStream() {
             if number == 4 { break }
             yield number
         }
-        throw System.Error("demo", "end of stream")
+        throw Error(Error.Kind.Application, "end of stream")
     } catch error {
         yield error.message
     } finally {

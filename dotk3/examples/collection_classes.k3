@@ -1,11 +1,11 @@
 from System import print
 from Collections import List as Sequence, Map as Dictionary, Set as Unique
 
-class Inventory extends Sequence {
+class Inventory extends Sequence<String> {
     let owner: String
     var added: Int = 0
 
-    fn init(owner: String, initial: List[String] = []) -> Null {
+    fn init(owner: String, initial: List<String> = []) -> Null {
         super.init(initial)
         self.owner = owner
     }
@@ -16,28 +16,28 @@ class Inventory extends Sequence {
     }
 }
 
-class Scores extends Dictionary {
+class Scores extends Dictionary<String, Int> {
     fn increment(name: String) -> Int {
         return self.compute(name, fn(key: String, previous: Int?) -> Int => (previous ?? 0) + 1) ?? 0
     }
 }
 
-class Tags extends Unique {
+class Tags extends Unique<String> {
     let category: String = "inventory"
 }
 
 let inventory = Inventory("Ada", ["compass", "lantern"])
-let typedInventory: List[String] = inventory
+let typedInventory: List<String> = inventory
 let add = inventory.append
 System.gc()
 add("rope")
 print(inventory.owner, inventory.added, typedInventory)
 
-let scores: Map[String, Int] = Scores()
+let scores: Map<String, Int> = Scores()
 scores.computeIfAbsent("Ada", fn(key: String) -> Int => 0)
 print(scores.merge("Ada", 2, fn(previous: Int, added: Int) -> Int => previous + added))
 
-let tags: Set[String] = Tags(["tool", "tool", "light"])
+let tags: Set<String> = Tags(["tool", "tool", "light"])
 tags.add("travel")
 print(tags.values(), tags.intersection(Unique(["light", "travel"])).values())
 print(Collections.len(tags), Reflection.type(Sequence), Reflection.type(Dictionary), Reflection.type(Unique))

@@ -1,6 +1,6 @@
 from System import print
 
-let double: Function = fn(value: Int) -> Int => value * 2
+let double: fn(Int) -> Int = fn(value: Int) -> Int => value * 2
 
 fn makeAdder(base: Int) {
     return fn(value: Int) -> Int {

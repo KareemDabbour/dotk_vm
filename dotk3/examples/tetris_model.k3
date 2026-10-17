@@ -1,15 +1,15 @@
 export class Tetris {
     let width: Int
     let height: Int
-    var board: List[List[Int]] = []
-    var piece: List[List[Int]] = []
-    var nextPiece: List[List[Int]] = []
+    var board: List<List<Int>> = []
+    var piece: List<List<Int>> = []
+    var nextPiece: List<List<Int>> = []
     var x: Int = 3
     var y: Int = 0
     var score: Int = 0
     var lines: Int = 0
     var gameOver: Bool = false
-    private let shapes: List[List[List[Int]]] = [
+    private let shapes: List<List<List<Int>>> = [
         [[1,1,1,1]], [[2,0,0],[2,2,2]], [[0,0,3],[3,3,3]],
         [[4,4],[4,4]], [[0,5,5],[5,5,0]], [[0,6,0],[6,6,6]], [[7,7,0],[0,7,7]]
     ]
@@ -18,14 +18,14 @@ export class Tetris {
         if width < 4 or height < 4 { throw Error(Error.Kind.Value, "Board must be at least 4 by 4") }
         self.width = width
         self.height = height
-        self.board = Collections.range(height).map(fn(row: Int) -> List[Int] {
+        self.board = Collections.range(height).map(fn(row: Int) -> List<Int> {
             return Collections.range(width).map(fn(column: Int) -> Int => 0)
         })
         self.nextPiece = Random.choice(self.shapes)
         self.spawn()
     }
 
-    fn fits(piece: List[List[Int]], x: Int, y: Int) -> Bool {
+    fn fits(piece: List<List<Int>>, x: Int, y: Int) -> Bool {
         for row in Collections.range(piece.length()) {
             for column in Collections.range(piece[row].length()) {
                 if piece[row][column] != 0 {
@@ -58,7 +58,7 @@ export class Tetris {
         if self.gameOver { return false }
         let rows = self.piece.length()
         let columns = self.piece[0].length()
-        let turned: List[List[Int]] = Collections.range(columns).map(fn(column: Int) -> List[Int] {
+        let turned: List<List<Int>> = Collections.range(columns).map(fn(column: Int) -> List<Int> {
             return Collections.range(rows).map(fn(row: Int) -> Int => self.piece[rows - row - 1][column])
         })
         for kick in [0,-1,1,-2,2] {
@@ -72,7 +72,7 @@ export class Tetris {
     }
 
     fn clearRows() -> Int {
-        let remaining = self.board.filter(fn(row: List[Int]) -> Bool => row.contains(0))
+        let remaining = self.board.filter(fn(row: List<Int>) -> Bool => row.contains(0))
         let cleared = self.height - remaining.length()
         while remaining.length() < self.height {
             remaining.insert(0, Collections.range(self.width).map(fn(column: Int) -> Int => 0))
@@ -106,7 +106,7 @@ export class Tetris {
     }
 
     fn render() -> String {
-        let view = self.board.map(fn(row: List[Int]) -> List[Int] => List(row))
+        let view = self.board.map(fn(row: List<Int>) -> List<Int> => List(row))
         if not self.gameOver {
             for row in Collections.range(self.piece.length()) {
                 for column in Collections.range(self.piece[row].length()) {
@@ -114,7 +114,7 @@ export class Tetris {
                 }
             }
         }
-        let colors: List[String] = ["  ","\x1b[36m[]","\x1b[34m[]","\x1b[37m[]","\x1b[33m[]","\x1b[32m[]","\x1b[35m[]","\x1b[31m[]"]
+        let colors: List<String> = ["  ","\x1b[36m[]","\x1b[34m[]","\x1b[37m[]","\x1b[33m[]","\x1b[32m[]","\x1b[35m[]","\x1b[31m[]"]
         var output = f"TETRIS  Score {self.score}  Lines {self.lines}\n"
         for row in view {
             output += "|"

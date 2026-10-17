@@ -57,7 +57,7 @@ fn chat(host: String, port: Int) -> Null {
 if System.args.length() == 0 { System.print("chat_client: use --net --steps 0 chat_client.k3 connect HOST PORT; or send HOST PORT MESSAGE") }
 else {
     if System.args.length() < 3 { throw Error(Error.Kind.Value, "Expected mode, host and port") }
-    let port = Json.parse(System.args[2])
+    let port = Json.parse(System.args[2]) as Int
     if System.args[0] == "send" {
         if System.args.length() != 4 { throw Error(Error.Kind.Value, "Send needs one message") }
         sendMessage(System.args[1], port, System.args[3])

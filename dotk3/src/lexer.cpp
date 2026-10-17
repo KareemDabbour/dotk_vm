@@ -150,7 +150,7 @@ std::string diagnose(const Error &error, bool color) {
     if (category == "io") category = "IO";
     else if (category == "throw") category = "Thrown";
     else category[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(category[0])));
-    output << red << category << "Error" << reset << ": " << error.what() << '\n';
+    output << red << category << (error.category == "warning" ? "" : "Error") << reset << ": " << error.what() << '\n';
     const Span &span = error.span;
     output << cyan << "  --> " << (span.source ? span.source->file : "<host>") << ':' << span.line << ':' << span.column << reset << '\n';
     if (span.source) {

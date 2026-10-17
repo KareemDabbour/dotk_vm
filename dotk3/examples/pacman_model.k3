@@ -10,9 +10,9 @@ export class PacMan {
     let width: Int = 28
     let height: Int = 31
     let spawn: Int = 657
-    var board: List[String] = []
-    var neighbors: List[List[Int]] = []
-    var ghosts: List[Ghost] = []
+    var board: List<String> = []
+    var neighbors: List<List<Int>> = []
+    var ghosts: List<Ghost> = []
     var player: Int = 657
     var headingX: Int = 0
     var headingY: Int = 0
@@ -28,7 +28,7 @@ export class PacMan {
     var ticks: Int = 0
     var ghostBonus: Int = 200
     var status: String = "ready"
-    private let maze: List[String] = [
+    private let maze: List<String> = [
         "############################", "#............##............#",
         "#.####.#####.##.#####.####.#", "#.####.#####.##.#####.####.#",
         "#.####.#####.##.#####.####.#", "#..........................#",
@@ -67,8 +67,8 @@ export class PacMan {
         self.board[self.spawn] = " "
         for position in [29,54,813,838] { self.board[position] = "o" }
         self.pellets = self.board.filter(fn(tile: String) -> Bool => tile == "." or tile == "o").length()
-        self.neighbors = Collections.range(self.board.length()).map(fn(position: Int) -> List[Int] {
-            let adjacent: List[Int] = []
+        self.neighbors = Collections.range(self.board.length()).map(fn(position: Int) -> List<Int> {
+            let adjacent: List<Int> = []
             if self.board[position] != "#" {
                 for direction in [[0,-1],[0,1],[-1,0],[1,0]] {
                     let target = self.next(position, direction[0], direction[1])
@@ -107,10 +107,10 @@ export class PacMan {
         if self.status == "ready" { self.status = "playing" }
     }
 
-    fn distances(start: Int) -> List[Int] {
+    fn distances(start: Int) -> List<Int> {
         let distance = Collections.range(self.board.length()).map(fn(position: Int) -> Int => -1)
         if start < 0 or start >= self.board.length() or self.board[start] == "#" { return distance }
-        let queue: List[Int] = [start]
+        let queue: List<Int> = [start]
         var head = 0
         distance[start] = 0
         while head < queue.length() {
@@ -187,9 +187,9 @@ export class PacMan {
         self.collide()
     }
 
-    fn snapshot() -> Map[String, Any] {
+    fn snapshot() -> Map<String, Object?> {
         return {"width": self.width, "height": self.height, "board": self.board, "player": self.player,
-            "ghosts": self.ghosts.map(fn(ghost: Ghost) -> Map[String, Any] => {"position": ghost.position, "cooldown": ghost.cooldown}),
+            "ghosts": self.ghosts.map(fn(ghost: Ghost) -> Map<String, Object?> => {"position": ghost.position, "cooldown": ghost.cooldown}),
             "headingX": self.headingX, "headingY": self.headingY, "score": self.score, "best": self.best,
             "lives": self.lives, "level": self.level, "pellets": self.pellets, "power": self.power,
             "invulnerable": self.invulnerable, "status": self.status, "ticks": self.ticks}

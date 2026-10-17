@@ -1,6 +1,6 @@
 record Profile {
     name: String
-    labels: List[String] = []
+    labels: List<String> = []
 }
 
 record Point {
@@ -32,4 +32,4 @@ System.print(point == Point(3, y: 4))
 
 let found = Lookup.Found(first)
 System.print(displayName(found) ?? "not found")
-System.print(displayName(Lookup.Missing()) ?? "not found")
+System.print(displayName(Lookup.Missing) ?? "not found")

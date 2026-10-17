@@ -9,7 +9,7 @@ class Singleton {
         if Singleton.instance == null {
             Singleton.instance = Singleton(100)
         }
-        return Singleton.instance
+        return Singleton.instance!
     }
 
     public fn toString() -> String {

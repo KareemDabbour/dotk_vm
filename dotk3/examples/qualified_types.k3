@@ -12,6 +12,6 @@ fn coordinate(event: model.Event) -> Int? {
 }
 
 let point: model.Point = model.Point(x: 3)
-let events: List[model.Event] = [model.Event.Move(identity(point)), model.Event.Quit()]
+let events: List<model.Event> = [model.Event.Move(identity(point)), model.Event.Quit]
 for event in events { System.print(coordinate(event) ?? -1) }
 System.print(point.y)

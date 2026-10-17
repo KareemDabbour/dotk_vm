@@ -14,7 +14,7 @@ fn supervisor() {
     while true { yield null }
 }
 
-let family: Task = Tasks.spawn(supervisor())
+let family: Task<Null> = Tasks.spawn(supervisor())
 System.print("turns", Tasks.pump(5))
 Tasks.cancel(family)
 System.print("family", family.status)

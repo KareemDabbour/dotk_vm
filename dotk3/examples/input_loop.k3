@@ -5,22 +5,25 @@ if System.args.length() == 0 {
 } else {
     IO.Terminal.open()
     defer IO.Terminal.close()
-    var running: Bool = true
-    var ticks: Int = 0
+    class Session {
+        var running: Bool = true
+        var ticks: Int = 0
+    }
+    let session = Session()
     fn background() {
-        while running {
-            ticks += 1
+        while session.running {
+            session.ticks += 1
             yield null
         }
     }
     let work = Tasks.spawn(background())
     defer Tasks.cancel(work)
     IO.write("Keys are read without Enter; q or Ctrl-C exits.\n")
-    while running {
+    while session.running {
         let key: Int? = IO.Terminal.readKey(0)
         if key != null {
-            print(f"key={key}, ticks={ticks}")
-            if key == 113 or key == 3 { running = false }
+            print(f"key={key}, ticks={session.ticks}")
+            if key == 113 or key == 3 { session.running = false }
         }
         Tasks.pump(1)
         System.delay(10)

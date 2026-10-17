@@ -6,7 +6,7 @@ record Person {
     The tags collection remains mutable.
     """
     name: String
-    tags: List[String] = []
+    tags: List<String> = []
 }
 
 fn describe(person: Person) -> String {

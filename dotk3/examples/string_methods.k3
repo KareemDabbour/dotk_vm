@@ -3,7 +3,7 @@ from System import print
 let text = "alpha::beta::::gamma::"
 print(text.contains("beta"), text.startsWith("alpha"), text.endsWith("::"))
 print(text.find("beta"), text.find("missing"))
-let parts: List[String] = text.split("::")
+let parts: List<String> = text.split("::")
 print(parts, parts.length())
 print("|".join(parts))
 

@@ -1,5 +1,5 @@
-fn makeAdder(x) {
-  return fn (y) {
+fn makeAdder(x: Int) {
+  return fn (y: Int) {
     return x + y
   }
 }

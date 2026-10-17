@@ -1,7 +1,7 @@
 from System import print
 
 class Scores extends Object {
-    private let values: Map[String, Int] = {}
+    private let values: Map<String, Int> = {}
     fn __getitem__(name: String) -> Int { return self.values.get(name) ?? 0 }
     fn __setitem__(name: String, value: Int) -> Null { self.values[name] = value }
 }

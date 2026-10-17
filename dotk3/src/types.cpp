@@ -142,7 +142,7 @@ bool Types::isSubtype(Ty value, Ty target) {
     }
     if (target->tag == TypeTag::Union) {
         for (Ty member : target->args) if (isSubtype(value, member)) return true;
-        return false;
+        return value->tag == TypeTag::Var && value->result && isSubtype(value->result, target);
     }
     if (target->tag == TypeTag::Intersection) {
         for (Ty member : target->args) if (!isSubtype(value, member)) return false;

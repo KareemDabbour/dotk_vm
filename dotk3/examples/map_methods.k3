@@ -1,7 +1,7 @@
 from System import print
 
 record Entry { value: Int }
-let entries: Map[String, Entry?] = {
+let entries: Map<String, Entry?> = {
     "first": Entry(1),
     "empty": null,
     "last": Entry(3)
@@ -18,7 +18,7 @@ print(entries.keys(), entries.values())
 for key in entries.keys() { print(key, entries[key]) }
 print(Reflection.members(entries))
 
-let counters: Map[String, Int] = {}
+let counters: Map<String, Int> = {}
 print(counters.computeIfAbsent("visits", fn(key: String) -> Int => 0))
 print(counters.compute("visits", fn(key: String, previous: Int?) -> Int => (previous ?? 0) + 1))
 print(counters.computeIfPresent("visits", fn(key: String, previous: Int) -> Int => previous + 1))

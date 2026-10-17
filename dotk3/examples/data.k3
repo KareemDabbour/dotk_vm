@@ -17,4 +17,4 @@ fn destination(event: Event) -> Vec2? {
 
 let position = destination(Event.Move(Vec2(x: 1.0, y: 2.0)))
 System.print(position)
-System.print(destination(Event.Quit()))
+System.print(destination(Event.Quit))

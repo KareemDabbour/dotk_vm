@@ -7,7 +7,7 @@ trait Readable {
 }
 
 class Bag implements Sized, Readable {
-    let items: List[String] = []
+    let items: List<String> = []
 
     fn length() -> Int {
         return self.items.length()
@@ -27,7 +27,7 @@ fn describe(value: Readable) -> String {
 }
 
 let bag = Bag(["Ada", "Grace"])
-let sized: List[Sized] = [bag, [1, 2, 3], {"x": 1}, "abc"]
+let sized: List<Sized> = [bag, [1, 2, 3], {"x": 1}, "abc"]
 print(size(bag), len(bag), describe(bag))
 print(size(sized[1]), size(sized[2]), size(sized[3]))
 let read = bag.read
@@ -39,6 +39,6 @@ fn describeSized(value: Sized & Readable) -> String {
     return value.read() + " / " + Text.str(value.length())
 }
 let readableSized: Sized & Readable = bag
-let constrained: List[Sized & Readable] = [readableSized]
+let constrained: List<Sized & Readable> = [readableSized]
 let optional: (Sized & Readable)? = null
 print(describeSized(constrained[0]), optional)

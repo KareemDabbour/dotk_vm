@@ -669,6 +669,7 @@ private:
             const Member *member = findMember(module->info, node->names[index]);
             if (!member) {
                 Symbol *nested = lookup(module->info->name + "_" + node->names[index]);
+                if (!nested && module->info->name == "Collections") nested = lookup(node->names[index]);
                 if (nested && nested->kind == SymbolKind::Class) { Symbol alias = *nested; declareSymbol(node->names[index + 1], std::move(alias), node->span); continue; }
             }
             if (!member || !member->isStatic) { error(node->span, node->text + " has no member '" + node->names[index] + "'"); continue; }
@@ -1154,7 +1155,8 @@ private:
         if (operand->tag == TypeTag::Error || target->tag == TypeTag::Error) return target;
         if (!ty.isSubtype(operand, target) && !ty.isSubtype(target, operand) && !ty.isSubtype(ty.stripNull(target), ty.stripNull(operand)) && ty.stripNull(operand)->tag != TypeTag::Object)
             error(node->span, "Cannot cast " + show(operand) + " to " + show(target));
-        else if (target->tag == TypeTag::Named && !target->args.empty() && !ty.isSubtype(operand, target)) warn(node->span, "Unchecked cast to " + show(target) + "; only the erased type is checked at run time");
+        else if (target->tag == TypeTag::Named && !target->args.empty() && !ty.isSubtype(operand, target) &&
+                 !std::all_of(target->args.begin(), target->args.end(), [&](Ty argument) { return ty.isSubtype(ty.nullable(ty.object()), argument); })) warn(node->span, "Unchecked cast to " + show(target) + "; only the erased type is checked at run time");
         return target;
     }
 
@@ -1218,7 +1220,7 @@ private:
         ClassInfo *owner = classReference(node->children[0]);
         if (!owner) return nullptr;
         Symbol *nested = lookup(owner->name + "_" + node->text);
-        if (!nested && owner->name == "IO") nested = lookup(node->text);
+        if (!nested && (owner->name == "IO" || owner->name == "Collections")) nested = lookup(node->text);
         return nested && nested->kind == SymbolKind::Class ? nested->info : nullptr;
     }
 
@@ -1439,7 +1441,7 @@ std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader
 }
 
 std::string formatDiagnostic(const Diagnostic &diagnostic, bool color) {
-    return diagnose(Error(diagnostic.span, diagnostic.message, "type"), color);
+    return diagnose(Error(diagnostic.span, diagnostic.message, diagnostic.warning ? "warning" : "type"), color);
 }
 
 }

@@ -1,4 +1,4 @@
-fn total(values: List[Int]) -> Int {
+fn total(values: List<Int>) -> Int {
     var sum = 0
     for value in values {
         sum += value

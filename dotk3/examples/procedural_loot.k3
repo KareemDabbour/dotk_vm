@@ -9,13 +9,13 @@ record Loot {
 }
 
 seed(2026)
-let names: List[String] = ["Compass", "Lantern", "Boots", "Cloak", "Charm"]
-let loot: List[Loot] = Collections.range(8).map(fn(slot: Int) -> Loot {
+let names: List<String> = ["Compass", "Lantern", "Boots", "Cloak", "Charm"]
+let loot: List<Loot> = Collections.range(8).map(fn(slot: Int) -> Loot {
     return Loot(choice(names), draw(1, 11))
 })
 let useful = loot.filter(fn(item: Loot) -> Bool => item.power >= 6)
 shuffle(useful)
-let labels: List[String] = useful.map(fn(item: Loot) -> String {
+let labels: List<String> = useful.map(fn(item: Loot) -> String {
     return item.name + " (" + Text.str(item.power) + ")"
 })
 print("Treasure:", ", ".join(labels))

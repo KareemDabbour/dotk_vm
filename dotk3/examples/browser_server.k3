@@ -1,20 +1,25 @@
 from pacman_model import PacMan
 
-fn reply(client, game: PacMan, assets: Map[String, Any]) -> Null {
+record Asset {
+    body: Bytes
+    mime: String
+}
+
+fn reply(client: Resource, game: PacMan, assets: Map<String, Asset>) -> Null {
     defer Sockets.close(client)
     try {
         let request = Http.readRequest(client, 100)
         if request == null { return }
-        let path = request["target"]
-        let method = request["method"]
+        let path = request["target"] as String
+        let method = request["method"] as String
         if method == "GET" and assets.contains(path) {
             let asset = assets[path]
-            Http.writeResponse(client, 200, asset[0], asset[1])
+            Http.writeResponse(client, 200, asset.body, asset.mime)
         } else if method == "GET" and path == "/api/state" {
             Http.writeResponse(client, 200, Json.stringify(game.snapshot()), "application/json")
         } else if method == "POST" and path == "/api/action" {
-            let payload = Json.parse(Text.decode(request["body"]))
-            game.action(payload["action"])
+            let payload = Json.parse(Text.decode(request["body"] as Bytes)) as Map<String, Object?>
+            game.action(payload["action"] as String)
             Http.writeResponse(client, 200, Json.stringify(game.snapshot()), "application/json")
         } else if path == "/api/state" or path == "/api/action" {
             Http.writeResponse(client, 405, "Method not allowed\n")
@@ -26,12 +31,12 @@ fn reply(client, game: PacMan, assets: Map[String, Any]) -> Null {
 
 fn serve(port: Int, limit: Int) -> Null {
     if limit < 0 { throw Error(Error.Kind.Value, "Request limit cannot be negative") }
-    let assets: Map[String, Any] = {
-        "/": [Files.readBytes("index.html"), "text/html; charset=utf-8"],
-        "/app.css": [Files.readBytes("app.css"), "text/css; charset=utf-8"],
-        "/app.js": [Files.readBytes("app.js"), "application/javascript"],
-        "/icons.js": [Files.readBytes("lucide.min.js"), "application/javascript"],
-        "/arcade.woff2": [Files.readBytes("oxanium.woff2"), "font/woff2"]
+    let assets: Map<String, Asset> = {
+        "/": Asset(body: Files.readBytes("index.html"), mime: "text/html; charset=utf-8"),
+        "/app.css": Asset(body: Files.readBytes("app.css"), mime: "text/css; charset=utf-8"),
+        "/app.js": Asset(body: Files.readBytes("app.js"), mime: "application/javascript"),
+        "/icons.js": Asset(body: Files.readBytes("lucide.min.js"), mime: "application/javascript"),
+        "/arcade.woff2": Asset(body: Files.readBytes("oxanium.woff2"), mime: "font/woff2")
     }
     let game = PacMan()
     let server = Sockets.listen("127.0.0.1", port)
@@ -52,7 +57,7 @@ if System.args.length() == 0 { System.print("browser_server: use --net --files-r
 else {
     var port = 8081
     var limit = 0
-    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
-    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) as Int }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) as Int }
     serve(port, limit)
 }

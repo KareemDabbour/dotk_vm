@@ -4,10 +4,10 @@ class Peer {
     let connection: Resource
     var name: String = "guest"
     let incoming: LineBuffer = LineBuffer()
-    constructor(connection) -> Null { self.connection = connection }
+    constructor(connection: Resource) -> Null { self.connection = connection }
 }
 
-fn broadcast(peers: List[Peer], message: String) -> Null {
+fn broadcast(peers: List<Peer>, message: String) -> Null {
     for peer in peers {
         if not peer.connection.closed {
             try { Sockets.send(peer.connection, message + "\n", 100) }
@@ -20,7 +20,7 @@ fn serve(port: Int, limit: Int) -> Null {
     if limit < 0 { throw Error(Error.Kind.Value, "Message limit cannot be negative") }
     let server = Sockets.listen("127.0.0.1", port)
     defer Sockets.close(server)
-    var peers: List[Peer] = []
+    var peers: List<Peer> = []
     var messages = 0
     IO.write(f"CHAT listening 127.0.0.1:{Sockets.port(server)}\n")
     while limit == 0 or messages < limit {
@@ -67,7 +67,7 @@ if System.args.length() == 0 { System.print("chat_server: use --net --steps 0 ch
 else {
     var port = 9090
     var limit = 0
-    if System.args.length() > 1 { port = Json.parse(System.args[1]) }
-    if System.args.length() > 2 { limit = Json.parse(System.args[2]) }
+    if System.args.length() > 1 { port = Json.parse(System.args[1]) as Int }
+    if System.args.length() > 2 { limit = Json.parse(System.args[2]) as Int }
     serve(port, limit)
 }

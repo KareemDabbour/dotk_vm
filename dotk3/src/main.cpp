@@ -127,9 +127,10 @@ static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
 }
 
 // Prints every diagnostic and returns true when there were no errors.
-static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory, std::map<std::string, dk3::Ast> *modules = nullptr) {
+static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory, std::map<std::string, dk3::Ast> *modules = nullptr, bool showWarnings = false) {
     bool clean = true;
     for (const auto &diagnostic : dk3::typeCheck(program, moduleLoader(directory), modules)) {
+        if (diagnostic.warning && !showWarnings) continue;
         bool color = false;
 #ifndef _WIN32
         const char *term = std::getenv("TERM");
@@ -170,7 +171,7 @@ static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
             auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{filename, text}));
             if (staticTyping) {
                 std::filesystem::path directory = file == "-" ? std::filesystem::current_path() : std::filesystem::absolute(file).parent_path();
-                if (!staticCheck(program, directory)) { if (!exitCode) exitCode = 65; continue; }
+                if (!staticCheck(program, directory, nullptr, true)) { if (!exitCode) exitCode = 65; continue; }
             } else dk3::check(program);
             passed++;
             std::cout << "check: PASS" << (expanded ? " " + filename : "") << '\n';
