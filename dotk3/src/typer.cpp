@@ -531,7 +531,7 @@ private:
                     std::vector<Ty> hints = parameter->args; Ty resultHint = parameter->result;
                     if (containsVar(resultHint, variables)) resultHint = ty.substitute(resultHint, fromExpected);
                     if (containsVar(resultHint, variables)) resultHint = nullptr;
-                    argumentTypes[index] = lambdaExpression(argument, hints, resultHint);
+                    argumentTypes[index] = lambdaExpression(argument, hints, resultHint, variables);
                 } else argumentTypes[index] = expr(argument, containsVar(parameter, variables) ? nullptr : parameter);
                 unify(parameters[static_cast<size_t>(target[index])], argumentTypes[index], bindings, variables);
             }
@@ -553,12 +553,12 @@ private:
         return ty.substitute(result, bindings);
     }
 
-    Ty lambdaExpression(const Ast &node, const std::vector<Ty> &hints, Ty resultHint) {
+    Ty lambdaExpression(const Ast &node, const std::vector<Ty> &hints, Ty resultHint, const std::vector<Ty> &unresolved = {}) {
         std::vector<Ty> parameters;
         for (size_t index = 0; index < node->parameters.size(); index++) {
             const Parameter &parameter = node->parameters[index];
             if (parameter.typeExpr) parameters.push_back(resolveType(parameter.typeExpr));
-            else if (index < hints.size() && hints[index]->tag != TypeTag::Var) parameters.push_back(hints[index]);
+            else if (index < hints.size() && !containsVar(hints[index], unresolved)) parameters.push_back(hints[index]);
             else { error(node->span, "Cannot infer the type of parameter '" + parameter.name + "'; annotate it"); parameters.push_back(ty.error()); }
         }
         Ty declared = node->typeExpr ? resolveType(node->typeExpr) : resultHint;

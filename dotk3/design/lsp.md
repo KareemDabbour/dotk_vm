@@ -1,7 +1,7 @@
 # Initial Language Server
 
-`dotk3-lsp` is a separate stdio LSP executable linking only lexer, parser and
-checker/member-resolution code. It never creates a Runtime or executes source. The transport uses
+`dotk3-lsp` is a separate stdio LSP executable linking only lexer, parser, typer and
+member-resolution code. It never creates a Runtime or executes source. The transport uses
 JSON-RPC Content-Length framing and the pinned nlohmann/json parser. Protocol
 messages are the only stdout output; fatal transport errors go to stderr.
 
@@ -10,7 +10,7 @@ messages are the only stdout output; fatal transport errors go to stderr.
 - Initialize/shutdown/exit and protocol error responses.
 - Open/close/save notifications and full-document change synchronization.
 - Owned URI/text/version snapshots; stale changes are ignored.
-- Parser/checker diagnostics for unsaved buffers, cleared after fixes/close.
+- Parser and typer diagnostics (errors and warnings, imports resolved from open documents first) for unsaved buffers, cleared after fixes/close.
 - Synchronized typed-map/list diagnostics: literal/default/return values, key/index
 	types and typed list append arguments where their contracts are known.
 - UTF-16 positions, including non-BMP Unicode and CRLF line endings.
@@ -31,7 +31,7 @@ messages are the only stdout output; fatal transport errors go to stderr.
 - Initializer hook diagnostics, trait-default body checks/self and inherited
 	default completion, and immutable record field/method outlines and discovery.
 - Shared map contains/remove/keys/values signatures, primitive/typed key and arity
-	diagnostics, snapshot List[K]/List[V] results and known indexed element discovery.
+	diagnostics, snapshot List<K>/List<V> results and known indexed element discovery.
 - Shared list insert/removeAt/extend signatures, index/element/arity checks,
 	known removed-element discovery and live extension error clearing.
 - List contains/indexOf/clear/reverse and Map clear/get signatures; nullable get

@@ -165,11 +165,17 @@ Task inspection copies bounded active-scheduler metadata and parent identities
 into snapshots. Console layout and source-context rendering remain in the
 debugger adapter rather than the evaluator. Module/source files use `.k3`.
 
-The checker reads declaration ASTs for known record/function constructors, record
-fields/defaults, enum payloads and local match coverage. Named custom types resolve
-through lexical symbol scopes. Match payload bindings preserve annotations; result
-branches retain simple nullable types. Dynamic/module-derived cases remain Any.
-The CLI batches checker calls per file without constructing/executing a Runtime.
+Static typing: src/types.{hpp,cpp} intern types and implement subtyping (unions,
+wildcards, Int<:Float, erased generics); src/typer.{hpp,cpp} is the single checker.
+It parses the core library from src/prelude.hpp (bodiless stub syntax), resolves
+the user-module graph through a loader, infers locals/lambdas bidirectionally,
+narrows nullable flow, and annotates the AST (resolved types, Int->Float widening,
+numeric operand kinds, native call targets). Every run, REPL submission (via the
+stateful TypeSession), --check and LSP document goes through it before execution;
+checked programs run with Config::enforceContracts=false so annotations are erased
+and the compiler emits slot-only frames, copy-captured closures, typed Float
+opcodes and CallNative/CallMethod for statically resolved core calls. The embedding
+API still runs unchecked, contract-enforcing code.
 The declarative optional .k3 syntax contribution is independent of the LSP client.
 The editor contribution now includes an optional languageclient adapter. A separate
 frontend-only `dotk3-lsp` executable owns versioned document snapshots and speaks

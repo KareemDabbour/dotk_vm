@@ -33,6 +33,44 @@ line input. No CMake is required. `MODE=stress` currently
 means unoptimized UBSan, not collect-on-every-allocation or ASan. The C fixture
 links against `build/<mode>/libdotk3.a` without the CLI entrypoint.
 
+## Static Typing
+
+DotK 3 is statically typed with local inference. Every program, module, REPL
+submission and LSP document is type-checked before it runs; a program with type
+errors never executes. Annotations are erased at run time (`Int` arithmetic and
+`Float` arithmetic use typed instructions and slot-only frames), so there are no
+run-time contracts for checked code.
+
+```text
+fn first<T>(items: List<T>) -> T? { return items.find(fn(item) => true) }
+type Pair<T> = Map<String, T>
+enum Shape { Circle(Float), Empty }              // payload-less variants are values
+class Stack<T extends Object> { var items: List<T> = [] }
+
+let xs = [1, 2, 3]                                // List<Int>, inferred
+let ys: List<Float> = [1, 2]                      // Int widens to Float
+let n: Int? = null
+if n != null { System.print(n + 1) }              // flow narrowing
+let boxed = Json.parse("[1]") as List<Object?>    // checked cast (erased generics warn)
+System.print(xs[0]?.toString() ?? "none")         // ?. and ?? on nullable values
+```
+
+- Top type is `Object` (`Object?` with null). Unions `A | B`, `T?`, enums and
+  `type` aliases are supported; so are `fn(A) -> R` function types, `<T>` generics
+  with `T extends Bound`, and wildcards `? extends T` / `? super T`. Generics are
+  erased and invariant; `Int` widens to `Float` implicitly.
+- `is` narrows, `as` is a checked cast (`Error.Kind.Type` on failure), `x!` asserts
+  non-null, and `x?.m()` short-circuits on null.
+- Named function parameters and fields need annotations. Locals, lambda
+  parameters, lambda results and non-recursive function results are inferred,
+  using the expected type where there is one.
+- Closures capture by value, so captured locals must be effectively final.
+- Collections remain subclassable (`class Inventory extends List<String>`).
+- `String + value` concatenates by calling the value's `toString`.
+- `Json.parse` and `Reflection.binding` return `Object?`; use `as` to narrow.
+- The embedding C API still executes dynamic (contract-checked) code; typed
+  native signatures are not wired through the C ABI yet.
+
 ## New Basics
 
 ### Execution and Optimization
@@ -91,7 +129,7 @@ let immutable = 42
 var mutable = 0
 mutable += 1
 
-let values: List[Int] = [1, 2, 3]
+let values: List<Int> = [1, 2, 3]
 let mapping = {"answer": immutable}
 let pair = (1, "one")
 System.print(values[::-1])
@@ -136,8 +174,8 @@ Not every value is a heap object: Int/Float/Bool remain unboxed variant values.
 Object is the common logical non-null annotation and open class root, exported
 bare and as System.Object. User classes and collection classes inherit the root;
 primitives/records/resources may satisfy Object without boxing or losing their
-existing equality semantics. Object? accepts null. Any remains unconstrained,
-including null. Qualified/imported Object aliases have the same contract.
+existing equality semantics. `Object?` accepts null and is the top type; there is
+no `Any`. Qualified/imported Object aliases have the same contract.
 
 ```text
 let name: String = "Ada"
@@ -470,21 +508,20 @@ Anonymous functions use `fn` without a name, with a block or expression body:
 let add = fn(first: Int, second: Int = 2) -> Int {
   return first + second
 }
-let double: Function = fn(value: Int) -> Int => value * 2
+let double: fn(Int) -> Int = fn(value: Int) -> Int => value * 2
 System.print(add(second: 3, first: 1), double(4))
 fn(value: Int) -> Null { System.print(value) }(7)
 ```
 
-They capture lexical bindings, support ordinary annotations/defaults/named/rest
+They capture by value: a captured local must be effectively final (use a class or
+list for shared mutable state). They support ordinary annotations/defaults/named/rest
 arguments, and may yield as generators. Captured values remain GC-rooted when a
 closure escapes its defining function. Leading block-body docstrings are available
 through Reflection.doc. Standalone function expressions and immediate calls work
 in scripts and the REPL; `=>` returns its expression without an explicit return.
 
-The checker validates direct anonymous calls and immutable bindings initialized
-with a literal, including Function-annotated bindings. Mutable, aliased and
-dynamically returned callable signatures remain conservative/runtime-checked.
-LSP hover shows known anonymous signatures; typed result/member discovery and
+Function types are written `fn(A, B) -> R`; the typer checks every call and
+assignment against them. LSP hover shows known anonymous signatures; typed result/member discovery and
 parameter scopes work inside block/arrow bodies without leaking past the function.
 There is no alternate bare `(x) => ...` syntax. See
 [examples/anonymous_functions.k3](examples/anonymous_functions.k3).
@@ -619,7 +656,7 @@ parameters/returns and nullable/list/tuple element contracts:
 ```text
 import model_types as model
 let point: model.Point = model.Point(3)
-let events: List[model.Event] = [model.Event.Move(point)]
+let events: List<model.Event> = [model.Event.Move(point)]
 ```
 
 Record/enum checks use declaration identity, not only the short display name.
@@ -628,13 +665,13 @@ are resolved at binding/call boundaries; bindings and typed lists retain their
 resolved type identity, so rebinding a type alias cannot change an existing
 contract. GC traces contract type references. Enum patterns such as
 `model.Event.Move(point)` also resolve constructors by identity. Single-element
-`List[T]`/`Tuple[T]` and `Map[K,V]` contracts are supported; custom generic types
+`List<T>`/`Tuple<T>` and `Map<K,V>` contracts are supported; custom generic types
 are rejected rather than silently treated as enforced. This is not complete
 generic typing or cross-module static inference. See
 [examples/qualified_types.k3](examples/qualified_types.k3).
 
 Typed maps validate existing entries, indexed reads, insertions and replacements.
-Keys must be primitive values; key annotations support Any, Int, Float, Bool,
+Keys must be primitive values; key annotations support Int, Float, Bool,
 Null, String and Bytes (including nullable forms). Values can have nested collection
 or qualified record/enum contracts. Aliases cannot attach conflicting contracts.
 Validation stages collection annotations and commits them only when the entire
@@ -645,7 +682,7 @@ See [examples/typed_maps.k3](examples/typed_maps.k3).
 Maps expose member-style operations in addition to indexing and `.length()`:
 
 ```text
-let data: Map[String, Int?] = {"present": null, "number": 3}
+let data: Map<String, Int?> = {"present": null, "number": 3}
 System.print(data.contains("present"), data.contains("missing"))
 let before = data.values()
 System.print(data.remove("present"), data.remove("present"))
@@ -657,7 +694,7 @@ reports whether an entry was removed; absent keys return false. Both validate
 primitive/typed keys before inspecting or mutating entries. Failed validation leaves
 the map unchanged, and removal preserves remaining insertion order and contracts.
 
-`keys() -> List[K]` and `values() -> List[V]` return eager, independent list snapshots
+`keys() -> List<K>` and `values() -> List<V>` return eager, independent list snapshots
 in insertion order. Snapshots preserve pinned contracts even for empty maps and
 keep managed entries/nominal types alive across GC. Copies are shallow: referenced
 objects remain shared, but later map insertion/removal does not resize an existing
@@ -679,7 +716,7 @@ Maps also expose five positional-only update operations:
 | `merge(key, value, callback)` | Stores a non-null incoming value when absent/null; otherwise callback(previous, incoming) supplies the replacement or null removal |
 
 ```text
-let counts: Map[String, Int] = {}
+let counts: Map<String, Int> = {}
 counts.computeIfAbsent("visits", fn(key: String) -> Int => 0)
 counts.compute("visits", fn(key: String, previous: Int?) -> Int => (previous ?? 0) + 1)
 counts.merge("visits", 2, fn(previous: Int, added: Int) -> Int => previous + added)
@@ -703,7 +740,7 @@ See [examples/map_methods.k3](examples/map_methods.k3).
 ### List Mutation
 
 ```text
-let values: List[Int] = [1, 3]
+let values: List<Int> = [1, 3]
 values.insert(1, 2)
 let removed: Int = values.removeAt(-1)
 values.extend((4, 5))
@@ -770,8 +807,8 @@ Lists now provide seven positional-only operations:
 | `findIndex(predicate)` | First matching zero-based position or -1 |
 
 ```text
-let values: List[Int] = [1, 2, 3, 4]
-let doubled: List[Int] = values.map(fn(value: Int) -> Int => value * 2)
+let values: List<Int> = [1, 2, 3, 4]
+let doubled: List<Int> = values.map(fn(value: Int) -> Int => value * 2)
 let even = values.filter(fn(value: Int) -> Bool => value % 2 == 0)
 let total = even.reduce(fn(sum: Int, value: Int) -> Int => sum + value, 0)
 ```
@@ -837,7 +874,7 @@ from Bytes or other values. Matching is exact and case-sensitive, without Unicod
 normalization. Empty needles/prefixes/suffixes match. `find(needle) -> Int` returns
 the first Unicode code-point index or -1, not a UTF-8 byte offset.
 
-`split(separator) -> List[String]` requires a nonempty String separator, preserving
+`split(separator) -> List<String>` requires a nonempty String separator, preserving
 leading/trailing/repeated empty fields. Empty input produces one empty field;
 an absent separator produces one field containing the source. Result lists retain
 String element contracts across GC and mutation.
@@ -895,8 +932,8 @@ I/O are not implemented. See [examples/files.k3](examples/files.k3).
 ## JSON Interchange
 
 ```text
-let document: Map[String, Any] = Json.parse("""{"count":9007199254740993,"tags":["active",null]}""")
-document["tags"].append("verified")
+let document = Json.parse("""{"count":9007199254740993,"tags":["active",null]}""") as Map<String, Object?>
+(document["tags"] as List<Object?>).append("verified")
 System.print(Json.stringify(document))
 ```
 
@@ -1112,15 +1149,11 @@ dotk3/build/release/dotk3 --check first.k3 second.k3
 Directory traversal checks `.k3` files in sorted order, deduplicates normalized
 paths, reports errors across files, and prints a pass count. An empty directory
 fails with usage status 64; language errors return 65 and host/file errors 70.
-Files are checked independently; imported module interfaces are not resolved.
-The checker covers lexical names, immutable writes, control-flow placement,
-annotations, known function/record/enum arguments, record defaults/fields, typed
-enum payload bindings and locally known match coverage. Unknown/dynamic member
-types remain Any. It is not a full inference engine or null-flow/soundness proof;
-runtime validation remains authoritative. `--ast` prints the source-spanned tree.
-Known collection literals, defaults/returns, typed map/list indexes and typed list
-append arguments receive additional checks. The LSP uses the same checker and
-publishes/clears these collection diagnostics on unsaved edits.
+Every run, `--check`, REPL submission and LSP document goes through the static
+typer (see Static Typing); imported modules are type-checked with the importing
+program, and warnings are printed only by `--check`. `--ast` prints the
+source-spanned tree. The LSP publishes the typer's errors and warnings on unsaved
+edits; completion and hover still use the lighter syntactic index.
 There is no formatter or general semantic navigation yet.
 
 Optional `.k3` VS Code syntax/configuration and LSP client support live under
@@ -1277,9 +1310,9 @@ class Counter {
   }
 }
 let counter = Counter(value: 2)
-let increment: Function = counter.add
+let increment: fn(Int) -> Int = counter.add
 System.gc()
-System.print(increment(amount: 3))
+System.print(increment(3))
 ```
 
 Construction uses declared fields in order, with positional/named arguments and
@@ -1371,14 +1404,14 @@ and existing zero-argument init hooks continue to work.
 ```text
 class Inventory extends Collections.List {
   let owner: String
-  constructor(owner: String, initial: List[String] = []) -> Null {
+  constructor(owner: String, initial: List<String> = []) -> Null {
     super.init(initial)
     self.owner = owner
   }
   fn append(value: String) -> Null { super.append(value) }
 }
-let inventory: List[String] = Inventory("Ada", ["compass"])
-let tags: Set[String] = Set(["tool", "tool", "light"])
+let inventory: List<String> = Inventory("Ada", ["compass"])
+let tags: Set<String> = Set(["tool", "tool", "light"])
 tags.add("travel")
 System.print(tags.values())
 ```
@@ -1392,14 +1425,14 @@ fields must have defaults. Native override arity/result categories are checked a
 element/key contracts remain runtime-authoritative. Intrinsic indexing uses physical
 storage bounds; Collections.len respects an overridden length method.
 
-Qualified annotations such as Collections.List[Int] and imported constructor aliases
+Qualified annotations such as Collections.List<Int> and imported constructor aliases
 resolve to the same collection contract. Mutations preserve invariant contracts.
 Copies/slices/snapshots return base collections, not implicitly reconstructed subclasses.
 Tuple(iterable) constructs immutable element storage; subclasses can still have their
 own typed fields. Class methods/static fields/subtype identity are GC-traced and
 reflected without exposing native pointers.
 
-Set[T] preserves insertion order, suppresses duplicates using normal equality,
+Set<T> preserves insertion order, suppresses duplicates using normal equality,
 and supports add/remove/contains/clear, values snapshots, union/intersection/difference
 and isSubsetOf. Add/remove return whether membership changed. Algebra returns new
 base Sets preserving the left set's element contract; values returns a typed List.
@@ -1494,7 +1527,7 @@ trait Named { fn name() -> String }
 fn inspect(value: Sized & Named) -> String {
   return value.name() + " / " + Text.str(value.length())
 }
-let values: List[Sized & Named] = []
+let values: List<Sized & Named> = []
 let optional: (Sized & Named)? = null
 ```
 
@@ -1513,7 +1546,7 @@ runtime validation is authoritative. See [examples/traits.k3](examples/traits.k3
 ```text
 from Collections import Sized
 class Bag implements Sized {
-  let items: List[Int] = []
+  let items: List<Int> = []
   fn length() -> Int { return self.items.length() }
 }
 fn size(value: Sized) -> Int { return value.length() }

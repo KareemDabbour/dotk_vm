@@ -25,10 +25,10 @@
         "2": { "name": "constant.other.enum.dotk3" }
       }
     },
-    { "name": "keyword.control.dotk3", "match": "\\b(?:let|var|fn|constructor|record|class|public|protected|private|static|extends|trait|impl|implements|if|else|while|for|in|return|yield|throw|defer|break|continue|try|catch|finally|import|from|as|export|match|and|or|not|enum)\\b" },
+    { "name": "keyword.control.dotk3", "match": "\\b(?:let|var|fn|constructor|record|class|public|protected|private|static|extends|trait|impl|implements|if|else|while|for|in|return|yield|throw|defer|break|continue|try|catch|finally|import|from|as|is|type|export|match|and|or|not|enum)\\b" },
     { "name": "variable.language.dotk3", "match": "\\b(?:self|super)\\b" },
     { "name": "constant.language.dotk3", "match": "\\b(?:true|false|null)\\b" },
-    { "name": "support.type.dotk3", "match": "\\b(?:Object|Int|Float|Bool|String|Bytes|Null|Any|List|Tuple|Map|Set|Function|Generator|Task|Resource|Error)\\b" },
+    { "name": "support.type.dotk3", "match": "\\b(?:Object|Int|Float|Bool|String|Bytes|Null|List|Tuple|Map|Set|Iterable|Generator|Task|Resource|Error)\\b" },
     { "name": "support.class.module.dotk3", "match": "\\b(?:System|IO|Reflection|Collections|Text|Math|Tasks|Files|Json|Random|Terminal|Sockets|Http|Requests)\\b" },
     { "name": "support.function.dotk3", "match": "\\b(?:print|len|type|members|binding|bindings|str|range|encode|decode|toInt|toFloat|gc|close|spawn|pump|cancel)\\b" },
     { "name": "constant.numeric.dotk3", "match": "\\b(?:0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\\b" },
