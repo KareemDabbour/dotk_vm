@@ -35,6 +35,11 @@ private:
     std::unique_ptr<Impl> impl;
 };
 
+// Editor queries. Both re-parse `source` and type-check it with a private checker, so they never touch the caller's tree.
+struct CompletionItem { std::string label, detail, documentation; int kind = 5; };
+std::vector<CompletionItem> completeMembers(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader);
+std::string hoverText(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader);
+
 std::string formatDiagnostic(const Diagnostic &diagnostic, bool color = false);
 
 }

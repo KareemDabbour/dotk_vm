@@ -150,6 +150,198 @@ public:
         problem = diagnostics[before].message; diagnostics.resize(before); return false;
     }
 
+
+    // ---- editor queries ---------------------------------------------------------------------
+
+    std::string describeFunction(const std::string &name, const Ast &node, Ty type = nullptr) const {
+        std::string result = "fn " + name + "(";
+        for (const auto &parameter : node->parameters) { if (result.back() != '(') result += ", "; result += parameter.name + (parameter.type.empty() ? "" : ": " + parameter.type); }
+        result += ')';
+        if (type && type->tag == TypeTag::Function) result += " -> " + ty.show(type->result);
+        else if (!node->type.empty()) result += " -> " + node->type;
+        return result;
+    }
+
+    std::string describeDeclaration(const Ast &node, Ty type) const {
+        std::string result = node->kind + " " + node->text;
+        if (node->kind == "binding") {
+            result = std::string(node->exported ? "export " : "") + (node->mutableBinding ? "var " : "let ") + node->text + ": " + (type ? ty.show(type) : node->type);
+            const Ast &initializer = node->children.empty() ? nullptr : node->children[0];
+            if (initializer && initializer->kind == "literal" && initializer->span.source && initializer->span.length <= 80) {
+                std::string text = initializer->span.source->text.substr(initializer->span.offset, initializer->span.length);
+                if (text.find_first_of("\r\n") == std::string::npos) result += " = " + text;
+            }
+            result += node->typeExpr ? "\nDeclared type" : "\nType inferred from initializer";
+            if (initializer && initializer->kind == "function") result += "\n" + describeFunction(node->text, initializer, initializer->resolved);
+        }
+        if (!node->baseClass.empty()) result += " extends " + node->baseClass;
+        if ((node->kind == "class" || node->kind == "record") && !node->names.empty()) {
+            result += " implements ";
+            for (size_t index = 0; index < node->names.size(); index++) { if (index) result += ", "; result += node->names[index]; }
+        }
+        if (node->kind == "record" || node->kind == "class") {
+            result += " {";
+            for (const auto &parameter : node->parameters) result += std::string("\n  ") + (node->kind == "class" ? (parameter.mutableBinding ? "var " : "let ") : "") + parameter.name + ": " + parameter.type;
+            for (const auto &method : node->children) if (method->kind == "function") result += "\n  fn " + method->text + "(...)";
+            result += "\n}";
+        }
+        if (node->kind == "enum") { result += " {"; for (const auto &child : node->children) result += "\n  " + child->text; result += "\n}"; }
+        if (node->kind == "trait") {
+            result += " {";
+            for (const auto &method : node->children) result += "\n  " + describeFunction(method->text, method);
+            result += "\n}";
+        }
+        if (node->kind == "function" || node->kind == "signature") result = describeFunction(node->text, node, node->resolved);
+        if (!node->documentation.empty()) result += "\n\n" + node->documentation;
+        return result;
+    }
+
+    std::string describeMember(const Member &member, const std::string &name, Ty self) {
+        std::map<Ty, Ty> inherited;
+        if (self && member.owner) {
+            Ty up = ty.asSuper(self, member.owner);
+            for (size_t index = 0; up && index < member.owner->params.size() && index < up->args.size(); index++) inherited[member.owner->params[index]] = up->args[index];
+        }
+        std::string owner = member.owner ? member.owner->name : "";
+        if (member.owner && member.owner->builtin) std::replace(owner.begin(), owner.end(), '_', '.');
+        if (member.isMethod && member.signature) {
+            Ty type = ty.substitute(member.signature->type, inherited);
+            std::string result = owner + "." + name + "(";
+            for (size_t index = 0; index < type->args.size(); index++) {
+                if (index) result += ", ";
+                result += (index < member.signature->names.size() && !member.signature->names[index].empty() ? member.signature->names[index] + ": " : "") + ty.show(type->args[index]);
+            }
+            return result + ") -> " + ty.show(type->result);
+        }
+        return owner + "." + name + ": " + (member.type ? ty.show(ty.substitute(member.type, inherited)) : "");
+    }
+
+    ClassInfo *enclosingClass(const Ast &root, size_t offset) {
+        ClassInfo *found = nullptr;
+        walk(root, [&](const Ast &node) {
+            if ((node->kind == "class" || node->kind == "record" || node->kind == "trait" || node->kind == "impl") && node->span.offset <= offset && offset <= node->endOffset) {
+                if (node->kind == "impl") { Symbol *target = lookup(node->names.empty() ? "" : node->names[0]); if (target && target->kind == SymbolKind::Class) found = target->info; }
+                else { auto info = classOf.find(node.get()); if (info != classOf.end()) found = info->second; }
+            }
+            return true;
+        });
+        return found;
+    }
+
+    bool memberVisible(const Member &member, ClassInfo *context) {
+        if (member.visibility == Visibility::Public) return true;
+        if (!context) return false;
+        if (context == member.owner) return true;
+        return member.visibility == Visibility::Protected && ty.asSuper(context->self, member.owner);
+    }
+
+    void gatherMembers(ClassInfo *info, Ty self, bool wantStatic, ClassInfo *context, std::map<std::string, CompletionItem> &items, int depth = 0) {
+        if (!info || depth > 32) return;
+        for (const auto &entry : info->members) {
+            const Member &member = entry.second;
+            if (member.isStatic != wantStatic || entry.first == "init" || entry.first == "constructor" || !memberVisible(member, context) || items.count(entry.first)) continue;
+            if (member.owner && member.owner->builtin && entry.first.compare(0, 2, "__") == 0) continue;
+            CompletionItem item; item.label = entry.first; item.kind = member.isMethod ? 2 : 5;
+            item.detail = describeMember(member, entry.first, self);
+            if (member.isMethod && member.signature && member.signature->declaration) item.documentation = member.signature->declaration->documentation;
+            items.emplace(entry.first, std::move(item));
+        }
+        if (info->super) gatherMembers(info->super->info, self, wantStatic, context, items, depth + 1);
+        for (Ty trait : info->traits) gatherMembers(trait->info, self, wantStatic, context, items, depth + 1);
+    }
+
+    void gatherType(Ty type, ClassInfo *context, std::map<std::string, CompletionItem> &items, int depth = 0) {
+        if (!type || depth > 8) return;
+        switch (type->tag) {
+        case TypeTag::Var: gatherType(type->result, context, items, depth + 1); break;
+        case TypeTag::Union: {
+            Ty stripped = ty.stripNull(type);
+            if (stripped != type && stripped->tag != TypeTag::Union) gatherType(stripped, context, items, depth + 1);
+            break;
+        }
+        case TypeTag::Intersection: for (Ty part : type->args) gatherType(part, context, items, depth + 1); break;
+        case TypeTag::Named: gatherMembers(type->info, type, false, context, items); break;
+        default: break;
+        }
+    }
+
+    std::vector<CompletionItem> completionsFor(const Ast &receiver, const Ast &root, size_t offset) {
+        std::map<std::string, CompletionItem> items;
+        ClassInfo *context = enclosingClass(root, offset);
+        if (receiver->kind == "name") {
+            Symbol *symbol = lookup(receiver->text);
+            if (symbol && symbol->kind == SymbolKind::Module && symbol->exports) {
+                for (const auto &entry : *symbol->exports) {
+                    CompletionItem item; item.label = entry.first;
+                    const Symbol &exported = entry.second;
+                    item.kind = exported.kind == SymbolKind::Function ? 2 : exported.kind == SymbolKind::Class ? 7 : 6;
+                    if (exported.declaration) { item.detail = describeDeclaration(exported.declaration, exported.type); item.detail = item.detail.substr(0, item.detail.find("\n")); item.documentation = exported.declaration->documentation; }
+                    else item.detail = entry.first;
+                    items.emplace(entry.first, std::move(item));
+                }
+            }
+        }
+        if (items.empty()) {
+            if (ClassInfo *owner = classReference(receiver)) {
+                gatherMembers(owner, owner->self, true, context, items);
+                for (const auto &variant : owner->variants) { CompletionItem item; item.label = variant.name; item.kind = 20; item.detail = owner->name + "." + variant.name; items.emplace(variant.name, std::move(item)); }
+                std::string prefix = owner->name + "_";
+                for (const auto &entry : scopes[0].symbols)
+                    if (entry.second.kind == SymbolKind::Class && entry.first.compare(0, prefix.size(), prefix) == 0) {
+                        CompletionItem item; item.label = entry.first.substr(prefix.size()); item.kind = 7; item.detail = "class " + owner->name + "." + item.label; items.emplace(item.label, std::move(item));
+                    }
+                if (owner->name == "IO") for (const char *name : {"Files", "Http", "Sockets", "Terminal"}) { CompletionItem item; item.label = name; item.kind = 7; item.detail = std::string("class IO.") + name; items.emplace(item.label, std::move(item)); }
+                if (owner->name == "Collections") for (const char *name : {"List", "Map", "Set", "Tuple"}) { CompletionItem item; item.label = name; item.kind = 7; item.detail = std::string("class Collections.") + name; items.emplace(item.label, std::move(item)); }
+            } else gatherType(receiver->resolved, context, items);
+        }
+        std::vector<CompletionItem> result;
+        for (auto &entry : items) result.push_back(std::move(entry.second));
+        return result;
+    }
+
+    // Hover text for the member `name` accessed on `receiver`.
+    std::string memberHover(const Ast &receiver, const std::string &name, const Ast &root, size_t offset) {
+        for (const auto &item : completionsFor(receiver, root, offset)) if (item.label == name) return item.detail + (item.documentation.empty() ? "" : "\n\n" + item.documentation);
+        return {};
+    }
+
+    std::string nameHover(const Ast &node) {
+        auto found = referenced.find(node.get());
+        if (found == referenced.end()) return {};
+        const Symbol &symbol = found->second;
+        if (!symbol.native.empty()) {
+            size_t dot = symbol.native.rfind('.');
+            std::string original = symbol.native.substr(dot == std::string::npos ? 0 : dot + 1), module = dot == std::string::npos ? "" : symbol.native.substr(0, dot);
+            std::string result = "from " + module + " import " + original + (original == node->text ? "" : " as " + node->text);
+            if (symbol.signature) {
+                result += "\n" + original + "(";
+                Ty type = symbol.signature->type;
+                for (size_t index = 0; index < type->args.size(); index++) { if (index) result += ", "; result += (index < symbol.signature->names.size() && !symbol.signature->names[index].empty() ? symbol.signature->names[index] + ": " : "") + ty.show(type->args[index]); }
+                result += ") -> " + ty.show(type->result);
+            }
+            return result;
+        }
+        if (symbol.declaration) return describeDeclaration(symbol.declaration, symbol.type ? symbol.type : symbol.declared);
+        if (symbol.kind == SymbolKind::Class && symbol.info) return "class " + symbol.info->name;
+        if (symbol.kind == SymbolKind::Module) return "module " + node->text;
+        if (symbol.kind == SymbolKind::Function && symbol.signature) return "fn " + node->text + ": " + ty.show(symbol.signature->type);
+        Ty type = symbol.type ? symbol.type : symbol.declared;
+        return type ? node->text + ": " + ty.show(type) : std::string();
+    }
+
+    std::string declarationHover(const Ast &root, const std::string &name, size_t offset) {
+        Ast best; size_t distance = 0;
+        walk(root, [&](const Ast &node) {
+            static const std::set<std::string> kinds{"binding", "function", "class", "record", "trait", "enum", "type_alias"};
+            if (kinds.count(node->kind) && node->text == name && node->span.offset <= offset && offset - node->span.offset <= 24 && (!best || offset - node->span.offset < distance)) { best = node; distance = offset - node->span.offset; }
+            return true;
+        });
+        if (!best) return {};
+        Ty type = best->resolved;
+        if (best->kind == "function" && classOf.count(best.get())) type = nullptr;
+        return describeDeclaration(best, type);
+    }
+
     // One REPL submission: globals persist and may be redeclared; a failed submission leaves no trace.
     std::vector<Diagnostic> checkSubmission(const Ast &program, bool allowRedeclaration) {
         diagnostics.clear();
@@ -168,6 +360,7 @@ private:
     std::unordered_map<const Node *, std::shared_ptr<Signature>> signatureOf;
     std::unordered_map<const Node *, ClassInfo *> implTarget;
     std::set<std::string> assigned;
+    std::unordered_map<const Node *, Symbol> referenced;  // symbol each name node resolved to, for hover
     ModuleLoader loader;
     std::map<std::string, std::shared_ptr<Exports>> modules;
     std::map<std::string, Ast> programs;
@@ -276,7 +469,7 @@ private:
                 if (found != space->exports->end()) symbol = &found->second;
             }
         }
-        if (!symbol && name.find('.') != std::string::npos) { std::string nested = name; std::replace(nested.begin(), nested.end(), '.', '_'); symbol = lookup(nested); }
+        if (!symbol && name.find('.') != std::string::npos) { std::string nested = name; std::replace(nested.begin(), nested.end(), '.', '_'); symbol = lookup(nested); if (!symbol && (name.rfind("Collections.", 0) == 0 || name.rfind("IO.", 0) == 0)) symbol = lookup(name.substr(name.find('.') + 1)); }
         if (!symbol) { error(type->span, "Unknown type '" + name + "'"); return ty.error(); }
         switch (symbol->kind) {
         case SymbolKind::TypeVar: return plain(symbol->type);
@@ -851,7 +1044,15 @@ private:
     }
 
     void implHeader(const Ast &node) {
-        Symbol *traitSymbol = lookup(node->text), *targetSymbol = lookup(node->names[0]);
+        auto lookupQualified = [&](const std::string &name) -> Symbol * {
+            Symbol *symbol = lookup(name);
+            if (!symbol && name.find('.') != std::string::npos) {
+                std::string nested = name; std::replace(nested.begin(), nested.end(), '.', '_'); symbol = lookup(nested);
+                if (!symbol && (name.rfind("Collections.", 0) == 0 || name.rfind("IO.", 0) == 0)) symbol = lookup(name.substr(name.find('.') + 1));
+            }
+            return symbol;
+        };
+        Symbol *traitSymbol = lookupQualified(node->text), *targetSymbol = lookupQualified(node->names[0]);
         if (!traitSymbol || traitSymbol->kind != SymbolKind::Class || traitSymbol->info->kind != ClassKind::Trait) { error(node->span, "'" + node->text + "' is not a trait"); return; }
         if (!targetSymbol || targetSymbol->kind != SymbolKind::Class || (targetSymbol->info->kind != ClassKind::Class && targetSymbol->info->kind != ClassKind::Record)) { error(node->span, "'" + node->names[0] + "' is not a class or record"); return; }
         ClassInfo *target = targetSymbol->info, *trait = traitSymbol->info;
@@ -928,6 +1129,9 @@ private:
             if (value->tag == TypeTag::Null && !node->mutableBinding) type = value;
         } else assignable(value, type, node->children[0]->span);
         declareValue(node->text, type, node->mutableBinding, node->span);
+        node->resolved = type;
+        auto declared_symbol = scopes.back().symbols.find(node->text);
+        if (declared_symbol != scopes.back().symbols.end()) declared_symbol->second.declaration = node;
     }
 
     void returnStatement(const Ast &node) {
@@ -1157,6 +1361,7 @@ private:
     Ty nameExpression(const Ast &node) {
         size_t index = 0; Symbol *symbol = lookup(node->text, &index);
         if (!symbol) { error(node->span, "Undefined name '" + node->text + "'"); return ty.error(); }
+        referenced[node.get()] = *symbol;
         switch (symbol->kind) {
         case SymbolKind::Value: {
             bool crossed = !functions.empty() && index < functions.back().scopeBase;
@@ -1576,6 +1781,58 @@ bool TypeSession::declareModule(const std::string &name, const std::vector<std::
 Ast TypeSession::module(const std::string &name) const {
     auto found = impl->typer.loadedPrograms().find(name);
     return found == impl->typer.loadedPrograms().end() ? nullptr : found->second;
+}
+
+namespace {
+Ast memberAt(const Ast &node, size_t position) {
+    if (!node) return {};
+    for (const auto &child : node->children) if (Ast nested = memberAt(child, position)) return nested;
+    if (node->kind == "member" && position >= node->span.offset && position <= node->span.offset + node->span.length) return node;
+    return {};
+}
+}
+
+std::vector<CompletionItem> completeMembers(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader) {
+    offset = std::min(offset, source->text.size()); size_t start = offset;
+    while (start && (std::isalnum(static_cast<unsigned char>(source->text[start - 1])) || source->text[start - 1] == '_')) start--;
+    if (!start || source->text[start - 1] != '.') return {};
+    std::string edited = source->text; edited.insert(start, "__member_probe");
+    Ast parsed;
+    try { parsed = parse(std::make_shared<Source>(Source{source->file, edited})); } catch (const Error &) { return {}; }
+    Ast access = memberAt(parsed, start); if (!access) return {};
+    Typer typer; typer.setLoader(loader);
+    try { typer.check(parsed); } catch (const Error &) { return {}; }
+    return typer.completionsFor(access->children[0], parsed, start);
+}
+
+std::string hoverText(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader) {
+    Ast parsed; std::vector<Token> tokens;
+    try { parsed = parse(source); tokens = lex(source); } catch (const Error &) { return {}; }
+    size_t index = 0; bool found = false;
+    for (; index < tokens.size(); index++)
+        if (tokens[index].kind == TokenKind::Name && offset >= tokens[index].span.offset && offset <= tokens[index].span.offset + tokens[index].span.length) { found = true; break; }
+    if (!found) return {};
+    const Token &token = tokens[index];
+    Typer typer; typer.setLoader(loader);
+    try { typer.check(parsed); } catch (const Error &) { return {}; }
+    if (index && tokens[index - 1].text == ".") {
+        Ast access = memberAt(parsed, token.span.offset);
+        while (access && access->text != token.text) { access = nullptr; }
+        if (!access) return {};
+        return typer.memberHover(access->children[0], token.text, parsed, token.span.offset);
+    }
+    static const std::set<std::string> declarationKeywords{"let", "var", "fn", "class", "record", "trait", "enum", "type"};
+    if (index && declarationKeywords.count(tokens[index - 1].text)) {
+        std::string text = typer.declarationHover(parsed, token.text, token.span.offset);
+        if (!text.empty()) return text;
+    }
+    Ast name;
+    walk(parsed, [&](const Ast &node) {
+        if (node->kind == "name" && node->text == token.text && offset >= node->span.offset && offset <= node->span.offset + node->span.length) name = node;
+        return true;
+    });
+    if (name) { std::string text = typer.nameHover(name); if (!text.empty()) return text; }
+    return typer.declarationHover(parsed, token.text, token.span.offset);
 }
 
 std::string formatDiagnostic(const Diagnostic &diagnostic, bool color) {

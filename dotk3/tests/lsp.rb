@@ -76,16 +76,16 @@ Timeout.timeout(15) do
       ["let data: Bytes = Files.readBytes('must-not-execute')\ndata", 'let data: Bytes', 'Declared type'],
       ["let count = 42\ncount", 'let count: Int = 42', 'Type inferred from initializer'],
       ["var active = true\nactive", 'var active: Bool = true', 'Type inferred from initializer'],
-      ["let values: List<Int> = [1,2]\nvalues", 'let values: List[Int]', 'Declared type'],
+      ["let values: List<Int> = [1,2]\nvalues", 'let values: List<Int>', 'Declared type'],
       ["class Item {}\nlet item = Item()\nitem", 'let item: Item', 'Type inferred from initializer'],
-      ["let callback = fn(value: Int) -> Int => value + 1\ncallback", 'let callback: Function', 'fn callback(value: Int) -> Int'],
+      ["let callback = fn(value: Int) -> Int => value + 1\ncallback", 'let callback: fn(Int) -> Int', 'fn callback(value: Int) -> Int'],
       ["export let version: String = 'alpha'", 'export let version: String', 'Declared type'],
       ["let dynamic: Object = 1\ndynamic", 'let dynamic: Object', 'Declared type'],
       ["let total = 1 + 2\ntotal", 'let total: Int', 'Type inferred from initializer'],
-      ["let values = [1,2]\nvalues", 'let values: List[Int]', 'Type inferred from initializer'],
-      ["let scores = {'Ada': 1}\nscores", 'let scores: Map[String, Int]', 'Type inferred from initializer'],
+      ["let values = [1,2]\nvalues", 'let values: List<Int>', 'Type inferred from initializer'],
+      ["let scores = {'Ada': 1}\nscores", 'let scores: Map<String, Int>', 'Type inferred from initializer'],
       ["let maybe: Int? = null\nlet result = maybe ?? 3\nresult", 'let result: Int', 'Type inferred from initializer'],
-      ["fn unavailable() { throw 'must not execute' }\nlet result = unavailable()\nresult", 'let result: Any', 'Type unknown'],
+      ["fn unavailable() { throw 'must not execute' }\nlet result = unavailable()\nresult", 'let result: Null', 'Type inferred from initializer'],
       ["from Files import readText as read\nread", 'from Files import readText as read', 'readText(path: String) -> String'],
       ["fn items() { yield 1 }\nlet stream = items()\nstream", 'let stream: Generator', 'Type inferred from initializer'],
       ["let maybe: Int? = null\nmaybe", 'let maybe: Int?', 'Declared type'],
@@ -124,7 +124,7 @@ Timeout.timeout(15) do
     raise 'Static self diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?("Undefined name 'self'")
     collectionUri = 'untitled:CollectionClasses'
     collectionCases = [
-      ["class Bag extends Collections.List { let label: String = 'bag' }\nlet bag = Bag()\nbag.", ['all', 'any', 'append', 'clear', 'contains', 'extend', 'filter', 'find', 'findIndex', 'indexOf', 'insert', 'label', 'length', 'map', 'reduce', 'removeAt', 'reverse']],
+      ["class Bag extends Collections.List<Int> { let label: String = 'bag' }\nlet bag = Bag()\nbag.", ['all', 'any', 'append', 'clear', 'contains', 'extend', 'filter', 'find', 'findIndex', 'indexOf', 'insert', 'label', 'length', 'map', 'reduce', 'removeAt', 'reverse']],
       ["let unique: Set<Int> = Set([1,2])\nunique.", ['add', 'clear', 'contains', 'difference', 'intersection', 'isSubsetOf', 'length', 'remove', 'union', 'values']],
       ["record Item { value: Int }\nlet unique: Set<Item> = Set()\nunique.values()[0].", ['value']]
     ]
@@ -177,7 +177,9 @@ Timeout.timeout(15) do
       ["IO.Sockets.", ['accept', 'close', 'connect', 'listen', 'port', 'receive', 'send']],
       ["import Http as Web\nWeb.", ['readRequest', 'readResponse', 'writeRequest', 'writeResponse']],
       ["let server = IO.Sockets.listen('127.0.0.1', 0)\nIO.Http.", ['readRequest', 'readResponse', 'writeRequest', 'writeResponse']],
-      ["let name = 'Ada'\nlet message = f'Hi {name}'\nmessage.", ['contains', 'endsWith', 'find', 'join', 'length', 'split', 'startsWith']]]
+      ["let name = 'Ada'\nlet message = f'Hi {name}'\nmessage.", ['contains', 'endsWith', 'find', 'join', 'length', 'split', 'startsWith']],
+      ["let xs = [1, 2]\nlet strings = xs.map(fn(x) => 'a' + x)\nstrings[0].", ['contains', 'endsWith', 'find', 'join', 'length', 'split', 'startsWith']],
+      ["fn first<T>(items: List<T>) -> T? { return items.find(fn(i) => true) }\nlet r = first(['a'])\nr!.", ['contains', 'endsWith', 'find', 'join', 'length', 'split', 'startsWith']]]
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: foundationUri, languageId: 'dotk3', version: 1, text: '' } } })
     receive_message(reader)
     foundationCases.each_with_index do |(text, expected), index|
@@ -296,7 +298,7 @@ Timeout.timeout(15) do
       ["record Point { x: Int }\nfn use(point: Point) {\npoint.\n}", 2, 6, ['x']],
       ["record Point { x: Int }\nlet values: Map<String, Point> = {}\nvalues['x'].", 2, 12, ['x']],
       ["enum Event { Move(Int), Quit }\nEvent.", 1, 6, ['Move', 'Quit']],
-      ["let job: Task = Tasks.spawn(unknown())\njob.", 1, 4, ['done', 'error', 'has_value', 'status', 'value']]
+      ["fn counter() { yield 1 }\nlet job = Tasks.spawn(counter())\njob.", 2, 4, ['done', 'error', 'status', 'value']]
     ]
     semanticCases.each_with_index do |(text, line, character, expected), index|
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 4 + index }, contentChanges: [{ text: text }] } })

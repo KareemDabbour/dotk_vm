@@ -1159,7 +1159,8 @@ Every run, `--check`, REPL submission and LSP document goes through the static
 typer (see Static Typing); imported modules are type-checked with the importing
 program, and warnings are printed only by `--check`. `--ast` prints the
 source-spanned tree. The LSP publishes the typer's errors and warnings on unsaved
-edits; completion and hover still use the lighter syntactic index.
+edits; completion and hover use the same checker (types, visibility, inheritance and
+imports), including partial `receiver.` input.
 There is no formatter or general semantic navigation yet.
 
 Optional `.k3` VS Code syntax/configuration and LSP client support live under

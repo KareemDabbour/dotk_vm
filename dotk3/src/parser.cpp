@@ -435,6 +435,7 @@ class Parser {
         }
         if (exported && result->kind != "binding" && result->kind != "function" && result->kind != "record" && result->kind != "class" && result->kind != "trait" && result->kind != "enum" && result->kind != "type_alias")
             throw Error(start.span, "Only declarations can be exported");
+        if (!result->endOffset && position) { const auto &last = tokens[position - 1]; result->endOffset = last.span.offset + last.span.length; }
         result->exported = exported; return result;
     }
     int precedence(const std::string &operation) const {

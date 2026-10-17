@@ -1,7 +1,7 @@
 # Initial Language Server
 
-`dotk3-lsp` is a separate stdio LSP executable linking only lexer, parser, typer and
-member-resolution code. It never creates a Runtime or executes source. The transport uses
+`dotk3-lsp` is a separate stdio LSP executable linking only lexer, parser and typer
+code (diagnostics, completion and hover all come from the typer). It never creates a Runtime or executes source. The transport uses
 JSON-RPC Content-Length framing and the pinned nlohmann/json parser. Protocol
 messages are the only stdout output; fatal transport errors go to stderr.
 

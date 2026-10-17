@@ -1,5 +1,4 @@
 #include "typer.hpp"
-#include "semantic.hpp"
 #include "../vendor/json.hpp"
 #include <algorithm>
 #include <charconv>
@@ -190,22 +189,6 @@ class Server {
     std::unordered_map<std::string, Document> documents;
     bool initialized = false, shutdown = false;
     size_t textBytes = 0;
-    dk3::Ast imported(const dk3::Ast &request, size_t &count) {
-        if (++count > 32) return {};
-        auto parent = filePath(request->span.source->file); if (!parent) return {};
-        std::string name = request->text;
-        if (std::filesystem::path(name).is_absolute() || name.find("..") != std::string::npos) return {};
-        if (std::filesystem::path(name).extension() != ".k3") { std::replace(name.begin(), name.end(), '.', '/'); name += ".k3"; }
-        auto path = (parent->parent_path() / name).lexically_normal();
-        for (const auto &entry : documents) if (filePath(entry.first) == std::optional<std::filesystem::path>(path)) return entry.second.tree;
-        try {
-            std::ifstream file(path, std::ios::binary); if (!file) return {};
-            std::string text(maxDocument + 1, '\0'); file.read(text.data(), static_cast<std::streamsize>(text.size()));
-            size_t size = static_cast<size_t>(file.gcount()); if (size > maxDocument) return {};
-            text.resize(size);
-            return dk3::parse(std::make_shared<dk3::Source>(dk3::Source{request->span.source->file.substr(0, request->span.source->file.find_last_of('/') + 1) + name, text}));
-        } catch (const dk3::Error &) { return {}; }
-    }
     // Source for an imported module: an open document wins over the file on disk.
     std::shared_ptr<const dk3::Source> moduleSource(const std::string &documentUri, const std::string &module) {
         auto parent = filePath(documentUri); if (!parent) return nullptr;
@@ -304,15 +287,18 @@ public:
         if ((method == "textDocument/completion" || method == "textDocument/hover") && request) {
             std::string uri = params.at("textDocument").at("uri").get<std::string>(); auto found = documents.find(uri);
             if (found == documents.end()) { result(id, method == "textDocument/hover" ? Json(nullptr) : Json::array()); return; }
-            size_t offset = bytePosition(found->second.source, params.at("position")), imports = 0;
-            dk3::ImportTree loader = [&](const dk3::Ast &node) { return imported(node, imports); };
+            size_t offset = bytePosition(found->second.source, params.at("position"));
+            dk3::ModuleLoader loader = [&](const std::string &name) { return moduleSource(uri, name); };
             if (method == "textDocument/hover") {
-                std::string detail = dk3::memberHover(found->second.tree, found->second.source, offset, loader);
+                std::string detail = dk3::hoverText(found->second.source, offset, loader);
                 result(id, detail.empty() ? Json(nullptr) : Json{{"contents", {{"kind", "markdown"}, {"value", "```dotk3\n" + detail + "\n```"}}}});
             } else {
                 Json completions = Json::array();
-                for (const auto &member : dk3::memberCompletions(found->second.tree, found->second.source, offset, loader))
-                    completions.push_back({{"label", member.name}, {"kind", member.kind}, {"detail", member.detail}, {"insertText", member.name}});
+                for (const auto &member : dk3::completeMembers(found->second.source, offset, loader)) {
+                    Json item = {{"label", member.label}, {"kind", member.kind}, {"detail", member.detail}, {"insertText", member.label}};
+                    if (!member.documentation.empty()) item["documentation"] = member.documentation;
+                    completions.push_back(std::move(item));
+                }
                 result(id, completions);
             }
             return;

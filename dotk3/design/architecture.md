@@ -88,10 +88,10 @@ core.hpp is the shared signature/member catalogue for checker and editor discove
 Qualified host registration constructs explicit module paths rather than exposing
 all host functionality globally. Reflection returns copied names/type previews.
 
-semantic.cpp owns bounded, frontend-only member resolution. Temporary views use
-weak owner links and request-scoped import metadata; imported ASTs expose exports
-without executing them. LSP completion/hover use that resolver, including partial
-dot recovery. The CLI uses system libedit only for terminal input/history; no
+LSP completion/hover re-parse the document (inserting a probe identifier after a
+trailing dot so partial `x.` recovers) and type-check it with a private Typer;
+member lists and hover text come from the checker's resolved types, so inference,
+generics, visibility and imported modules behave exactly as in the compiler. The CLI uses system libedit only for terminal input/history; no
 terminal driver is linked into the runtime library or language server.
 
 Collection contracts include map keys/values. Runtime validation stages attachments
