@@ -96,6 +96,8 @@ struct Node {
     bool widen = false;
     // Set by the typer on numeric operations: 1 = both operands Int, 2 = both operands Float (after widening).
     unsigned char numeric = 0;
+    // Qualified name of the core native this call statically resolves to (e.g. "Math.sin").
+    std::string target;
     const TypeData *resolved = nullptr;
     Visibility visibility = Visibility::Public;
     std::string baseClass;

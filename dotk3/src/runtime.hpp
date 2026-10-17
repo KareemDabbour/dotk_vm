@@ -104,6 +104,8 @@ struct Object {
     std::shared_ptr<const Bytecode> bytecode;
     bool bytecodeAttempted = false;
     std::function<Value(const std::vector<Argument> &, const Span &)> native;
+    // Positional entry point used by statically resolved calls; avoids building an Argument list.
+    std::function<Value(const Value *, size_t, const Span &)> fast;
     std::shared_ptr<ResourceInfo> external;
     std::vector<Instruction> instructions;
     std::shared_ptr<const std::vector<Instruction>> controlCode;

@@ -129,4 +129,11 @@ expected='11 10 12 111
 printf 'enum Shape { Circle(Float), Square(Float) }\nfn scaled(shape: Shape, k: Float) -> Float {\n    let base = 2.0\n    return match shape { Shape.Circle(r) => r * k + base, Shape.Square(a) => a * k }\n}\nSystem.print(scaled(Shape.Circle(1.0), 3.0), scaled(Shape.Square(2.0), 4.0))\n' > "$dir/match.k3"
 [ "$("$bin" "$dir/match.k3")" = '5 8' ] && [ "$("$bin" --static "$dir/match.k3")" = '5 8' ] || { echo 'match arms must see enclosing locals' >&2; exit 1; }
 
+printf 'from Math import sin as s, floor\nimport Math as M\nSystem.print(s(0.0), floor(2.7), M.hypot(3, 4), Math.toInt(7.9), Collections.range(3), Math.round(-2.5))\nSystem.print(Math.sqrt(-1.0))\n' > "$dir/native.k3"
+set +e
+"$bin" --static "$dir/native.k3" >"$dir/out" 2>"$dir/errors"
+code=$?
+set -e
+[ "$code" -eq 65 ] && [ "$(cat "$dir/out")" = '0 2 5 7 [0, 1, 2] -3' ] && grep -q 'Math.sqrt is undefined' "$dir/errors" || { echo 'direct native calls differ' >&2; cat "$dir/out" "$dir/errors" >&2; exit 1; }
+
 echo 'static: PASS'

@@ -245,6 +245,18 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             } else frame.stack.back() = -floating(value, location);
             break;
         }
+        case ByteOp::CallNative: {
+            size_t begin = frame.stack.size() - instruction.operand;
+            if (!instruction.cache) instruction.cache = std::get<Object *>(getPath(node->target));
+            Object *function = instruction.cache; Value result;
+            if (function->fast && !config.profiler) result = function->fast(frame.stack.data() + begin, instruction.operand, location);
+            else {
+                std::vector<Argument> values; values.reserve(instruction.operand);
+                for (size_t index = 0; index < instruction.operand; index++) values.push_back({std::string(), frame.stack[begin + index]});
+                result = call(function, values, location);
+            }
+            frame.stack.resize(begin); frame.stack.push_back(result); break;
+        }
         case ByteOp::Call: case ByteOp::InvokeMethod: {
             size_t begin = frame.stack.size() - instruction.operand - 1; std::vector<Argument> values; values.reserve(instruction.operand);
             for (size_t index = 0; index < instruction.operand; index++) values.push_back({node->names[index], frame.stack[begin + index + 1]});

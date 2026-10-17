@@ -16,6 +16,7 @@ using Exports = std::map<std::string, Symbol>;
 
 struct Symbol {
     std::shared_ptr<Exports> exports;
+    std::string native;
     SymbolKind kind = SymbolKind::Value;
     Ty type = nullptr;
     Ty declared = nullptr;
@@ -672,7 +673,7 @@ private:
             }
             if (!member || !member->isStatic) { error(node->span, node->text + " has no member '" + node->names[index] + "'"); continue; }
             Symbol symbol;
-            if (member->signature) { symbol.kind = SymbolKind::Function; symbol.signature = member->signature; symbol.type = member->signature->type; }
+            if (member->signature) { symbol.kind = SymbolKind::Function; symbol.signature = member->signature; symbol.type = member->signature->type; symbol.native = module->info->name + "." + node->names[index]; }
             else { symbol.type = symbol.declared = member->type; symbol.global = true; }
             declareSymbol(node->names[index + 1], std::move(symbol), node->span);
         }
@@ -1358,7 +1359,11 @@ private:
         if (callee->kind == "name") {
             Symbol *symbol = lookup(callee->text);
             if (symbol && symbol->kind == SymbolKind::Class) return construct(node, symbol->info, callee->typeArgs, expected);
-            if (symbol && symbol->kind == SymbolKind::Function) { callee->resolved = symbol->signature->type; return applyCall(node, symbol->signature->type, symbol->signature, callee->typeArgs, expected); }
+            if (symbol && symbol->kind == SymbolKind::Function) {
+                callee->resolved = symbol->signature->type;
+                if (!symbol->native.empty()) node->target = symbol->native;
+                return applyCall(node, symbol->signature->type, symbol->signature, callee->typeArgs, expected);
+            }
         }
         if (callee->kind == "member" && isModuleAccess(callee)) {
             Symbol *symbol = moduleMember(callee, true);
@@ -1370,6 +1375,8 @@ private:
             Resolved resolved = resolveMember(callee);
             if (!resolved.found) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]); return ty.error(); }
             callee->resolved = resolved.type;
+            if (ClassInfo *owner = classReference(callee->children[0]))
+                if (owner->builtin && owner->name.find('_') == std::string::npos && resolved.signature && !callee->safe) node->target = owner->name + "." + callee->text;
             if (resolved.type->tag != TypeTag::Function) { error(node->span, "'" + callee->text + "' is not callable"); return ty.error(); }
             Ty result = applyCall(node, resolved.type, resolved.signature, callee->typeArgs, expected);
             return callee->safe ? ty.nullable(result) : result;

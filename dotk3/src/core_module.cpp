@@ -276,14 +276,18 @@ void Runtime::installCore() {
         if (values.size() != 1) throw Error(span, "str expects one argument", "call");
         return text(stringify(values[0], span), false, span);
     });
-    registerNative("Math.toFloat", [this](const auto &arguments, const Span &span) -> Value {
-        auto values = positional(arguments, span);
-        if (values.size() != 1) throw Error(span, "Float expects one argument", "call");
+    auto defineFast = [this](const std::string &path, std::function<Value(const Value *, size_t, const Span &)> fast) {
+        registerNative(path, [this, fast](const auto &arguments, const Span &span) -> Value {
+            auto values = positional(arguments, span); return fast(values.data(), values.size(), span);
+        });
+        std::get<Object *>(getPath(path))->fast = std::move(fast);
+    };
+    defineFast("Math.toFloat", [this](const Value *values, size_t count, const Span &span) -> Value {
+        if (count != 1) throw Error(span, "Float expects one argument", "call");
         return floating(values[0], span, true);
     });
-    registerNative("Math.toInt", [this](const auto &arguments, const Span &span) -> Value {
-        auto values = positional(arguments, span);
-        if (values.size() != 1) throw Error(span, "Int expects one argument", "call");
+    defineFast("Math.toInt", [this](const Value *values, size_t count, const Span &span) -> Value {
+        if (count != 1) throw Error(span, "Int expects one argument", "call");
         if (std::holds_alternative<int64_t>(values[0])) return values[0];
         double number = floating(values[0], span, true);
         if (!std::isfinite(number) || number < -9223372036854775808.0 || number >= 9223372036854775808.0)
@@ -301,9 +305,8 @@ void Runtime::installCore() {
         {"toRadians", [](double x) { return x * (3.14159265358979323846 / 180.0); }}, {"toDegrees", [](double x) { return x * (180.0 / 3.14159265358979323846); }},
         {"sqrt", [](double x) { return std::sqrt(x); }}, {"exp", [](double x) { return std::exp(x); }}, {"log", [](double x) { return std::log(x); }},
         {"log2", [](double x) { return std::log2(x); }}, {"log10", [](double x) { return std::log10(x); }}}) {
-        registerNative("Math." + entry.first, [this, name = entry.first, function = entry.second](const auto &arguments, const Span &span) -> Value {
-            auto values = positional(arguments, span);
-            if (values.size() != 1) throw Error(span, name + " expects one argument", "call");
+        defineFast("Math." + entry.first, [this, name = entry.first, function = entry.second](const Value *values, size_t count, const Span &span) -> Value {
+            if (count != 1) throw Error(span, name + " expects one argument", "call");
             double result = function(floating(values[0], span));
             if (!std::isfinite(result)) throw Error(span, "Math." + name + " is undefined or not finite for this argument", "value");
             return result;
@@ -313,9 +316,8 @@ void Runtime::installCore() {
     for (const auto &entry : std::vector<std::pair<std::string, BinaryFunction>>{
         {"atan2", [](double y, double x) { return std::atan2(y, x); }}, {"pow", [](double x, double y) { return std::pow(x, y); }},
         {"hypot", [](double x, double y) { return std::hypot(x, y); }}}) {
-        registerNative("Math." + entry.first, [this, name = entry.first, function = entry.second](const auto &arguments, const Span &span) -> Value {
-            auto values = positional(arguments, span);
-            if (values.size() != 2) throw Error(span, name + " expects two arguments", "call");
+        defineFast("Math." + entry.first, [this, name = entry.first, function = entry.second](const Value *values, size_t count, const Span &span) -> Value {
+            if (count != 2) throw Error(span, name + " expects two arguments", "call");
             double result = function(floating(values[0], span), floating(values[1], span));
             if (!std::isfinite(result)) throw Error(span, "Math." + name + " is undefined or not finite for these arguments", "value");
             return result;
@@ -323,9 +325,8 @@ void Runtime::installCore() {
     }
     for (const auto &entry : std::vector<std::pair<std::string, FloatFunction>>{
         {"floor", [](double x) { return std::floor(x); }}, {"ceil", [](double x) { return std::ceil(x); }}, {"round", [](double x) { return std::round(x); }}}) {
-        registerNative("Math." + entry.first, [this, name = entry.first, function = entry.second](const auto &arguments, const Span &span) -> Value {
-            auto values = positional(arguments, span);
-            if (values.size() != 1) throw Error(span, name + " expects one argument", "call");
+        defineFast("Math." + entry.first, [this, name = entry.first, function = entry.second](const Value *values, size_t count, const Span &span) -> Value {
+            if (count != 1) throw Error(span, name + " expects one argument", "call");
             if (std::holds_alternative<int64_t>(values[0])) return values[0];
             double result = function(floating(values[0], span));
             if (!std::isfinite(result) || result < -9223372036854775808.0 || result >= 9223372036854775808.0)

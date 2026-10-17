@@ -2,13 +2,14 @@
 #include "syntax.hpp"
 
 namespace dk3 {
+struct Object;
 enum class ByteOp {
     Tick, Point, Null, Bool, Int, Float, Text, LoadLocal, StoreLocal, DeclareLocal, ClearLocal,
     LoadName, StoreName, CheckLocal, CheckName, CheckObject, DeclareName, DefineFunction, Member, Index, SetIndex, Binary, Unary,
     Call, List, Tuple, Map, Pop, Dup, Jump, JumpFalse, JumpTrue, JumpPresent, SafePoint, Return,
     Literal, Closure, Format, Slice, Match, PrepareMember, SetMember, Swap, DeclareType, Import, Throw, PrepareSlice, ResolveMethod, InvokeMethod,
     InstanceOf, Cast, NonNull, JumpNull, IntToFloat,
-    MakeClosure, IterInit, IterNext, MatchTest, MatchBind, MatchFail
+    MakeClosure, IterInit, IterNext, MatchTest, MatchBind, MatchFail, CallNative
 };
 struct ByteInstruction {
     ByteOp op;
@@ -16,6 +17,7 @@ struct ByteInstruction {
     size_t operand = 0;
     int64_t integer = 0;
     double floating = 0;
+    mutable Object *cache = nullptr;
     enum class Math { Generic, Add, Subtract, Multiply, FloorDivide, Modulo, Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual,
         AddF, SubtractF, MultiplyF, DivideF, EqualF, NotEqualF, LessF, GreaterF, LessEqualF, GreaterEqualF } math = Math::Generic;
 };
