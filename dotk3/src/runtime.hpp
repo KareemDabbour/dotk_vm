@@ -224,21 +224,26 @@ class Runtime {
     struct ByteFrame {
         std::vector<Value> locals, stack;
         std::vector<bool> initialized;
-        std::vector<Binding *> names;
         std::vector<MethodTarget> methods;
-        uint64_t epoch = 0;
     };
     std::deque<ByteFrame> byteFrames;
     std::deque<std::vector<Argument>> argumentPool;
     size_t argumentDepth = 0;
     size_t byteFrameDepth = 0;
-    struct ExecutionFrame { uint64_t id, task; std::string name; Span location; Object *environment; Object *generator; };
+    // `name`/`location` point into the AST when set; the owned copies serve host-built frames.
+    struct ExecutionFrame {
+        uint64_t id, task; std::string ownedName; Span ownedLocation;
+        const std::string *name; const Span *location; Object *environment; Object *generator;
+        const std::string &frameName() const { return name ? *name : ownedName; }
+        const Span &where() const { return location ? *location : ownedLocation; }
+    };
     std::vector<ExecutionFrame> debugFrames;
     uint64_t nextDebugFrame = 0, nextDebugTask = 0, debugSequence = 0;
     bool debugPaused = false;
     struct FrameScope {
         Runtime &runtime; size_t start;
         FrameScope(Runtime &runtime, const char *name, const Span &location, Object *environment, Object *generator = nullptr);
+        FrameScope(Runtime &runtime, const Node &function, Object *environment);
         ~FrameScope();
     };
     void requireRunning() const;
@@ -248,7 +253,8 @@ class Runtime {
     void implement(const Ast &node, Object *environment);
     void executeBlock(const Ast &node, Object *environment, bool createScope = true, Value *result = nullptr, bool echoLast = false, bool allowReturn = false, Object *callable = nullptr);
     Value executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured = nullptr);
-    template<bool profiled> Value executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured);
+    template<bool profiled> Value executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positional = nullptr, size_t positionalCount = 0);
+    Value callFunctionFast(Object *function, const Value *arguments, size_t count, const Span &span);
     void define(Object *environment, const std::string &name, Value value, bool mutableBinding,
                 const std::string &type, const Span &span);
     Binding &lookup(Object *environment, const std::string &name, const Span &span);

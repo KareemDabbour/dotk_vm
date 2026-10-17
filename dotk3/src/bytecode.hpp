@@ -38,6 +38,10 @@ struct Bytecode {
     size_t captures = 0;
     unsigned optimization = 2;
     bool program = false;
+    // Resolved global/module bindings, valid for one environment and binding epoch.
+    mutable std::vector<void *> nameBindings;
+    mutable Object *nameEnvironment = nullptr;
+    mutable uint64_t nameEpoch = ~uint64_t{0};
 };
 std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false, bool slotClosures = false);
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization = 2);

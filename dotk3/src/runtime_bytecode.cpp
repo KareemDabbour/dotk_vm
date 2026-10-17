@@ -14,8 +14,16 @@ Value Runtime::executeBytecode(const Bytecode &code, Object *environment, const 
     if (config.profiler) return executeBytecodeLoop<true>(code, environment, arguments, span, captured);
     return executeBytecodeLoop<false>(code, environment, arguments, span, captured);
 }
+Value Runtime::callFunctionFast(Object *function, const Value *arguments, size_t count, const Span &span) {
+    static const std::vector<Argument> none;
+    if (++callDepth > 256) { callDepth--; throw Error(span, "Call depth exceeded", "limit"); }
+    struct DepthGuard { size_t &depth; ~DepthGuard() { depth--; } } depthGuard{callDepth};
+    FrameScope frame(*this, *function->code, function->parent);
+    try { return executeBytecodeLoop<false>(*function->bytecode, function->parent, none, span, function->bytecode->captures ? &function->items : nullptr, arguments, count); }
+    catch (...) { captureFailure(std::current_exception()); throw; }
+}
 template<bool profiled>
-Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured) {
+Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positionalArguments, size_t positionalCount) {
     if (byteFrameDepth == byteFrames.size()) byteFrames.emplace_back();
     ByteFrame &frame = byteFrames[byteFrameDepth++];
     struct ReleaseFrame {
@@ -23,13 +31,16 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         ~ReleaseFrame() { frame.locals.clear(); frame.stack.clear(); frame.initialized.clear(); frame.methods.clear(); depth--; }
     } releaseFrame{frame, byteFrameDepth};
     frame.locals.assign(code.locals.size(), Value{}); frame.initialized.assign(code.locals.size(), false);
-    frame.names.assign(code.names.size(), nullptr); frame.epoch = bindingEpoch;
     frame.stack.reserve(std::min<size_t>(code.instructions.size(), 64));
     Object *previousAccess = accessClass; accessClass = nullptr;
     for (Object *scope = environment; scope; scope = scope->parent) if (scope->accessClass) { accessClass = scope->accessClass; break; }
     struct RestoreAccess { Object *&current; Object *previous; ~RestoreAccess() { current = previous; } } restoreAccess{accessClass, previousAccess};
     size_t positional = 0;
-    for (const auto &argument : arguments) {
+    if (positionalArguments) {
+        if (positionalCount != code.parameters) throw Error(span, positionalCount > code.parameters ? "Too many positional arguments" : "Missing argument '" + code.locals[positionalCount].name + "'", "call");
+        for (size_t index = 0; index < positionalCount; index++) { frame.locals[index] = positionalArguments[index]; frame.initialized[index] = true; }
+    }
+    else for (const auto &argument : arguments) {
         size_t slot = code.parameters;
         if (argument.name.empty()) slot = positional++;
         else for (size_t index = 0; index < code.parameters; index++) if (code.locals[index].name == argument.name) slot = index;
@@ -37,18 +48,22 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         if (frame.initialized[slot]) throw Error(span, "Argument supplied more than once: '" + code.locals[slot].name + "'", "call");
         frame.locals[slot] = argument.value; frame.initialized[slot] = true;
     }
-    for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
+    if (!positionalArguments) for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
     if (captured) for (size_t index = 0; index < code.captures && index < captured->size(); index++) {
         frame.locals[code.parameters + index] = (*captured)[index]; frame.initialized[code.parameters + index] = true;
     }
     auto pop = [&]() { Value value = frame.stack.back(); frame.stack.pop_back(); return value; };
     auto binding = [&](size_t index, const Span &location) -> Binding & {
         if (code.optimization < 2) return lookup(environment, code.names[index], location);
-        if (frame.epoch != bindingEpoch) { if constexpr (profiled) config.profiler->cacheInvalidations++; std::fill(frame.names.begin(), frame.names.end(), nullptr); frame.epoch = bindingEpoch; }
-        if (!frame.names[index]) { if constexpr (profiled) config.profiler->cacheMisses++; frame.names[index] = &lookup(environment, code.names[index], location); }
+        if (code.nameEnvironment != environment || code.nameEpoch != bindingEpoch) {
+            if constexpr (profiled) config.profiler->cacheInvalidations++;
+            code.nameBindings.assign(code.names.size(), nullptr); code.nameEnvironment = environment; code.nameEpoch = bindingEpoch;
+        }
+        Binding *&cached = reinterpret_cast<Binding *&>(code.nameBindings[index]);
+        if (!cached) { if constexpr (profiled) config.profiler->cacheMisses++; cached = &lookup(environment, code.names[index], location); }
         else { if constexpr (profiled) config.profiler->cacheHits++; }
-        if (!frame.names[index]->initialized) throw Error(location, "Field has not been initialized: '" + code.names[index] + "'", "state");
-        return *frame.names[index];
+        if (!cached->initialized) throw Error(location, "Field has not been initialized: '" + code.names[index] + "'", "state");
+        return *cached;
     };
     for (size_t cursor = 0; cursor < code.instructions.size();) {
         const auto &instruction = code.instructions[cursor++]; const Ast &node = instruction.node; const Span &location = node->span;
@@ -64,7 +79,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             if constexpr (profiled) { tick(location); debugPoint(node, environment); }
             else {
                 tickExecution(location);
-                if (!debugFrames.empty()) { debugFrames.back().location = location; debugFrames.back().environment = environment; }
+                if (!debugFrames.empty()) { debugFrames.back().location = &location; debugFrames.back().environment = environment; }
             }
             break;
         case ByteOp::Null: frame.stack.emplace_back(); break;
@@ -278,7 +293,18 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             frame.stack.resize(begin); frame.stack.push_back(result); break;
         }
         case ByteOp::Call: case ByteOp::InvokeMethod: {
-            size_t begin = frame.stack.size() - instruction.operand - 1; std::vector<Argument> values; values.reserve(instruction.operand);
+            size_t begin = frame.stack.size() - instruction.operand - 1;
+            if (instruction.op == ByteOp::Call && instruction.integer && !profiled && !config.debug && std::holds_alternative<Object *>(frame.stack[begin])) {
+                Object *callee = std::get<Object *>(frame.stack[begin]);
+                if (callee->kind == Kind::Function) {
+                    if (!callee->bytecodeAttempted) { callee->bytecode = compileBytecode(callee->code, config.optimizationLevel, false, true); callee->bytecodeAttempted = true; }
+                    if (callee->bytecode) {
+                        Value result = callFunctionFast(callee, frame.stack.data() + begin + 1, instruction.operand, location);
+                        frame.stack.resize(begin); frame.stack.push_back(result); break;
+                    }
+                }
+            }
+            std::vector<Argument> values; values.reserve(instruction.operand);
             for (size_t index = 0; index < instruction.operand; index++) values.push_back({node->names[index], frame.stack[begin + index + 1]});
             MethodTarget target = instruction.op == ByteOp::InvokeMethod ? frame.methods.back() : MethodTarget{};
             Value result = call(frame.stack[begin], values, location, target.receiver, target.owner);

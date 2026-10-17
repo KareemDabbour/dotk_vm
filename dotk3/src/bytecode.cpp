@@ -129,7 +129,8 @@ class Compiler {
                 if (callee->safe) code.instructions[skip].operand = code.instructions.size();
             } else {
                 for (const auto &child : node->children) expression(child);
-                emit(ByteOp::Call, node, node->children.size() - 1);
+                size_t position = emit(ByteOp::Call, node, node->children.size() - 1);
+                code.instructions[position].integer = positionalOnly && slotClosures && !lexical;
             }
         } else if (node->kind == "list" || node->kind == "tuple" || node->kind == "map") {
             for (const auto &child : node->children) expression(child);

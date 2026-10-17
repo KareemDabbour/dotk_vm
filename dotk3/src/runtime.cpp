@@ -225,8 +225,14 @@ Runtime::FrameScope::FrameScope(Runtime &owner, const char *name, const Span &lo
     : runtime(owner), start(owner.debugFrames.size()) {
     uint64_t id = generator ? generator->debugFrameId : ++owner.nextDebugFrame;
     owner.debugFrames.push_back({id, owner.currentTask ? owner.currentTask->debugTaskId : 0,
-        name, location, environment, generator});
+        name, location, nullptr, nullptr, environment, generator});
     if (owner.config.profiler) owner.config.profiler->enter(name, location, owner.currentTask ? owner.currentTask->debugTaskId : 0);
+}
+Runtime::FrameScope::FrameScope(Runtime &owner, const Node &function, Object *environment)
+    : runtime(owner), start(owner.debugFrames.size()) {
+    static const std::string anonymous = "<anonymous>";
+    owner.debugFrames.push_back({++owner.nextDebugFrame, owner.currentTask ? owner.currentTask->debugTaskId : 0,
+        {}, {}, function.text.empty() ? &anonymous : &function.text, &function.span, environment, nullptr});
 }
 Runtime::FrameScope::~FrameScope() { if (runtime.config.profiler) runtime.config.profiler->leave(); runtime.debugFrames.resize(start); }
 void Runtime::captureFailure(std::exception_ptr failure) noexcept {
@@ -234,7 +240,7 @@ void Runtime::captureFailure(std::exception_ptr failure) noexcept {
         if (!error.trace.empty()) return;
         std::vector<ErrorFrame> trace;
         for (auto frame = debugFrames.rbegin(); frame != debugFrames.rend(); ++frame)
-            trace.push_back({frame->name, trace.empty() ? error.span : frame->location});
+            trace.push_back({frame->frameName(), trace.empty() ? error.span : frame->where()});
         error.trace = std::move(trace);
     };
     try {
@@ -264,14 +270,14 @@ std::vector<DebugVariable> Runtime::debugVariables(Object *environment) {
 }
 void Runtime::debugPoint(const Ast &node, Object *environment, const std::string &kind) {
     if (debugFrames.empty()) return;
-    debugFrames.back().location = node->span; debugFrames.back().environment = environment;
+    debugFrames.back().location = &node->span; debugFrames.back().environment = environment;
     if (config.profiler) config.profiler->location(node->span);
     if (!config.debug) return;
     requireRunning();
     DebugSnapshot snapshot; snapshot.sequence = ++debugSequence; snapshot.location = node->span;
     snapshot.kind = kind.empty() ? node->kind : kind;
     for (auto frame = debugFrames.rbegin(); frame != debugFrames.rend(); ++frame)
-        snapshot.frames.push_back({frame->id, frame->task, frame->generator != nullptr, shortened(frame->name, 96), frame->location, debugVariables(frame->environment)});
+        snapshot.frames.push_back({frame->id, frame->task, frame->generator != nullptr, shortened(frame->frameName(), 96), frame->where(), debugVariables(frame->environment)});
     snapshot.globals = debugVariables(global);
     if (snapshot.globals.size() < 64)
         snapshot.globals.push_back({"System.args", "Tuple", debugValue(coreNamespace("System")->bindings.at("args").value), false});
@@ -284,7 +290,7 @@ void Runtime::debugPoint(const Ast &node, Object *environment, const std::string
         if (!generator) continue;
         Span location = generator->instruction < generator->instructions.size() ?
             generator->instructions[generator->instruction].node->span : generator->code->span;
-        for (const auto &frame : debugFrames) if (frame.generator == generator) location = frame.location;
+        for (const auto &frame : debugFrames) if (frame.generator == generator) location = frame.where();
         snapshot.tasks.push_back({task->debugTaskId, task->taskParent ? task->taskParent->debugTaskId : 0,
             generator->debugFrameId, shortened(generator->code->text.empty() ? "<generator>" : generator->code->text, 32),
             taskStatus(task->taskState), location});
@@ -1757,7 +1763,9 @@ void Runtime::collect() {
     }
     for (const auto &module : modules) mark(module.second);
     for (const auto &type : nativeMethods) for (const auto &method : type.second) mark(method.second);
+    size_t beforeSweep = heap.size();
     heap.erase(std::remove_if(heap.begin(), heap.end(), [](const auto &value) { return !value->marked; }), heap.end());
+    if (heap.size() != beforeSweep) bindingEpoch++;
     for (const auto &value : heap) value->marked = false;
     nextCollection = std::max<size_t>(4096, heap.size() * 2);
     if (config.profiler) { config.profiler->checkpoint(true); config.profiler->leave(); config.profiler->collection(profileBegin, profileBefore, heap.size()); }
