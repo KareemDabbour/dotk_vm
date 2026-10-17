@@ -4,7 +4,7 @@ require 'open3'
 
 Timeout.timeout(15) do
   [{ 'TERM' => 'xterm', 'NO_COLOR' => nil }, { 'TERM' => 'xterm', 'NO_COLOR' => '1' }, { 'TERM' => 'dumb', 'NO_COLOR' => nil }].each_with_index do |environment, index|
-    code = "fn leaf() { missing }; fn outer() { leaf() }; outer()"
+    code = "fn leaf() { let items: List<Int> = []; items[0] }; fn outer() { leaf() }; outer()"
     PTY.spawn(environment, ARGV.fetch(0), '-e', code) do |reader, writer, process|
       output = ''.b
       begin
@@ -13,7 +13,7 @@ Timeout.timeout(15) do
       end
       Process.wait(process)
       raise 'Trace diagnostic exit code changed' unless $?.exitstatus == 65
-      raise 'TTY diagnostic missing source/stack' unless output.include?('NameError'.b) && output.include?('Call stack:'.b) && output.include?('outer()'.b)
+      raise 'TTY diagnostic missing source/stack' unless output.include?('IndexError'.b) && output.include?('Call stack:'.b) && output.include?('outer()'.b)
       raise 'TTY diagnostic color policy failed' unless output.include?("\e[1;31m".b) == (index == 0)
     end
   end
@@ -197,7 +197,7 @@ Timeout.timeout(20) do
     game.action('next'); System.gc(); expect(game.level == 2 and game.status == 'playing' and game.score == 10, 'next level')
     for turn in Collections.range(16) { game.tick(); System.gc() }
     for ghost in game.ghosts { expect(game.board[ghost.position] != '#', 'ghost movement') }
-    let state = game.snapshot(); expect(state['ghosts'].length() == 3 and state['width'] == 28, 'snapshot')
+    let state = game.snapshot(); expect((state['ghosts'] as List<Object?>).length() == 3 and state['width'] == 28, 'snapshot')
     expect(game.render().contains('PAC-MAN'), 'terminal render')
     System.print('Pac-Man model: PASS')
   DOTK

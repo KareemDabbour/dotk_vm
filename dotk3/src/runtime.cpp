@@ -576,7 +576,7 @@ Binding &Runtime::lookup(Object *environment, const std::string &name, const Spa
     throw Error(span, "Undeclared name '" + name + "'", "name");
 }
 void Runtime::define(Object *environment, const std::string &name, Value value, bool mutableBinding, const std::string &type, const Span &span, Contract contract) {
-    if (environment->bindings.count(name)) throw Error(span, "Duplicate declaration '" + name + "'", "name");
+    if (environment->bindings.count(name) && !(shadowGlobals && environment == global)) throw Error(span, "Duplicate declaration '" + name + "'", "name");
     if (!contract) contract = resolveContract(type, environment, span);
     requireType(value, contract, span); environment->bindings[name] = {value, mutableBinding, type, std::move(contract)};
     bindingEpoch++;
@@ -2014,6 +2014,7 @@ Value Runtime::run(const std::string &source, const std::string &file) {
 Value Runtime::run(const Ast &program, bool echoLastExpression) {
     requireRunning();
     steps = 0; size_t start = roots.size(); Value result;
+    shadowGlobals = echoLastExpression && !config.enforceContracts;
     FrameScope frame(*this, "<script>", program->span, global);
     std::optional<ProfileScope> executionProfile;
     if (config.profiler) executionProfile.emplace(config.profiler.get(), "Execute", "vm", program->span);

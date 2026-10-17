@@ -6,7 +6,7 @@ require 'timeout'
 binary = File.expand_path(ARGV.fetch(0))
 Timeout.timeout(30) do
   Dir.mktmpdir('dotk3-profiler') do |directory|
-    source = "fn work(limit) { var total = 0; var index = 0; while index < limit { total += index; index += 1 }; return total }; System.print(work(2000)); System.gc(); System.delay(10)"
+    source = "fn work(limit: Int) -> Int { var total = 0; var index = 0; while index < limit { total += index; index += 1 }; return total }; System.print(work(2000)); System.gc(); System.delay(10)"
     output, errors, result = Open3.capture3(binary, '--profile-vm', 'simple', '-e', source)
     raise 'Simple VM profile failed' unless result.success? && output == "1999000\n" && errors.include?('VM profile (simple)') && errors.include?('GC:') && !errors.include?('Opcodes:') && !errors.include?('Allocation sites')
     speed = File.join(directory, 'source.speedscope.json')
@@ -21,8 +21,8 @@ Timeout.timeout(30) do
     events = JSON.parse(File.read(trace)).fetch('traceEvents')
     raise 'Perfetto events missing' unless events.any? { |event| event['name'] == 'GC' } && events.any? { |event| event['name'] == 'Compile' } && events.any? { |event| event['name'] == 'native:System.delay' && event['dur'] >= 5000 }
     %w[simple verbose].each do |mode|
-      output, errors, result = Open3.capture3(binary, '--profile-vm', mode, '-e', 'fn failed() { missing }; failed()')
-      raise 'Failed script lost its exit/profile' unless result.exitstatus == 65 && errors.include?('NameError') && errors.include?('VM profile') && output.empty?
+      output, errors, result = Open3.capture3(binary, '--profile-vm', mode, '-e', 'fn failed() { let items: List<Int> = []; items[0] }; failed()')
+      raise 'Failed script lost its exit/profile' unless result.exitstatus == 65 && errors.include?('IndexError') && errors.include?('VM profile') && output.empty?
     end
     _, _, result = Open3.capture3(binary, '--profile-vm', 'verbose', '--profile-output', speed, '--profile-trace', speed, '-e', 'null')
     raise 'Conflicting export paths accepted' unless result.exitstatus == 64
@@ -39,7 +39,7 @@ end
 puts 'profiler CLI: PASS (simple/verbose/source/exports/errors/disabled)'
 
 if ARGV[1] == '--benchmark'
-  source = 'fn step(value) { return value + 1 }; var value = 0; var index = 0; while index < 200000 { value = step(value); index += 1 }; System.print(value)'
+  source = 'fn step(value: Int) -> Int { return value + 1 }; var value = 0; var index = 0; while index < 200000 { value = step(value); index += 1 }; System.print(value)'
   modes = [['off', []], ['source', ['--profile']], ['vm-simple', ['--profile-vm', 'simple']], ['vm-verbose', ['--profile-vm', 'verbose']]]
   samples = modes.map { [] }
   7.times do |iteration|

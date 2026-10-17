@@ -5,7 +5,7 @@ fn request(host: String, port: Int, path: String) -> Null {
     let response = Http.readResponse(client)
     if response == null { throw Error(Error.Kind.IO, "No HTTP response") }
     System.print(response["status"])
-    IO.write(response["body"] as String)
+    IO.write(response["body"] as Bytes)
 }
 
 if System.args.length() == 0 { System.print("http_client: use --net http_client.k3 127.0.0.1 8080 /health") }

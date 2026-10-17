@@ -217,6 +217,7 @@ class Runtime {
     bool collectionRequested = false;
     size_t nextCollection = 4096;
     uint64_t bindingEpoch = 0;
+    bool shadowGlobals = false;
     int contractForce = 0;
     size_t callDepth = 0;
     std::deque<Object *> readyTasks;

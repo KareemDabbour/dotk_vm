@@ -41,6 +41,7 @@ int main() {
     accepts("let a = 1\nlet b: Int = a + 2\nlet c: Float = a\nlet d = 1.5 * a\nlet e: Float = d\nlet f = 'x' + 1\nlet g: String = f");
     rejects("let a: Int = 'x'", "Expected Int, got String");
     accepts("fn grid(w: Int, h: Int) -> List<List<String?>> { return Collections.range(h).map(fn(y) => Collections.range(w).map(fn(x) => null)) }");
+    accepts("fn make<T>(w: Int) -> List<T?> { return Collections.range(w).map(fn(i) => null) }\nfn fill<T>(b: List<T?>, v: T) -> List<T?> { return b.map(fn(x: T?) => v) }");
     accepts("fn reset(b: List<List<String?>>) -> List<List<String?>> { return b.map(fn(row: List<String?>) => row.map(fn(x: String?) => 'a')) }");
     rejects("let a: Int = 1.5", "Expected Int, got Float");
     rejects("let a = 1\na = 2", "Cannot reassign");

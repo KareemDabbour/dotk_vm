@@ -72,7 +72,7 @@ static const char *usage =
     "       dotk3 -e SOURCE [args...]\n"
     "       dotk3 - [args...]\n"
     "       dotk3 --check PATH [PATH...]\n"
-    "       dotk3 --static [usual CLI arguments] (type-check with the static typer; erases run-time type contracts)\n"
+    "       dotk3 --legacy [usual CLI arguments] (gradual run-time typing; deprecated)\n"
     "       dotk3 --ast FILE.k3\n"
     "       dotk3 --debug FILE.k3 [args...]\n"
     "       dotk3 --files-root DIR [usual CLI arguments]\n"
@@ -110,7 +110,8 @@ static bool debuggerStopped(const std::exception &error, const dk3::Debugger &de
     return debugger.quitting() && language && language->category == "cancelled" &&
         std::string(language->what()) == "Debugger stopped execution";
 }
-static bool staticTyping = false;
+static bool staticTyping = true;
+using SessionHandle = std::shared_ptr<std::shared_ptr<dk3::TypeSession>>;
 
 static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
     return [directory](const std::string &name) {
@@ -126,10 +127,10 @@ static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
     };
 }
 
-// Prints every diagnostic and returns true when there were no errors.
-static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory, std::map<std::string, dk3::Ast> *modules = nullptr, bool showWarnings = false) {
+// Prints diagnostics and returns true when there were no errors.
+static bool printDiagnostics(const std::vector<dk3::Diagnostic> &diagnostics, bool showWarnings) {
     bool clean = true;
-    for (const auto &diagnostic : dk3::typeCheck(program, moduleLoader(directory), modules)) {
+    for (const auto &diagnostic : diagnostics) {
         if (diagnostic.warning && !showWarnings) continue;
         bool color = false;
 #ifndef _WIN32
@@ -140,6 +141,10 @@ static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &di
         if (!diagnostic.warning) clean = false;
     }
     return clean;
+}
+
+static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory) {
+    return printDiagnostics(dk3::typeCheck(program, moduleLoader(directory)), true);
 }
 
 static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
@@ -171,7 +176,7 @@ static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
             auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{filename, text}));
             if (staticTyping) {
                 std::filesystem::path directory = file == "-" ? std::filesystem::current_path() : std::filesystem::absolute(file).parent_path();
-                if (!staticCheck(program, directory, nullptr, true)) { if (!exitCode) exitCode = 65; continue; }
+                if (!staticCheck(program, directory)) { if (!exitCode) exitCode = 65; continue; }
             } else dk3::check(program);
             passed++;
             std::cout << "check: PASS" << (expanded ? " " + filename : "") << '\n';
@@ -188,7 +193,7 @@ static void printAst(const dk3::Ast &node, int depth = 0) {
     for (const auto &child : node->children) printAst(child, depth + 2);
 }
 
-static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &config, bool terminal) {
+static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &config, bool terminal, const SessionHandle &session, const std::filesystem::path &directory) {
     if (terminal) std::cout << version << "\n:help for shell commands\n";
 #ifndef _WIN32
     if (terminal) { using_history(); stifle_history(500); }
@@ -239,7 +244,10 @@ static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &conf
                         const auto &path = paths.front();
                         auto source = std::make_shared<dk3::Source>(dk3::Source{path.string(), readFile(path)});
                         if (command == ":ast") printAst(dk3::parse(source));
-                        else runtime->run(dk3::parse(source));
+                        else {
+                            auto program = dk3::parse(source);
+                            if (!*session || printDiagnostics((*session)->check(program), false)) runtime->run(program);
+                        }
                     }
                 } catch (const std::bad_alloc &) { throw; }
                 catch (const std::exception &error) { report(error); }
@@ -250,6 +258,7 @@ static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &conf
             else if (line == ":reset") {
                 try { runtime->cancelAll(); } catch (const std::exception &error) { report(error); }
                 runtime = std::make_unique<dk3::Runtime>(config);
+                if (*session) *session = std::make_shared<dk3::TypeSession>(moduleLoader(directory));
             } else std::cerr << "dotk3: Unknown shell command; use :help\n";
             continue;
         }
@@ -260,7 +269,9 @@ static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &conf
             if (error.incomplete) { pending += '\n'; continue; }
             report(error); pending.clear(); submission++; continue;
         }
-        try { runtime->run(program, true); }
+        try {
+            if (!*session || printDiagnostics((*session)->check(program), false)) runtime->run(program, true);
+        }
         catch (const std::bad_alloc &) { throw; }
         catch (const std::exception &error) { report(error); }
         pending.clear(); submission++;
@@ -283,6 +294,7 @@ int main(int argc, char **argv) {
     while (start < argc) {
         if (std::string(argv[start]) == "--net") { networkEnabled = true; start++; }
         else if (std::string(argv[start]) == "--static") { staticTyping = true; start++; }
+        else if (std::string(argv[start]) == "--legacy") { staticTyping = false; start++; }
         else if (std::string(argv[start]) == "--profile") { profileOptions.source = true; start++; }
         else if (std::string(argv[start]) == "--profile-vm") {
             if (start + 1 >= argc || (std::string(argv[start + 1]) != "simple" && std::string(argv[start + 1]) != "verbose")) { std::cerr << usage; return 64; }
@@ -405,6 +417,12 @@ int main(int argc, char **argv) {
             debugger.resume(dk3::debugConsole(debugger, snapshot, std::cin, std::cout, terminal), snapshot);
             if (debugger.quitting()) throw dk3::Error(snapshot.location, "Debugger stopped execution", "cancelled");
         };
+        SessionHandle session = std::make_shared<std::shared_ptr<dk3::TypeSession>>();
+        if (staticTyping) {
+            *session = std::make_shared<dk3::TypeSession>(moduleLoader(directory));
+            config.enforceContracts = false;
+            config.resolveProgram = [session](const std::string &name) -> dk3::Ast { return *session ? (*session)->module(name) : nullptr; };
+        }
         config.resolveSource = [directory](const std::string &name) {
             std::filesystem::path relative(name);
             if (relative.is_absolute() || name.find("..") != std::string::npos)
@@ -425,18 +443,15 @@ int main(int argc, char **argv) {
             if (astOnly) {
                 printAst(dk3::parse(source)); return 0;
             }
-            runtime = std::make_unique<dk3::Runtime>(config);
             dk3::Ast checked;
             if (staticTyping) {
-                std::map<std::string, dk3::Ast> modules; checked = dk3::parse(source);
-                if (!staticCheck(checked, directory, &modules)) { runtime.reset(); return 65; }
-                config.enforceContracts = false;
-                config.resolveProgram = [modules](const std::string &name) -> dk3::Ast { auto found = modules.find(name); return found == modules.end() ? nullptr : found->second; };
-                runtime = std::make_unique<dk3::Runtime>(config);
+                checked = dk3::parse(source);
+                if (!printDiagnostics((*session)->check(checked, false), false)) return 65;
             }
+            runtime = std::make_unique<dk3::Runtime>(config);
             if (checked) runtime->run(checked); else runtime->run(text, filename);
         } else runtime = std::make_unique<dk3::Runtime>(config);
-        if (repl || interactiveAfter) exitCode = shell(runtime, config, terminal);
+        if (repl || interactiveAfter) exitCode = shell(runtime, config, terminal, session, directory);
     } catch (const dk3::Error &error) {
         if (!debuggerStopped(error, debugger)) { report(error); exitCode = 65; }
     } catch (const std::exception &error) {

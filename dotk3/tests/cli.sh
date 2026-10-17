@@ -35,16 +35,16 @@ for level in 0 1 2; do
 done
 if "$binary" -O3 -e 'null' >"$work/optimization-output" 2>"$work/optimization-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 64
-output=$("$binary" --engine bytecode -O0 -e 'fn square(value) { return value * value }; System.print(square(7))')
+output=$("$binary" --engine bytecode -O0 -e 'fn square(value: Int) -> Int { return value * value }; System.print(square(7))')
 expect '49' "$output"
 if "$binary" --engine ast -e 'null' >"$work/old-engine-output" 2>"$work/old-engine-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 64
-printf '%s\n' 'export fn leaf() {' '    System.print(missing_trace)' '}' >"$work/trace_leaf.k3"
+printf '%s\n' 'export fn leaf() {' '    let values: List<Int> = []' '    System.print(values[1])' '}' >"$work/trace_leaf.k3"
 printf '%s\n' 'from trace_leaf import leaf' 'fn main() { leaf() }' 'main()' >"$work/trace_main.k3"
 if "$binary" "$work/trace_main.k3" >"$work/trace-output" 2>"$work/trace-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 65
-grep -Fq "NameError: Undeclared name 'missing_trace'" "$work/trace-error"
-grep -Fq '2 |     System.print(missing_trace)' "$work/trace-error"
+grep -Fq 'IndexError:' "$work/trace-error"
+grep -Fq '3 |     System.print(values[1])' "$work/trace-error"
 grep -Fq 'Call stack:' "$work/trace-error"
 grep -Fq 'leaf()' "$work/trace-error"
 grep -Fq 'main()' "$work/trace-error"
@@ -76,7 +76,7 @@ world 11 false' "$output"
 output=$("$binary" --files-root "$work/files" -e 'let data = Files.readBytes("binary.dat"); System.print(data.length(), data[0], data[1])')
 expect '2 255 0' "$output"
 printf '%s' '{"value":9007199254740993,"items":[1,2]}' >"$work/files/data.json"
-output=$("$binary" --files-root "$work/files" -e 'let value: Map[String, Any] = Json.parse(Files.readText("data.json")); System.print(value["value"], Json.stringify(value["items"]))')
+output=$("$binary" --files-root "$work/files" -e 'let value = Json.parse(Files.readText("data.json")) as Map<String, Object?>; System.print(value["value"], Json.stringify(value["items"]))')
 expect '9007199254740993 [1,2]' "$output"
 output=$("$binary" --files-root "$work/files" -e 'try { Files.readText("binary.dat") } catch error { System.print(error.kind) }')
 expect 'value' "$output"
@@ -117,11 +117,11 @@ esac
 output=$(printf '%s\n' 'System.print(1)' 'System.print(2)' | "$binary")
 expect '1
 2' "$output"
-output=$(printf '%s\n' 'var kept = 7' 'kept + 5' 'fn add(value) {' 'return value + kept' '}' 'add(3)' 'missing()' 'kept' ':quit' | "$binary" --repl 2>"$work/error")
+output=$(printf '%s\n' 'var kept = 7' 'kept + 5' 'fn add(value: Int) -> Int {' 'return value + kept' '}' 'add(3)' 'missing()' 'kept' ':quit' | "$binary" --repl 2>"$work/error")
 expect '12
 10
 7' "$output"
-if ! grep -q "Undeclared name 'missing'" "$work/error"; then
+if ! grep -q "Undefined name 'missing'" "$work/error"; then
     printf '%s\n' 'REPL error was not reported' >&2; exit 1
 fi
 output=$(printf '%s\n' 'defer fn() { System.gc() }(); ["retained", 2]' ':quit' | "$binary" --repl)
@@ -167,7 +167,7 @@ else
     exit_code=$?; test "$exit_code" -eq 64
 fi
 printf '%s\n' 'cli: PASS'
-printf '%s\n' 'fn add(value) {' 'let local = value + 1' 'return local' '}' 'var result = add(2)' 'result += 1' 'System.print(result)' >"$work/debug.k3"
+printf '%s\n' 'fn add(value: Int) -> Int {' 'let local = value + 1' 'return local' '}' 'var result = add(2)' 'result += 1' 'System.print(result)' >"$work/debug.k3"
 printf '%s\n' 'b 3' 'breakpoints' 'c' 'locals' 'bt' 'frame 1' 'locals' 'frame 0' 'p local' 'p missing()' 'f' 'locals' 'n' 'globals' 'c' | "$binary" --debug "$work/debug.k3" >"$work/debug-output"
 grep -Eq 'local[[:space:]]+Int[[:space:]]+3' "$work/debug-output"
 grep -Eq '#0[[:space:]]+add' "$work/debug-output"

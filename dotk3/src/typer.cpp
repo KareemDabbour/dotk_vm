@@ -134,6 +134,16 @@ public:
         blockStatements(program->children);
     }
 
+    // One REPL submission: globals persist and may be redeclared; a failed submission leaves no trace.
+    std::vector<Diagnostic> checkSubmission(const Ast &program, bool allowRedeclaration) {
+        diagnostics.clear();
+        Scope saved = scopes[1]; std::set<std::string> savedAssigned = assigned;
+        sessionMode = allowRedeclaration; check(program); sessionMode = false;
+        bool failed = std::any_of(diagnostics.begin(), diagnostics.end(), [](const Diagnostic &diagnostic) { return !diagnostic.warning; });
+        if (failed) { scopes.resize(2); scopes[1] = std::move(saved); assigned = std::move(savedAssigned); functions.clear(); }
+        return diagnostics;
+    }
+
 private:
     Types ty;
     std::vector<Scope> scopes;
@@ -147,6 +157,7 @@ private:
     std::map<std::string, Ast> programs;
     std::set<std::string> loading;
     bool builtinMode = false;
+    bool sessionMode = false;
     Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
     ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr, *iterableInfo = nullptr;
 
@@ -171,8 +182,8 @@ private:
     }
 
     void declareSymbol(const std::string &name, Symbol symbol, const Span &span) {
-        if (scopes.back().symbols.count(name)) { error(span, "Duplicate declaration '" + name + "'"); return; }
-        scopes.back().symbols.emplace(name, std::move(symbol));
+        if (scopes.back().symbols.count(name) && !(sessionMode && scopes.size() == 2)) { error(span, "Duplicate declaration '" + name + "'"); return; }
+        scopes.back().symbols.insert_or_assign(name, std::move(symbol));
     }
 
     void declareValue(const std::string &name, Ty type, bool mutableBinding, const Span &span) {
@@ -1438,6 +1449,16 @@ std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader
     Typer typer; typer.setLoader(loader); typer.check(program);
     if (modules) *modules = typer.loadedPrograms();
     return typer.diagnostics;
+}
+
+struct TypeSession::Impl { Typer typer; };
+
+TypeSession::TypeSession(ModuleLoader loader) : impl(std::make_unique<Impl>()) { impl->typer.setLoader(std::move(loader)); }
+TypeSession::~TypeSession() = default;
+std::vector<Diagnostic> TypeSession::check(const Ast &program, bool allowRedeclaration) { return impl->typer.checkSubmission(program, allowRedeclaration); }
+Ast TypeSession::module(const std::string &name) const {
+    auto found = impl->typer.loadedPrograms().find(name);
+    return found == impl->typer.loadedPrograms().end() ? nullptr : found->second;
 }
 
 std::string formatDiagnostic(const Diagnostic &diagnostic, bool color) {

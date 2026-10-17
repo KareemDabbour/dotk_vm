@@ -65,7 +65,7 @@ def until_marker(reader, marker)
 end
 
 Timeout.timeout(45) do
-  lifecycle = command('--net', '-e', "let listener = Sockets.listen('127.0.0.1', 0); let empty = Sockets.accept(listener, 0); let client = Sockets.connect('127.0.0.1', Sockets.port(listener), 1000); let peer = Sockets.accept(listener, 1000); System.print(empty == null, Sockets.receive(client, 1, 0) == null); Sockets.send(peer, b'A\\x00B', 1000); let data = Sockets.receive(client, 8, 1000); System.print(data == b'A\\x00B'); Sockets.close(peer); System.print(Sockets.receive(client, 8, 1000) == b''); Sockets.close(client); Sockets.close(listener)")
+  lifecycle = command('--net', '-e', "let listener = Sockets.listen('127.0.0.1', 0); let empty = Sockets.accept(listener, 0); let client = Sockets.connect('127.0.0.1', Sockets.port(listener), 1000); let peer = Sockets.accept(listener, 1000)!; System.print(empty == null, Sockets.receive(client, 1, 0) == null); Sockets.send(peer, b'A\\x00B', 1000); let data = Sockets.receive(client, 8, 1000); System.print(data == b'A\\x00B'); Sockets.close(peer); System.print(Sockets.receive(client, 8, 1000) == b''); Sockets.close(client); Sockets.close(listener)")
   raise 'Socket timeout/bytes/EOF lifecycle failed' unless lifecycle == "true true\ntrue\ntrue\n"
   raise 'Combined network/files capabilities failed' unless command('--net', '--files-root', EXAMPLES, '-e', "System.print(Files.exists('tetris.k3')); let server = Sockets.listen('127.0.0.1', 0); Sockets.close(server)") == "true\n"
   denied = command('-e', "try { Sockets.listen('127.0.0.1', 0) } catch error { System.print(error.kind == Error.Kind.Capability) }")
@@ -84,7 +84,7 @@ Timeout.timeout(45) do
     native = command('--net', File.join(EXAMPLES, 'http_client.k3'), '127.0.0.1', port.to_s, '/health')
     raise 'DotK HTTP client failed' unless native.start_with?("200\n") && JSON.parse(native.lines[1])['ok']
     raise 'Missing route failed' unless http_request(port, 'GET', '/missing').code == '404'
-    requests = command('--net', '-e', "let health = Requests.get('http://127.0.0.1:#{port}/health'); let echo = Requests.post('http://127.0.0.1:#{port}/echo', {'body': 'ping', 'headers': {'X-Test': 'yes'}}); let missing = Requests.get('http://127.0.0.1:#{port}/missing'); System.print(health['status'], health['ok'], Requests.json(health)['language'], echo['body'], missing['status'], missing['ok'])")
+    requests = command('--net', '-e', "let health = Requests.get('http://127.0.0.1:#{port}/health'); let echo = Requests.post('http://127.0.0.1:#{port}/echo', {'body': 'ping', 'headers': {'X-Test': 'yes'}}); let missing = Requests.get('http://127.0.0.1:#{port}/missing'); System.print(health['status'], health['ok'], (Requests.json(health) as Map<String, Object?>)['language'], echo['body'], missing['status'], missing['ok'])")
     raise 'Requests module failed' unless requests == "200 true DotK 3 ping 404 false\n"
     refused = command('--net', '-e', "try { Requests.get('http://127.0.0.1:1/', {'timeoutMs': 500}) } catch error { System.print(error.kind == Error.Kind.IO) }")
     raise 'Requests connection failure should be an IO error' unless refused == "true\n"
@@ -116,7 +116,7 @@ Timeout.timeout(45) do
     font = http_request(port, 'GET', '/arcade.woff2')
     raise 'Local font failed' unless font.code == '200' && font.body.b.start_with?('wOF2') && font['content-type'] == 'font/woff2'
     initial = JSON.parse(http_request(port, 'GET', '/api/state').body)
-    raise 'Initial authoritative game state failed' unless initial['status'] == 'ready' && initial['board'].length == 868 && initial['ghosts'].length == 3
+    raise 'Initial authoritative game state failed' unless initial['status'] == 'ready' && initial['board'].length == 868 && initial['ghosts'].length == 4
     started = JSON.parse(http_request(port, 'POST', '/api/action', JSON.generate(action: 'right')).body)
     raise 'Game start action failed' unless started['status'] == 'playing'
     paused = JSON.parse(http_request(port, 'POST', '/api/action', JSON.generate(action: 'pause')).body)
