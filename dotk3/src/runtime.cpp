@@ -233,6 +233,7 @@ Runtime::FrameScope::FrameScope(Runtime &owner, const Node &function, Object *en
     static const std::string anonymous = "<anonymous>";
     owner.debugFrames.push_back({++owner.nextDebugFrame, owner.currentTask ? owner.currentTask->debugTaskId : 0,
         {}, {}, function.text.empty() ? &anonymous : &function.text, &function.span, environment, nullptr, prefix});
+    if (owner.config.profiler) owner.config.profiler->enter(owner.debugFrames.back().frameName(), function.span, owner.currentTask ? owner.currentTask->debugTaskId : 0);
 }
 Runtime::FrameScope::~FrameScope() { if (runtime.config.profiler) runtime.config.profiler->leave(); runtime.debugFrames.resize(start); }
 void Runtime::captureFailure(std::exception_ptr failure) noexcept {
