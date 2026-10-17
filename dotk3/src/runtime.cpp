@@ -228,11 +228,11 @@ Runtime::FrameScope::FrameScope(Runtime &owner, const char *name, const Span &lo
         name, location, nullptr, nullptr, environment, generator});
     if (owner.config.profiler) owner.config.profiler->enter(name, location, owner.currentTask ? owner.currentTask->debugTaskId : 0);
 }
-Runtime::FrameScope::FrameScope(Runtime &owner, const Node &function, Object *environment)
+Runtime::FrameScope::FrameScope(Runtime &owner, const Node &function, Object *environment, const std::string *prefix)
     : runtime(owner), start(owner.debugFrames.size()) {
     static const std::string anonymous = "<anonymous>";
     owner.debugFrames.push_back({++owner.nextDebugFrame, owner.currentTask ? owner.currentTask->debugTaskId : 0,
-        {}, {}, function.text.empty() ? &anonymous : &function.text, &function.span, environment, nullptr});
+        {}, {}, function.text.empty() ? &anonymous : &function.text, &function.span, environment, nullptr, prefix});
 }
 Runtime::FrameScope::~FrameScope() { if (runtime.config.profiler) runtime.config.profiler->leave(); runtime.debugFrames.resize(start); }
 void Runtime::captureFailure(std::exception_ptr failure) noexcept {
@@ -875,17 +875,17 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         result->items = values; return result;
     }
     if (function->kind != Kind::Function && function->kind != Kind::RecordType && function->kind != Kind::ClassType) throw Error(span, "Value is not callable", "type");
-    if (function->kind == Kind::Function && !receiver && !config.debug) {
+    if (function->kind == Kind::Function && !config.debug) {
         if (!function->bytecodeAttempted) {
             std::optional<ProfileScope> profile;
             if (config.profiler) profile.emplace(config.profiler.get(), "Compile", "vm", span);
-            function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, true); function->bytecodeAttempted = true;
+            function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, true, receiver != nullptr); function->bytecodeAttempted = true;
         }
-        if (function->bytecode) {
+        if (function->bytecode && function->bytecode->hasSelf == (receiver != nullptr)) {
             if (config.profiler) config.profiler->bytecodeCalls++;
-            FrameScope frame(*this, function->code->text.empty() ? "<anonymous>" : function->code->text.c_str(), function->code->span, function->parent);
+            FrameScope frame(*this, *function->code, function->parent, receiver && receiver->origin ? &receiver->origin->text : nullptr);
             try {
-                Value result = executeBytecode(*function->bytecode, function->parent, arguments, span, function->bytecode->captures ? &function->items : nullptr); roots.push_back(result);
+                Value result = executeBytecode(*function->bytecode, function->parent, arguments, span, function->bytecode->captures ? &function->items : nullptr, receiver); roots.push_back(result);
                 return result;
             } catch (...) { captureFailure(std::current_exception()); throw; }
         }
@@ -982,7 +982,8 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         }
         return record;
     }
-    if (hasYield(function->code->children[0])) {
+    if (function->code->yieldCache < 0) function->code->yieldCache = hasYield(function->code->children[0]) ? 1 : 0;
+    if (function->code->yieldCache) {
         Object *generator = allocate(Kind::Generator, span); generator->parent = environment; generator->code = function->code;
         generator->debugFrameId = ++nextDebugFrame;
         compileGenerator(generator, function->code->children[0]); generator->scopes.push_back(environment); return generator;

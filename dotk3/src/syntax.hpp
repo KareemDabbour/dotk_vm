@@ -99,6 +99,7 @@ struct Node {
     // Qualified name of the core native this call statically resolves to (e.g. "Math.sin").
     std::string target;
     const TypeData *resolved = nullptr;
+    mutable signed char yieldCache = -1;  // runtime memo: does this function body contain yield
     Visibility visibility = Visibility::Public;
     std::string baseClass;
     TypeAst typeExpr;

@@ -23,6 +23,7 @@ class Compiler {
     bool valid = true;
     bool lexical = false;
     bool slotClosures = false;
+    bool method = false;
     std::vector<std::unordered_map<std::string, size_t>> scopes{1};
     std::unordered_map<std::string, size_t> names;
     struct Loop { size_t start, depth; std::vector<size_t> breaks; std::vector<size_t> continues = {}; };
@@ -295,6 +296,7 @@ class Compiler {
     }
 public:
     void enableSlotClosures(bool value) { slotClosures = value; }
+    void enableMethod(bool value) { method = value; }
     std::shared_ptr<const Bytecode> compileClosure(const Ast &node, const std::vector<std::string> &captured, unsigned optimization) {
         code.optimization = optimization;
         for (const auto &parameter : node->parameters) {
@@ -327,6 +329,12 @@ public:
                 size_t slot = code.locals.size(); code.locals.push_back({parameter.name, parameter.type, false}); scopes.front()[parameter.name] = slot;
             }
             code.parameters = code.locals.size(); body = node->children[0];
+            if (method) {
+                std::vector<std::string> referenced; std::set<std::string> declared;
+                collectNames(body, referenced, declared);
+                if (std::find(referenced.begin(), referenced.end(), "super") != referenced.end()) return {};
+                code.hasSelf = true; size_t slot = code.locals.size(); code.locals.push_back({"self", "", false}); scopes.front()["self"] = slot;
+            }
         } else if (node->kind == "block") code.program = true;
         else return {};
         if (code.program && echoResult && !body->children.empty() && body->children.back()->kind == "expression") {
@@ -344,8 +352,8 @@ public:
     }
 };
 }
-std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization, bool echoResult, bool slotClosures) {
-    Compiler compiler; compiler.enableSlotClosures(slotClosures);
+std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization, bool echoResult, bool slotClosures, bool method) {
+    Compiler compiler; compiler.enableSlotClosures(slotClosures); compiler.enableMethod(method);
     return compiler.compile(node, optimization, echoResult);
 }
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization) { return Compiler{}.expressionCode(node, optimization); }

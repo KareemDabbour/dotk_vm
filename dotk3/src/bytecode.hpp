@@ -36,6 +36,8 @@ struct Bytecode {
     size_t parameters = 0;
     // Captured values occupy the locals right after the parameters (copied from the closure object).
     size_t captures = 0;
+    // Methods keep their receiver in the local right after the parameters.
+    bool hasSelf = false;
     unsigned optimization = 2;
     bool program = false;
     // Resolved global/module bindings, valid for one environment and binding epoch.
@@ -43,7 +45,7 @@ struct Bytecode {
     mutable Object *nameEnvironment = nullptr;
     mutable uint64_t nameEpoch = ~uint64_t{0};
 };
-std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false, bool slotClosures = false);
+std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false, bool slotClosures = false, bool method = false);
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization = 2);
 std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization = 2);
 const char *byteOpName(ByteOp op);

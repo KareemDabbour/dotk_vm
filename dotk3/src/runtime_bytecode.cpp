@@ -10,20 +10,20 @@ Object *byteObject(Value value, const Span &span) {
     return std::get<Object *>(value);
 }
 }
-Value Runtime::executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured) {
-    if (config.profiler) return executeBytecodeLoop<true>(code, environment, arguments, span, captured);
-    return executeBytecodeLoop<false>(code, environment, arguments, span, captured);
+Value Runtime::executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, Object *self) {
+    if (config.profiler) return executeBytecodeLoop<true>(code, environment, arguments, span, captured, nullptr, 0, self);
+    return executeBytecodeLoop<false>(code, environment, arguments, span, captured, nullptr, 0, self);
 }
-Value Runtime::callFunctionFast(Object *function, const Value *arguments, size_t count, const Span &span) {
+Value Runtime::callFunctionFast(Object *function, const Value *arguments, size_t count, const Span &span, Object *receiver) {
     static const std::vector<Argument> none;
     if (++callDepth > 256) { callDepth--; throw Error(span, "Call depth exceeded", "limit"); }
     struct DepthGuard { size_t &depth; ~DepthGuard() { depth--; } } depthGuard{callDepth};
-    FrameScope frame(*this, *function->code, function->parent);
-    try { return executeBytecodeLoop<false>(*function->bytecode, function->parent, none, span, function->bytecode->captures ? &function->items : nullptr, arguments, count); }
+    FrameScope frame(*this, *function->code, function->parent, receiver && receiver->origin ? &receiver->origin->text : nullptr);
+    try { return executeBytecodeLoop<false>(*function->bytecode, function->parent, none, span, function->bytecode->captures ? &function->items : nullptr, arguments, count, receiver); }
     catch (...) { captureFailure(std::current_exception()); throw; }
 }
 template<bool profiled>
-Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positionalArguments, size_t positionalCount) {
+Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positionalArguments, size_t positionalCount, Object *self) {
     if (byteFrameDepth == byteFrames.size()) byteFrames.emplace_back();
     ByteFrame &frame = byteFrames[byteFrameDepth++];
     struct ReleaseFrame {
@@ -49,6 +49,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         frame.locals[slot] = argument.value; frame.initialized[slot] = true;
     }
     if (!positionalArguments) for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
+    if (code.hasSelf) { frame.locals[code.parameters] = self; frame.initialized[code.parameters] = true; }
     if (captured) for (size_t index = 0; index < code.captures && index < captured->size(); index++) {
         frame.locals[code.parameters + index] = (*captured)[index]; frame.initialized[code.parameters + index] = true;
     }
