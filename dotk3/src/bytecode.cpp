@@ -4,14 +4,25 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <unordered_map>
 
 namespace dk3 {
 namespace {
+void collectNames(const Ast &node, std::vector<std::string> &referenced, std::set<std::string> &declared) {
+    if (!node) return;
+    if (node->kind == "name") referenced.push_back(node->text);
+    if (node->kind == "binding" || node->kind == "for" || node->kind == "try") declared.insert(node->text);
+    if (node->kind == "arm") for (const auto &name : node->names) declared.insert(name);
+    for (const auto &parameter : node->parameters) { declared.insert(parameter.name); collectNames(parameter.defaultValue, referenced, declared); }
+    for (const auto &child : node->children) collectNames(child, referenced, declared);
+}
+
 class Compiler {
     Bytecode code;
     bool valid = true;
     bool lexical = false;
+    bool slotClosures = false;
     std::vector<std::unordered_map<std::string, size_t>> scopes{1};
     std::unordered_map<std::string, size_t> names;
     struct Loop { size_t start, depth; std::vector<size_t> breaks; std::vector<size_t> continues = {}; };
@@ -111,8 +122,8 @@ class Compiler {
             for (const auto &child : node->children) expression(child);
             emit(node->kind == "list" ? ByteOp::List : node->kind == "tuple" ? ByteOp::Tuple : ByteOp::Map, node, node->children.size());
         } else if (node->kind == "function") {
-            if (!lexical) { valid = false; return; }
-            emit(ByteOp::Closure, node);
+            if (lexical) emit(ByteOp::Closure, node);
+            else if (!closure(node)) { valid = false; return; }
         } else if (node->kind == "format") {
             emit(ByteOp::Text, node);
             for (const auto &part : node->children) { expression(part); emit(ByteOp::Format, part); }
@@ -122,6 +133,14 @@ class Compiler {
             size_t bounds = 0; for (size_t index = 1; index < 4; index++) if (node->children[index]) bounds |= size_t{1} << (index - 1);
             emit(ByteOp::Slice, node, bounds);
         } else if (node->kind == "match") {
+            if (slotClosures && !lexical) { inlineMatch(node); return; }
+            for (size_t index = 1; index < node->children.size(); index++) {
+                std::vector<std::string> referenced; std::set<std::string> declared;
+                collectNames(node->children[index]->children[0], referenced, declared);
+                const auto &bound = node->children[index]->names;
+                for (const auto &name : referenced)
+                    if (local(name) != std::numeric_limits<size_t>::max() && std::find(bound.begin(), bound.end(), name) == bound.end()) { valid = false; return; }
+            }
             expression(node->children[0]); ByteMatch match;
             for (size_t index = 1; index < node->children.size(); index++) {
                 const auto &arm = node->children[index]; auto compiled = compileExpression(arm->children[0], code.optimization);
@@ -146,6 +165,62 @@ class Compiler {
             } else valid = false;
         } else valid = false;
     }
+    bool closure(const Ast &node) {
+        if (!slotClosures || !node->text.empty()) return false;
+        for (const auto &parameter : node->parameters) if (parameter.defaultValue || parameter.rest) return false;
+        std::vector<std::string> referenced; std::set<std::string> declared;
+        collectNames(node, referenced, declared);
+        std::vector<std::string> captured; ByteClosure info; info.node = node;
+        for (const auto &name : referenced) {
+            size_t slot = local(name);
+            if (declared.count(name) || slot == std::numeric_limits<size_t>::max() || std::find(captured.begin(), captured.end(), name) != captured.end()) continue;
+            captured.push_back(name); info.slots.push_back(slot);
+        }
+        Compiler inner; inner.enableSlotClosures(true);
+        info.code = inner.compileClosure(node, captured, code.optimization);
+        if (!info.code) return false;
+        code.closures.push_back(std::move(info));
+        emit(ByteOp::MakeClosure, node, code.closures.size() - 1);
+        return true;
+    }
+    void inlineMatch(const Ast &node) {
+        expression(node->children[0]);
+        std::vector<size_t> ends;
+        for (size_t index = 1; index < node->children.size(); index++) {
+            const auto &arm = node->children[index];
+            size_t test = emit(ByteOp::MatchTest, arm);
+            scopes.emplace_back(); size_t first = code.locals.size();
+            for (const auto &bound : arm->names) { size_t slot = code.locals.size(); code.locals.push_back({bound, "", false}); scopes.back()[bound] = slot; }
+            if (!arm->names.empty()) { size_t bind = emit(ByteOp::MatchBind, arm, arm->names.size()); code.instructions[bind].integer = static_cast<int64_t>(first); }
+            expression(arm->children[0]);
+            clear(scopes.size() - 1, arm); scopes.pop_back();
+            emit(ByteOp::Swap, node); emit(ByteOp::Pop, node);
+            ends.push_back(emit(ByteOp::Jump, node));
+            code.instructions[test].operand = code.instructions.size();
+        }
+        emit(ByteOp::MatchFail, node);
+        for (size_t jump : ends) code.instructions[jump].operand = code.instructions.size();
+    }
+    void forIn(const Ast &node) {
+        scopes.emplace_back();
+        expression(node->children[0]);
+        size_t hidden = code.locals.size();
+        code.locals.push_back({" iterable", "", false}); code.locals.push_back({" cursor", "", true});
+        scopes.back()[" iterable" + std::to_string(hidden)] = hidden; scopes.back()[" cursor" + std::to_string(hidden)] = hidden + 1;
+        size_t init = emit(ByteOp::IterInit, node); code.instructions[init].integer = static_cast<int64_t>(hidden);
+        size_t begin = code.instructions.size(); emit(ByteOp::Point, node);
+        size_t advance = emit(ByteOp::IterNext, node); code.instructions[advance].integer = static_cast<int64_t>(hidden);
+        scopes.emplace_back();
+        size_t slot = code.locals.size(); code.locals.push_back({node->text, "", false}); scopes.back()[node->text] = slot;
+        emit(ByteOp::DeclareLocal, node, slot);
+        loops.push_back({begin, scopes.size() - 1, {}});
+        block(node->children[1], true);
+        clear(scopes.size() - 1, node); scopes.pop_back();
+        emit(ByteOp::SafePoint, node); emit(ByteOp::Jump, node, begin);
+        code.instructions[advance].operand = code.instructions.size();
+        for (size_t jump : loops.back().breaks) code.instructions[jump].operand = code.instructions.size();
+        loops.pop_back(); clear(scopes.size() - 1, node); scopes.pop_back();
+    }
     void block(const Ast &node, bool scope) {
         if (scope) scopes.emplace_back();
         for (const auto &child : node->children) statement(child);
@@ -165,9 +240,10 @@ class Compiler {
             }
         } else if (node->kind == "function" && (lexical || (code.program && scopes.size() == 1))) emit(ByteOp::DefineFunction, node);
         else if (node->kind == "type_alias") {}
-        else if (lexical && (node->kind == "class" || node->kind == "record" || node->kind == "trait" || node->kind == "impl" || node->kind == "enum")) emit(ByteOp::DeclareType, node);
-        else if (lexical && (node->kind == "import" || node->kind == "from_import")) emit(ByteOp::Import, node);
-        else if (lexical && node->kind == "throw") { expression(node->children[0]); emit(ByteOp::Throw, node); }
+        else if ((lexical || (code.program && scopes.size() == 1)) && (node->kind == "class" || node->kind == "record" || node->kind == "trait" || node->kind == "impl" || node->kind == "enum")) emit(ByteOp::DeclareType, node);
+        else if ((lexical || (code.program && scopes.size() == 1)) && (node->kind == "import" || node->kind == "from_import")) emit(ByteOp::Import, node);
+        else if ((lexical || slotClosures) && node->kind == "throw") { expression(node->children[0]); emit(ByteOp::Throw, node); }
+        else if (slotClosures && node->kind == "for") forIn(node);
         else if (node->kind == "return" && !code.program) {
             if (node->children.empty()) emit(ByteOp::Null, node); else expression(node->children[0]);
             emit(ByteOp::Return, node);
@@ -204,6 +280,20 @@ class Compiler {
         emit(ByteOp::SafePoint, node);
     }
 public:
+    void enableSlotClosures(bool value) { slotClosures = value; }
+    std::shared_ptr<const Bytecode> compileClosure(const Ast &node, const std::vector<std::string> &captured, unsigned optimization) {
+        code.optimization = optimization;
+        for (const auto &parameter : node->parameters) {
+            size_t slot = code.locals.size(); code.locals.push_back({parameter.name, parameter.type, false}); scopes.front()[parameter.name] = slot;
+        }
+        code.parameters = code.locals.size();
+        for (const auto &name : captured) {
+            size_t slot = code.locals.size(); code.locals.push_back({name, "", false}); scopes.front()[name] = slot;
+        }
+        code.captures = captured.size();
+        block(node->children[0], false); emit(ByteOp::Null, node->children[0]); emit(ByteOp::Return, node->children[0]);
+        return valid ? std::make_shared<const Bytecode>(std::move(code)) : nullptr;
+    }
     std::shared_ptr<const Bytecode> expressionCode(const Ast &node, unsigned optimization) {
         lexical = true; code.optimization = optimization; expression(node); emit(ByteOp::Return, node);
         if (!valid) throw Error(node->span, "Cannot lower expression to bytecode: " + node->kind, "internal");
@@ -240,11 +330,14 @@ public:
     }
 };
 }
-std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization, bool echoResult) { return Compiler{}.compile(node, optimization, echoResult); }
+std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization, bool echoResult, bool slotClosures) {
+    Compiler compiler; compiler.enableSlotClosures(slotClosures);
+    return compiler.compile(node, optimization, echoResult);
+}
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization) { return Compiler{}.expressionCode(node, optimization); }
 std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization) { return Compiler{}.statementCode(node, optimization); }
 const char *byteOpName(ByteOp op) {
-    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat"};
+    static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat", "MakeClosure", "IterInit", "IterNext", "MatchTest", "MatchBind", "MatchFail"};
     return names[static_cast<size_t>(op)];
 }
 }

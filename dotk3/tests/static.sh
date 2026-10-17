@@ -69,4 +69,64 @@ set -e
 printf 'fn half(v: Int) -> Float { return v / 2 }\nlet x: Float = 3\nlet y: Float = x + 1\nSystem.print(Reflection.type(x), Reflection.type(y), Reflection.type(2 * 1.5), half(3), Reflection.type(half(4)))\n' > "$dir/widen.k3"
 [ "$("$bin" --static "$dir/widen.k3")" = 'Float Float Float 1.5 Float' ] || { echo 'Int values must widen to Float' >&2; exit 1; }
 
+cat > "$dir/slots.k3" <<'EOF'
+fn counter(start: Int) -> fn() -> Int {
+    let base = start * 2
+    return fn() => base + 1
+}
+fn compose(f: fn(Int) -> Int, g: fn(Int) -> Int) -> fn(Int) -> Int {
+    return fn(x) => f(g(x))
+}
+fn adders(n: Int) -> List<fn(Int) -> Int> {
+    let result: List<fn(Int) -> Int> = []
+    for i in Collections.range(n) {
+        result.append(fn(x) => x + i)
+    }
+    return result
+}
+fn nested(a: Int) -> Int {
+    let outer = fn(b: Int) => fn(c: Int) => a + b + c
+    return outer(10)(100)
+}
+fn evens() {
+    for i in Collections.range(10) {
+        if i % 2 == 1 { continue }
+        if i > 6 { break }
+        yield i
+    }
+}
+fn sumGenerator() -> Int {
+    var total = 0
+    for v in evens() { total += v }
+    return total
+}
+fn loops() -> String {
+    var out = ""
+    for c in "abc" { out = out + c }
+    for k in {"x": 1, "y": 2} { out = out + k }
+    for item in [1, 2, 3, 4, 5] {
+        if item == 2 { continue }
+        if item == 5 { break }
+        out = out + item
+    }
+    for t in (7, 8) { out = out + t }
+    return out
+}
+enum Op { Add(Int), Scale(Int), Reset }
+fn apply(op: Op, value: Int, bias: Int) -> Int {
+    let extra = bias * 10
+    return match op { Op.Add(n) => value + n + extra, Op.Scale(k) => value * k + bias, Op.Reset => extra }
+}
+System.print(counter(5)(), compose(fn(x) => x * 2, fn(x) => x + 1)(4), adders(3)[2](10), nested(1))
+System.print(sumGenerator(), loops())
+System.print(apply(Op.Add(1), 2, 3), apply(Op.Scale(4), 2, 3), apply(Op.Reset, 2, 3))
+EOF
+expected='11 10 12 111
+12 abcxy13478
+33 11 30'
+[ "$("$bin" --static "$dir/slots.k3")" = "$expected" ] || { echo 'slot-mode closures, loops and match differ' >&2; "$bin" --static "$dir/slots.k3" >&2; exit 1; }
+
+printf 'enum Shape { Circle(Float), Square(Float) }\nfn scaled(shape: Shape, k: Float) -> Float {\n    let base = 2.0\n    return match shape { Shape.Circle(r) => r * k + base, Shape.Square(a) => a * k }\n}\nSystem.print(scaled(Shape.Circle(1.0), 3.0), scaled(Shape.Square(2.0), 4.0))\n' > "$dir/match.k3"
+[ "$("$bin" "$dir/match.k3")" = '5 8' ] && [ "$("$bin" --static "$dir/match.k3")" = '5 8' ] || { echo 'match arms must see enclosing locals' >&2; exit 1; }
+
 echo 'static: PASS'

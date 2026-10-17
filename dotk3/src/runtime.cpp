@@ -960,13 +960,13 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         if (!function->bytecodeAttempted) {
             std::optional<ProfileScope> profile;
             if (config.profiler) profile.emplace(config.profiler.get(), "Compile", "vm", span);
-            function->bytecode = compileBytecode(function->code, config.optimizationLevel); function->bytecodeAttempted = true;
+            function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, !config.enforceContracts); function->bytecodeAttempted = true;
         }
         if (function->bytecode) {
             if (config.profiler) config.profiler->bytecodeCalls++;
             FrameScope frame(*this, function->code->text.empty() ? "<anonymous>" : function->code->text.c_str(), function->code->span, function->parent);
             try {
-                Value result = executeBytecode(*function->bytecode, function->parent, arguments, span); roots.push_back(result);
+                Value result = executeBytecode(*function->bytecode, function->parent, arguments, span, function->bytecode->captures ? &function->items : nullptr); roots.push_back(result);
                 requireType(result, resolveContract(function->code->type, function->parent, span), span); return result;
             } catch (...) { captureFailure(std::current_exception()); throw; }
         }
@@ -2022,7 +2022,7 @@ Value Runtime::run(const Ast &program, bool echoLastExpression) {
         if (!config.debug) {
             std::optional<ProfileScope> profile;
             if (config.profiler) profile.emplace(config.profiler.get(), "Compile", "vm", program->span);
-            compiled = compileBytecode(program, config.optimizationLevel, echoLastExpression);
+            compiled = compileBytecode(program, config.optimizationLevel, echoLastExpression, !config.enforceContracts);
         }
         if (compiled) { if (config.profiler) config.profiler->bytecodePrograms++; result = executeBytecode(*compiled, global, {}, program->span); }
         else { if (config.profiler) config.profiler->lexicalPrograms++; executeBlock(program, global, false, &result, echoLastExpression); }

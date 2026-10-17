@@ -250,8 +250,8 @@ class Runtime {
     std::vector<DebugVariable> debugVariables(Object *environment);
     void implement(const Ast &node, Object *environment);
     void executeBlock(const Ast &node, Object *environment, bool createScope = true, Value *result = nullptr, bool echoLast = false, bool allowReturn = false, Object *callable = nullptr);
-    Value executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span);
-    template<bool profiled> Value executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span);
+    Value executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured = nullptr);
+    template<bool profiled> Value executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured);
     void define(Object *environment, const std::string &name, Value value, bool mutableBinding,
                 const std::string &type, const Span &span, Contract contract = {});
     Binding &lookup(Object *environment, const std::string &name, const Span &span);

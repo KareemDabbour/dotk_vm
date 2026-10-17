@@ -10,12 +10,12 @@ Object *byteObject(Value value, const Span &span) {
     return std::get<Object *>(value);
 }
 }
-Value Runtime::executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span) {
-    if (config.profiler) return executeBytecodeLoop<true>(code, environment, arguments, span);
-    return executeBytecodeLoop<false>(code, environment, arguments, span);
+Value Runtime::executeBytecode(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured) {
+    if (config.profiler) return executeBytecodeLoop<true>(code, environment, arguments, span, captured);
+    return executeBytecodeLoop<false>(code, environment, arguments, span, captured);
 }
 template<bool profiled>
-Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span) {
+Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured) {
     if (byteFrameDepth == byteFrames.size()) byteFrames.emplace_back();
     ByteFrame &frame = byteFrames[byteFrameDepth++];
     struct ReleaseFrame {
@@ -39,6 +39,9 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         requireType(argument.value, frame.contracts[slot], span); frame.locals[slot] = argument.value; frame.initialized[slot] = true;
     }
     for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
+    if (captured) for (size_t index = 0; index < code.captures && index < captured->size(); index++) {
+        frame.locals[code.parameters + index] = (*captured)[index]; frame.initialized[code.parameters + index] = true;
+    }
     auto pop = [&]() { Value value = frame.stack.back(); frame.stack.pop_back(); return value; };
     auto binding = [&](size_t index, const Span &location) -> Binding & {
         if (code.optimization < 2) return lookup(environment, code.names[index], location);
@@ -263,6 +266,50 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         case ByteOp::JumpTrue: if (boolean(frame.stack.back(), location)) cursor = instruction.operand; break;
         case ByteOp::JumpPresent: if (!std::holds_alternative<std::monostate>(frame.stack.back())) cursor = instruction.operand; break;
         case ByteOp::JumpNull: if (std::holds_alternative<std::monostate>(frame.stack.back())) cursor = instruction.operand; break;
+        case ByteOp::MakeClosure: {
+            const auto &info = code.closures[instruction.operand];
+            Object *function = allocate(Kind::Function, location); function->code = info.node; function->parent = environment; function->text = info.node->text;
+            function->bytecode = info.code; function->bytecodeAttempted = true;
+            for (size_t slot : info.slots) {
+                if (!frame.initialized[slot]) throw Error(location, "Captured variable '" + code.locals[slot].name + "' is not initialized", "state");
+                function->items.push_back(frame.locals[slot]);
+            }
+            frame.stack.push_back(function); break;
+        }
+        case ByteOp::IterInit: {
+            Value iterable = pop(); size_t slot = static_cast<size_t>(instruction.integer);
+            if (std::holds_alternative<Object *>(iterable) && std::get<Object *>(iterable)->kind == Kind::Map) {
+                Object *map = std::get<Object *>(iterable), *keys = allocate(Kind::List, location);
+                for (const auto &entry : map->entries) keys->items.push_back(entry.first);
+                iterable = keys;
+            }
+            frame.locals[slot] = iterable; frame.locals[slot + 1] = int64_t{0}; break;
+        }
+        case ByteOp::IterNext: {
+            size_t slot = static_cast<size_t>(instruction.integer), position = static_cast<size_t>(std::get<int64_t>(frame.locals[slot + 1]));
+            Value item; size_t scratch = roots.size();
+            bool more = next(frame.locals[slot], item, position, location);
+            roots.resize(scratch);
+            frame.locals[slot + 1] = static_cast<int64_t>(position);
+            if (more) frame.stack.push_back(item); else cursor = instruction.operand;
+            break;
+        }
+        case ByteOp::MatchTest: {
+            Value subject = frame.stack.back();
+            if (!std::holds_alternative<Object *>(subject) || std::get<Object *>(subject)->kind != Kind::Variant) throw Error(location, "match expects an enum value", "type");
+            const std::string &pattern = node->text;
+            if (pattern != "_") {
+                size_t dot = pattern.rfind('.'); size_t start = dot == std::string::npos ? 0 : dot + 1;
+                if (std::get<Object *>(subject)->text.compare(0, std::string::npos, pattern, start, std::string::npos) != 0) cursor = instruction.operand;
+            }
+            break;
+        }
+        case ByteOp::MatchBind: {
+            Object *subject = std::get<Object *>(frame.stack.back()); size_t first = static_cast<size_t>(instruction.integer);
+            for (size_t index = 0; index < instruction.operand && index < subject->items.size(); index++) { frame.locals[first + index] = subject->items[index]; frame.initialized[first + index] = true; }
+            break;
+        }
+        case ByteOp::MatchFail: throw Error(location, "No matching arm", "match");
         case ByteOp::IntToFloat:
             if (std::holds_alternative<int64_t>(frame.stack.back())) frame.stack.back() = static_cast<double>(std::get<int64_t>(frame.stack.back()));
             break;

@@ -7,7 +7,8 @@ enum class ByteOp {
     LoadName, StoreName, CheckLocal, CheckName, CheckObject, DeclareName, DefineFunction, Member, Index, SetIndex, Binary, Unary,
     Call, List, Tuple, Map, Pop, Dup, Jump, JumpFalse, JumpTrue, JumpPresent, SafePoint, Return,
     Literal, Closure, Format, Slice, Match, PrepareMember, SetMember, Swap, DeclareType, Import, Throw, PrepareSlice, ResolveMethod, InvokeMethod,
-    InstanceOf, Cast, NonNull, JumpNull, IntToFloat
+    InstanceOf, Cast, NonNull, JumpNull, IntToFloat,
+    MakeClosure, IterInit, IterNext, MatchTest, MatchBind, MatchFail
 };
 struct ByteInstruction {
     ByteOp op;
@@ -20,6 +21,7 @@ struct ByteInstruction {
 };
 struct ByteLocal { std::string name, type; bool mutableBinding = false; };
 struct Bytecode;
+struct ByteClosure { Ast node; std::shared_ptr<const Bytecode> code; std::vector<size_t> slots; };
 struct ByteMatchArm { std::string pattern; std::vector<std::string> bindings; Span span; std::shared_ptr<const Bytecode> code; };
 struct ByteMatch { std::vector<ByteMatchArm> arms; };
 struct Bytecode {
@@ -27,11 +29,14 @@ struct Bytecode {
     std::vector<ByteLocal> locals;
     std::vector<std::string> names;
     std::vector<ByteMatch> matches;
+    std::vector<ByteClosure> closures;
     size_t parameters = 0;
+    // Captured values occupy the locals right after the parameters (copied from the closure object).
+    size_t captures = 0;
     unsigned optimization = 2;
     bool program = false;
 };
-std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false);
+std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false, bool slotClosures = false);
 std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization = 2);
 std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization = 2);
 const char *byteOpName(ByteOp op);
