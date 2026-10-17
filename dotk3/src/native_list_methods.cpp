@@ -7,7 +7,6 @@ Value ListMethods::transform(Runtime &runtime, Object *receiver, const std::vect
     Object *snapshot = NativeMethods::snapshot(runtime, receiver, span);
     Object *result = nullptr;
     if constexpr (operation == Transform::Map || operation == Transform::Filter) { result = runtime.allocate(Kind::List, span); runtime.roots.push_back(result); }
-    if constexpr (operation == Transform::Filter) result->elementContract = snapshot->elementContract;
     Value accumulator;
     if constexpr (operation == Transform::Reduce) accumulator = arguments[1].value;
     for (size_t index = 0; index < snapshot->items.size(); index++) {
@@ -37,8 +36,8 @@ void ListMethods::install(Runtime &runtime) {
     NativeMethods::install(runtime, Kind::List, listMembers(), {
         {"map", transform<Transform::Map>}, {"filter", transform<Transform::Filter>}, {"reduce", transform<Transform::Reduce>},
         {"any", transform<Transform::Any>}, {"all", transform<Transform::All>}, {"find", transform<Transform::Find>}, {"findIndex", transform<Transform::FindIndex>},
-        {"append", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
-            Value value = arguments[0].value; runtime.requireType(value, receiver->elementContract, span); receiver->items.push_back(value); return {};
+        {"append", [](Runtime &, Object *receiver, const auto &arguments, const Span &) -> Value {
+            Value value = arguments[0].value; receiver->items.push_back(value); return {};
         }},
         {"clear", [](Runtime &, Object *receiver, const auto &, const Span &) -> Value { receiver->items.clear(); return {}; }},
         {"reverse", [](Runtime &runtime, Object *receiver, const auto &, const Span &span) -> Value {
@@ -46,15 +45,15 @@ void ListMethods::install(Runtime &runtime) {
             std::reverse(receiver->items.begin(), receiver->items.end()); return {};
         }},
         {"contains", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
-            runtime.requireType(arguments[0].value, receiver->elementContract, span); return NativeMethods::find(runtime, receiver, arguments[0].value, span) >= 0;
+            return NativeMethods::find(runtime, receiver, arguments[0].value, span) >= 0;
         }},
         {"indexOf", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
-            runtime.requireType(arguments[0].value, receiver->elementContract, span); return NativeMethods::find(runtime, receiver, arguments[0].value, span);
+            return NativeMethods::find(runtime, receiver, arguments[0].value, span);
         }},
         {"insert", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
             int64_t position = runtime.integer(arguments[0].value, span); if (position < 0) position += static_cast<int64_t>(receiver->items.size());
             if (position < 0 || static_cast<uint64_t>(position) > receiver->items.size()) throw Error(span, "Insert index out of range", "index");
-            Value value = arguments[1].value; runtime.requireType(value, receiver->elementContract, span); receiver->items.insert(receiver->items.begin() + position, value); return {};
+            Value value = arguments[1].value; receiver->items.insert(receiver->items.begin() + position, value); return {};
         }},
         {"removeAt", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
             int64_t position = runtime.integer(arguments[0].value, span); if (position < 0) position += static_cast<int64_t>(receiver->items.size());
@@ -64,7 +63,6 @@ void ListMethods::install(Runtime &runtime) {
         {"extend", [](Runtime &runtime, Object *receiver, const auto &arguments, const Span &span) -> Value {
             Object *staged = runtime.allocate(Kind::List, span); runtime.roots.push_back(staged); Value item; size_t cursor = 0;
             while (runtime.next(arguments[0].value, item, cursor, span)) { runtime.roots.push_back(item); runtime.tick(span); staged->items.push_back(item); }
-            if (receiver->elementContract) { auto contract = std::make_shared<TypeContract>(); contract->name = "List"; contract->element = receiver->elementContract; runtime.requireType(staged, contract, span); }
             receiver->items.insert(receiver->items.end(), staged->items.begin(), staged->items.end()); return {};
         }}
     });

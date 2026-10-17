@@ -4,7 +4,6 @@ namespace dk3 {
 template<MapMethods::Update operation>
 Value MapMethods::update(Runtime &runtime, Object *receiver, const std::vector<Argument> &arguments, const Span &span) {
     Value key = arguments[0].value; NativeMethods::key(runtime, receiver, key, span);
-    if constexpr (operation == Update::PutIfAbsent || operation == Update::Merge) runtime.requireType(arguments[1].value, receiver->elementContract, span);
     if constexpr (operation == Update::Merge) if (std::holds_alternative<std::monostate>(arguments[1].value)) throw Error(span, "merge requires a non-null value", "value");
     Object *callback = nullptr;
     if constexpr (operation != Update::PutIfAbsent) callback = NativeMethods::callback(arguments.back().value, span);
@@ -46,11 +45,11 @@ void MapMethods::install(Runtime &runtime) {
             } return false;
         }},
         {"keys", [](Runtime &runtime, Object *receiver, const auto &, const Span &span) -> Value {
-            Object *snapshot = runtime.allocate(Kind::List, span); runtime.roots.push_back(snapshot); snapshot->elementContract = receiver->keyContract;
+            Object *snapshot = runtime.allocate(Kind::List, span); runtime.roots.push_back(snapshot);
             for (const auto &entry : receiver->entries) { runtime.tick(span); snapshot->items.push_back(entry.first); } return snapshot;
         }},
         {"values", [](Runtime &runtime, Object *receiver, const auto &, const Span &span) -> Value {
-            Object *snapshot = runtime.allocate(Kind::List, span); runtime.roots.push_back(snapshot); snapshot->elementContract = receiver->elementContract;
+            Object *snapshot = runtime.allocate(Kind::List, span); runtime.roots.push_back(snapshot);
             for (const auto &entry : receiver->entries) { runtime.tick(span); snapshot->items.push_back(entry.second); } return snapshot;
         }}
     });

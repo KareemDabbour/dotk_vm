@@ -47,6 +47,8 @@ int main() {
     accepts("class P { let a: Int; constructor(f: Bool) -> Null { if f { throw Error(Error.Kind.Value, 'x') }\nself.a = 1 } }");
     rejects("class P { let a: Int; constructor(f: Bool) -> Null { if f { self.a = 1 } } }", "may not initialize field 'a'");
     rejects("class P { let a: Int; constructor(f: Bool) -> Null { if f { return }\nself.a = 1 } }", "may return before initializing field 'a'");
+    rejects("class A { fn read() -> Int { return 1 } }\nclass B extends A { fn read() -> String { return 'x' } }", "overrides A.read");
+    accepts("class A { fn read() -> Int? { return 1 } }\nclass B extends A { fn read() -> Int { return 1 } }");
     rejects("let a: Int = 1.5", "Expected Int, got Float");
     rejects("let a = 1\na = 2", "Cannot reassign");
     accepts("var a = 1\na = 2\na += 3\na++");

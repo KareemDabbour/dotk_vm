@@ -174,8 +174,9 @@ numeric operand kinds, native call targets). Every run, REPL submission (via the
 stateful TypeSession), --check and LSP document goes through it before execution;
 checked programs run with Config::enforceContracts=false so annotations are erased
 and the compiler emits slot-only frames, copy-captured closures, typed Float
-opcodes and CallNative/CallMethod for statically resolved core calls. The embedding
-API still runs unchecked, contract-enforcing code.
+opcodes and CallNative/CallMethod for statically resolved core calls. The runtime has
+no annotation contracts; only `is`/`as` keep a minimal erased type test. The embedding
+API owns a TypeSession per VM: dk3_eval type-checks, natives declare signatures.
 The declarative optional .k3 syntax contribution is independent of the LSP client.
 The editor contribution now includes an optional languageclient adapter. A separate
 frontend-only `dotk3-lsp` executable owns versioned document snapshots and speaks

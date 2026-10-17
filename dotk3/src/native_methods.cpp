@@ -47,8 +47,7 @@ Value NativeMethods::length(Runtime &runtime, Object *receiver, const std::vecto
 Value NativeMethods::initialize(Runtime &runtime, Object *receiver, const std::vector<Argument> &arguments, const Span &span) {
     Object *type = runtime.collectionTypes.at(receiver->kind);
     Value initialized = type->native(arguments, span); runtime.roots.push_back(initialized); Object *source = object(initialized, span);
-    receiver->items = source->items; receiver->entries = source->entries;
-    receiver->elementContract = source->elementContract; receiver->keyContract = source->keyContract; return {};
+    receiver->items = source->items; receiver->entries = source->entries; return {};
 }
 Object *NativeMethods::object(Value value, const Span &span) {
     if (!std::holds_alternative<Object *>(value)) throw Error(span, "Expected object, got " + Runtime::typeOf(value), "type");
@@ -60,12 +59,11 @@ Object *NativeMethods::callback(Value value, const Span &span) {
         throw Error(span, "Expected a callback function", "type");
     return result;
 }
-void NativeMethods::key(Runtime &runtime, Object *receiver, Value value, const Span &span) {
+void NativeMethods::key(Runtime &, Object *, Value value, const Span &span) {
     if (std::holds_alternative<Object *>(value)) {
         Kind kind = object(value, span)->kind;
         if (kind != Kind::String && kind != Kind::Bytes) throw Error(span, "Map keys must be primitive values", "type");
     }
-    runtime.requireType(value, receiver->keyContract, span);
 }
 int64_t NativeMethods::find(Runtime &runtime, Object *receiver, Value value, const Span &span) {
     for (size_t index = 0; index < receiver->items.size(); index++) { runtime.tick(span); if (Runtime::equal(receiver->items[index], value)) return static_cast<int64_t>(index); }
@@ -74,6 +72,6 @@ int64_t NativeMethods::find(Runtime &runtime, Object *receiver, Value value, con
 Object *NativeMethods::snapshot(Runtime &runtime, Object *receiver, const Span &span) {
     for (size_t index = 0; index < receiver->items.size(); index++) runtime.tick(span);
     Object *result = runtime.allocate(Kind::List, span); runtime.roots.push_back(result);
-    result->items = receiver->items; result->elementContract = receiver->elementContract; return result;
+    result->items = receiver->items; return result;
 }
 }

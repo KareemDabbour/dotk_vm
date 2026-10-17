@@ -287,7 +287,6 @@ DK3VM *dk3_create(const DK3Config *provided) {
         };
         instance->session = std::make_unique<dk3::TypeSession>(loader);
         dk3::TypeSession *session = instance->session.get();
-        options.enforceContracts = false;
         options.resolveProgram = [session](const std::string &name) { return session->module(name); };
         instance->runtime = std::make_unique<dk3::Runtime>(std::move(options)); return instance.release();
     } catch (...) { return nullptr; }

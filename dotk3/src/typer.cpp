@@ -437,6 +437,19 @@ private:
 
     void checkImplements(ClassInfo *info, const Span &span) {
         if (info->kind == ClassKind::Trait || info->kind == ClassKind::Enum || info->builtin) return;
+        if (info->super && info->super->tag == TypeTag::Named) {
+            for (const auto &entry : info->members) {
+                const Member &own = entry.second;
+                if (own.owner != info || !own.isMethod || own.isStatic || !own.signature || own.signature->pendingResult || entry.first == "init") continue;
+                const Member *base = findMember(info->super->info, entry.first);
+                if (!base || !base->isMethod || base->isStatic || !base->signature || base->signature->pendingResult || base->visibility == Visibility::Private) continue;
+                Ty up = ty.asSuper(info->self, base->owner); std::map<Ty, Ty> inherited;
+                for (size_t index = 0; up && index < base->owner->params.size() && index < up->args.size(); index++) inherited[base->owner->params[index]] = up->args[index];
+                Ty expected = ty.substitute(base->signature->type, inherited);
+                if (!ty.isSubtype(own.signature->type, expected))
+                    error(span, info->name + "." + entry.first + " has type " + show(own.signature->type) + " but overrides " + base->owner->name + "." + entry.first + ": " + show(expected));
+            }
+        }
         for (Ty trait : info->traits) {
             std::map<Ty, Ty> traitArguments;
             for (size_t index = 0; index < trait->info->params.size() && index < trait->args.size(); index++) traitArguments[trait->info->params[index]] = trait->args[index];
@@ -1489,6 +1502,8 @@ private:
         return applyCall(node, shared->type, shared, typeArguments, expected);
     }
 
+    static std::string dottedToNested(std::string name) { std::replace(name.begin(), name.end(), '.', '_'); return name; }
+
     Ty matchExpression(const Ast &node, Ty expected) {
         Ty subject = expr(node->children[0]);
         if (subject->tag == TypeTag::Error) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]->children[0]); return subject; }
@@ -1504,7 +1519,7 @@ private:
                 size_t dot = arm->text.rfind('.'); std::string variantName = arm->text.substr(dot == std::string::npos ? 0 : dot + 1);
                 std::string owner = dot == std::string::npos ? "" : arm->text.substr(0, dot);
                 const Variant *found = nullptr; for (const auto &variant : info->variants) if (variant.name == variantName) found = &variant;
-                if (!found || (!owner.empty() && owner.substr(owner.rfind('.') == std::string::npos ? 0 : owner.rfind('.') + 1) != info->name)) error(arm->span, "'" + arm->text + "' is not a variant of " + info->name);
+                if (!found || (!owner.empty() && owner.substr(owner.rfind('.') == std::string::npos ? 0 : owner.rfind('.') + 1) != info->name && dottedToNested(owner) != info->name)) error(arm->span, "'" + arm->text + "' is not a variant of " + info->name);
                 else {
                     if (!covered.insert(variantName).second) error(arm->span, "Duplicate match arm '" + variantName + "'");
                     if (found->payload.size() != arm->names.size()) error(arm->span, "Pattern binds " + std::to_string(arm->names.size()) + " value(s) but " + variantName + " carries " + std::to_string(found->payload.size()));

@@ -20,9 +20,9 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
     ByteFrame &frame = byteFrames[byteFrameDepth++];
     struct ReleaseFrame {
         ByteFrame &frame; size_t &depth;
-        ~ReleaseFrame() { frame.locals.clear(); frame.stack.clear(); frame.initialized.clear(); frame.contracts.clear(); frame.methods.clear(); depth--; }
+        ~ReleaseFrame() { frame.locals.clear(); frame.stack.clear(); frame.initialized.clear(); frame.methods.clear(); depth--; }
     } releaseFrame{frame, byteFrameDepth};
-    frame.locals.assign(code.locals.size(), Value{}); frame.initialized.assign(code.locals.size(), false); frame.contracts.resize(code.locals.size());
+    frame.locals.assign(code.locals.size(), Value{}); frame.initialized.assign(code.locals.size(), false);
     frame.names.assign(code.names.size(), nullptr); frame.epoch = bindingEpoch;
     frame.stack.reserve(std::min<size_t>(code.instructions.size(), 64));
     Object *previousAccess = accessClass; accessClass = nullptr;
@@ -35,7 +35,6 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         else for (size_t index = 0; index < code.parameters; index++) if (code.locals[index].name == argument.name) slot = index;
         if (slot >= code.parameters) throw Error(span, argument.name.empty() ? "Too many positional arguments" : "Unknown named argument '" + argument.name + "'", "call");
         if (frame.initialized[slot]) throw Error(span, "Argument supplied more than once: '" + code.locals[slot].name + "'", "call");
-        if (config.enforceContracts) { frame.contracts[slot] = resolveContract(code.locals[slot].type, environment, span); requireType(argument.value, frame.contracts[slot], span); }
         frame.locals[slot] = argument.value; frame.initialized[slot] = true;
     }
     for (size_t index = 0; index < code.parameters; index++) if (!frame.initialized[index]) throw Error(span, "Missing argument '" + code.locals[index].name + "'", "call");
@@ -97,7 +96,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         case ByteOp::SetMember: {
             Object *container = byteObject(frame.stack[frame.stack.size() - 2], location); Binding *target = classBinding(container, node->children[0]->text);
             Value value = frame.stack.back(); if (node->text != "=") value = binary(node->text.substr(0, 1), target->value, value, location);
-            requireType(value, target->contract, location); target->value = value; target->initialized = true;
+            target->value = value; target->initialized = true;
             pop(); frame.stack.back() = value; break;
         }
         case ByteOp::Swap: std::swap(frame.stack[frame.stack.size() - 1], frame.stack[frame.stack.size() - 2]); break;
@@ -141,19 +140,17 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             break;
         case ByteOp::CheckObject: byteObject(frame.stack.back(), location); break;
         case ByteOp::StoreLocal:
-            if (config.enforceContracts) requireType(frame.stack.back(), frame.contracts[instruction.operand], location);
             frame.locals[instruction.operand] = frame.stack.back(); break;
         case ByteOp::StoreName: {
             Binding &target = binding(instruction.operand, node->children[0]->span);
-            requireType(frame.stack.back(), target.contract, location); target.value = frame.stack.back(); break;
+            target.value = frame.stack.back(); break;
         }
         case ByteOp::DeclareName: { Value value = pop(); define(environment, node->text, value, node->mutableBinding, node->type, location); break; }
         case ByteOp::DeclareLocal: {
             Value value = frame.stack.back();
-            if (config.enforceContracts) { frame.contracts[instruction.operand] = resolveContract(code.locals[instruction.operand].type, environment, location); requireType(value, frame.contracts[instruction.operand], location); }
             frame.locals[instruction.operand] = value; frame.initialized[instruction.operand] = true; pop(); break;
         }
-        case ByteOp::ClearLocal: frame.locals[instruction.operand] = {}; frame.initialized[instruction.operand] = false; frame.contracts[instruction.operand].reset(); break;
+        case ByteOp::ClearLocal: frame.locals[instruction.operand] = {}; frame.initialized[instruction.operand] = false; break;
         case ByteOp::DefineFunction: {
             Object *function = allocate(Kind::Function, location); function->code = node; function->parent = environment; function->text = node->text;
             roots.push_back(function); define(environment, node->text, function, false, "", location); roots.pop_back(); break;
@@ -174,7 +171,7 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             if (node->text != "=") value = binary(node->text.substr(0, 1), index(receiver, key, node->children[0]->span), value, location);
             if (!overloaded("setitem", receiver, {{"", key}, {"", value}}, location, custom)) {
                 if (container->kind == Kind::List) {
-                    requireType(value, container->elementContract, location); int64_t position = integer(key, location);
+                    int64_t position = integer(key, location);
                     if (position < 0) position += static_cast<int64_t>(container->items.size());
                     if (position < 0 || static_cast<uint64_t>(position) >= container->items.size()) throw Error(location, "Index out of range", "index");
                     container->items[static_cast<size_t>(position)] = value;
@@ -205,17 +202,14 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 }
             } else if (!floatOperation && instruction.math != Math::Generic && std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
                 if constexpr (profiled) config.profiler->integerSpecializations++;
-                int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0; bool overflow = false;
+                int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0;
                 switch (instruction.math) {
-                case Math::Add: overflow = __builtin_add_overflow(first, second, &result); value = result; break;
-                case Math::Subtract: overflow = __builtin_sub_overflow(first, second, &result); value = result; break;
-                case Math::Multiply: overflow = __builtin_mul_overflow(first, second, &result); value = result; break;
+                case Math::Add: __builtin_add_overflow(first, second, &result); value = result; break;
+                case Math::Subtract: __builtin_sub_overflow(first, second, &result); value = result; break;
+                case Math::Multiply: __builtin_mul_overflow(first, second, &result); value = result; break;
                 case Math::FloorDivide: case Math::Modulo: {
                     if (!second) throw Error(location, "Division by zero", "value");
-                    if (first == INT64_MIN && second == -1) {
-                        if (config.enforceContracts) throw Error(location, "Int overflow", "overflow");
-                        value = instruction.math == Math::FloorDivide ? INT64_MIN : 0; break;
-                    }
+                    if (first == INT64_MIN && second == -1) { value = instruction.math == Math::FloorDivide ? INT64_MIN : 0; break; }
                     int64_t quotient = first / second, remainder = first % second;
                     if (remainder && ((remainder < 0) != (second < 0))) { quotient--; remainder += second; }
                     value = instruction.math == Math::FloorDivide ? quotient : remainder; break;
@@ -228,7 +222,6 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
                 case Math::GreaterEqual: value = first >= second; break;
                 default: break;
                 }
-                if (overflow && config.enforceContracts) throw Error(location, "Int overflow", "overflow");
             } else {
                 if constexpr (profiled) config.profiler->genericBinaryOperations++;
                 value = binary(instruction.operand ? node->text.substr(0, 1) : node->text, left, right, location);
@@ -243,7 +236,6 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             else if (node->text == "+") {
                 if (!std::holds_alternative<int64_t>(value) && !std::holds_alternative<double>(value)) throw Error(location, "Unary arithmetic requires a number", "type");
             } else if (std::holds_alternative<int64_t>(value)) {
-                if (std::get<int64_t>(value) == INT64_MIN && config.enforceContracts) throw Error(location, "Int overflow", "overflow");
                 frame.stack.back() = static_cast<int64_t>(0 - static_cast<uint64_t>(std::get<int64_t>(value)));
             } else frame.stack.back() = -floating(value, location);
             break;
@@ -342,7 +334,9 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             const std::string &pattern = node->text;
             if (pattern != "_") {
                 size_t dot = pattern.rfind('.'); size_t start = dot == std::string::npos ? 0 : dot + 1;
-                if (std::get<Object *>(subject)->text.compare(0, std::string::npos, pattern, start, std::string::npos) != 0) cursor = instruction.operand;
+                Object *variant = std::get<Object *>(subject);
+                const std::string &name = variant->code && variant->code->kind == "variant" ? variant->code->text : variant->text;
+                if (name.compare(0, std::string::npos, pattern, start, std::string::npos) != 0) cursor = instruction.operand;
             }
             break;
         }
@@ -359,10 +353,10 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             if (std::holds_alternative<std::monostate>(frame.stack.back())) throw Error(location, "Non-null assertion failed: value is null", "value");
             break;
         case ByteOp::InstanceOf:
-            frame.stack.back() = valueMatches(frame.stack.back(), resolveContract(node->type, environment, location, true, true), location);
+            frame.stack.back() = valueMatches(frame.stack.back(), resolveContract(node->type, environment, location), location);
             break;
         case ByteOp::Cast:
-            if (!valueMatches(frame.stack.back(), resolveContract(node->type, environment, location, true, true), location))
+            if (!valueMatches(frame.stack.back(), resolveContract(node->type, environment, location), location))
                 throw Error(location, "Cannot cast " + typeOf(frame.stack.back()) + " to " + node->type, "type");
             break;
         case ByteOp::SafePoint: collectionSafePoint(); break;

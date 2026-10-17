@@ -68,10 +68,14 @@ System.print(xs[0]?.toString() ?? "none")         // ?. and ?? on nullable value
 - Collections remain subclassable (`class Inventory extends List<String>`).
 - `String + value` concatenates by calling the value's `toString`.
 - `Json.parse` and `Reflection.binding` return `Object?`; use `as` to narrow.
-- `--no-check` reports type errors as warnings and runs the program under dynamic
-  run-time contracts instead (an escape hatch for scripts that are not typed yet).
-- The embedding C API still executes dynamic (contract-checked) code; typed
-  native signatures are not wired through the C ABI yet.
+- `--no-check` reports type errors as warnings and runs the program anyway, without
+  any type information; ill-typed code fails with ordinary run-time errors.
+- The embedding C API type-checks `dk3_eval` sources too. Natives declare their
+  signature as a declaration tail, e.g. `dk3_define_native(vm, "host.add", "(a: Int, b: Int) -> Int", fn, ud)`
+  or the `signature` field of `DK3NativeExport` (`DK3_MODULE_ABI_VERSION` 2).
+- There are no run-time annotation checks: later sections that talk about
+  "contracts" describe what is now a compile-time error. Values a host inserts
+  into script collections are not re-validated.
 
 ## New Basics
 
@@ -1266,13 +1270,13 @@ host adapters, not custom nominal language types. Reflection and frontend member
 discovery expose these metadata fields without executing host code.
 
 Initialize `DK3NativeModule` with `dk3_module_init`, set its name/docs and an array
-of `DK3NativeExport` contextual callbacks, then `dk3_register_module`. Names must
+of `DK3NativeExport` contextual callbacks (each with a type signature), then `dk3_register_module`. Names must
 be single ASCII identifiers, not keywords; existing modules/global/core names and
 duplicate exports are rejected. Registration stages the entire readonly namespace
 before publication. After an object-limit failure, collect abandoned staged objects
 before retrying. Imports/aliases and Reflection.doc/members work without a source
 resolver. Names/docs are copied; callback code and userdata must outlive the VM.
-Module callbacks are positional-only; the legacy define_native API is unchanged.
+Module callbacks are positional-only; `dk3_define_native` takes a signature too.
 This is a versioned registration ABI, not a dynamic loader or full editor manifest.
 
 ## Coverage and Next Work

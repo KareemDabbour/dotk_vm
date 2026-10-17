@@ -197,10 +197,6 @@ void Runtime::installCore() {
         if (!values.empty()) {
             Value item; size_t cursor = 0;
             while (next(values[0], item, cursor, span)) { tick(span); result->items.push_back(item); }
-            if (std::holds_alternative<Object *>(values[0])) {
-                Object *original = object(values[0], span);
-                if (original->kind == Kind::List || original->kind == Kind::Tuple || original->kind == Kind::Set) result->elementContract = original->elementContract;
-            }
         }
         return result;
     };
@@ -211,7 +207,7 @@ void Runtime::installCore() {
         if (!values.empty()) {
             Object *original = object(values[0], span);
             if (original->kind != Kind::Map) throw Error(span, "Map copy construction expects a Map", "type");
-            result->entries = original->entries; result->keyContract = original->keyContract; result->elementContract = original->elementContract;
+            result->entries = original->entries;
         }
         return result;
     };
@@ -226,15 +222,13 @@ void Runtime::installCore() {
     installCollection("List", Kind::List, listFactory); installCollection("Map", Kind::Map, mapFactory);
     installCollection("Tuple", Kind::Tuple, [this, listFactory](const auto &arguments, const Span &span) -> Value {
         Value list = listFactory(arguments, span); roots.push_back(list);
-        Object *result = allocate(Kind::Tuple, span); result->items = object(list, span)->items; result->elementContract = object(list, span)->elementContract; return result;
+        Object *result = allocate(Kind::Tuple, span); result->items = object(list, span)->items; return result;
     });
     installCollection("Set", Kind::Set, [this, listFactory](const auto &arguments, const Span &span) -> Value {
         Value list = listFactory(arguments, span); roots.push_back(list); Object *source = object(list, span);
         Object *result = allocate(Kind::Set, span); roots.push_back(result);
         for (Value value : source->items) { bool found = false; for (Value item : result->items) { tick(span); if (equal(item, value)) found = true; } if (!found) result->items.push_back(value); }
-        result->elementContract = source->elementContract;
         auto values = positional(arguments, span);
-        if (!values.empty() && std::holds_alternative<Object *>(values[0]) && object(values[0], span)->kind == Kind::Set) result->elementContract = object(values[0], span)->elementContract;
         return result;
     });
     registerNative("Reflection.type", [this](const auto &arguments, const Span &span) -> Value {
@@ -246,7 +240,6 @@ void Runtime::installCore() {
         auto values = positional(arguments, span);
         if (values.size() != 1) throw Error(span, "members expects one value", "call");
         Object *names = allocate(Kind::List, span); roots.push_back(names);
-        names->elementContract = resolveContract("String", prelude, span);
         for (const auto &field : inspectMembers(values[0])) names->items.push_back(text(field.name, false, span));
         return names;
     });
@@ -261,7 +254,7 @@ void Runtime::installCore() {
         for (const auto &binding : global->bindings) sorted.push_back(binding.first);
         std::sort(sorted.begin(), sorted.end());
         for (const auto &name : sorted) names->items.push_back(text(name, false, span));
-        names->elementContract = resolveContract("String", prelude, span); return names;
+        return names;
     });
     registerNative("Reflection.doc", [this](const auto &arguments, const Span &span) -> Value {
         auto values = positional(arguments, span);

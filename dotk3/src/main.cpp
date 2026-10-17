@@ -71,7 +71,7 @@ static const char *usage =
     "       dotk3 -e SOURCE [args...]\n"
     "       dotk3 - [args...]\n"
     "       dotk3 --check PATH [PATH...]\n"
-    "       dotk3 --no-check [usual CLI arguments] (report type errors as warnings; run with dynamic contracts)\n"
+    "       dotk3 --no-check [usual CLI arguments] (report type errors as warnings and run without type information)\n"
     "       dotk3 --ast FILE.k3\n"
     "       dotk3 --debug FILE.k3 [args...]\n"
     "       dotk3 --files-root DIR [usual CLI arguments]\n"
@@ -110,7 +110,7 @@ static bool debuggerStopped(const std::exception &error, const dk3::Debugger &de
         std::string(language->what()) == "Debugger stopped execution";
 }
 using SessionHandle = std::shared_ptr<std::shared_ptr<dk3::TypeSession>>;
-static bool noCheck = false;  // --no-check: diagnostics become warnings and code runs under dynamic contracts
+static bool noCheck = false;  // --no-check: diagnostics become warnings and the program runs without type annotations
 
 static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
     return [directory](const std::string &name) {
@@ -423,7 +423,6 @@ int main(int argc, char **argv) {
         };
         SessionHandle session = std::make_shared<std::shared_ptr<dk3::TypeSession>>();
         *session = std::make_shared<dk3::TypeSession>(moduleLoader(directory));
-        config.enforceContracts = noCheck;
         if (!noCheck) config.resolveProgram = [session](const std::string &name) -> dk3::Ast { return (*session)->module(name); };
         config.resolveSource = [directory](const std::string &name) {
             std::filesystem::path relative(name);
@@ -450,7 +449,6 @@ int main(int argc, char **argv) {
                 auto diagnostics = (*session)->check(checked, false);
                 for (auto &diagnostic : diagnostics) diagnostic.warning = true;
                 printDiagnostics(diagnostics, true);
-                config.enforceContracts = true; config.resolveProgram = nullptr;
                 runtime = std::make_unique<dk3::Runtime>(config);
                 runtime->run(text, filename);
             } else {

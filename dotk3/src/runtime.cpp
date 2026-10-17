@@ -363,7 +363,6 @@ bool Runtime::equal(Value left, Value right) {
     }
     return false;
 }
-namespace { bool sameContract(const Contract &first, const Contract &second); }
 namespace {
 bool wrapsWhole(const std::string &text) {
     if (text.size() < 2 || text.front() != '(' || text.back() != ')') return false;
@@ -386,10 +385,16 @@ std::vector<std::string> splitUnion(const std::string &text) {
     parts.push_back(text.substr(start)); return parts;
 }
 }
-Contract Runtime::resolveContract(const std::string &type, Object *environment, const Span &span, bool checkIntersectionMethods, bool forTest) {
+namespace {
+bool primitiveKey(Value value) {
+    if (!std::holds_alternative<Object *>(value)) return true;
+    Kind kind = std::get<Object *>(value)->kind;
+    return kind == Kind::String || kind == Kind::Bytes;
+}
+}
+// Runtime shape of an annotation for `is`/`as`; generic arguments are erased.
+Contract Runtime::resolveContract(const std::string &type, Object *environment, const Span &span) {
     if (type.empty()) return {};
-    if (!config.enforceContracts && !forTest && !contractForce) return {};
-    struct Force { int &depth; bool active; Force(int &counter, bool enable) : depth(counter), active(enable) { if (active) depth++; } ~Force() { if (active) depth--; } } force(contractForce, forTest);
     static thread_local std::unordered_map<std::string, Contract> builtinContracts;
     if (auto cached = builtinContracts.find(type); cached != builtinContracts.end()) return cached->second;
     auto contract = std::make_shared<TypeContract>(); std::string text = type;
@@ -399,58 +404,26 @@ Contract Runtime::resolveContract(const std::string &type, Object *environment, 
     if (inner.rfind("fn(", 0) == 0) { contract->name = "Function"; builtinContracts.emplace(type, contract); return contract; }
     if (auto alternatives = splitUnion(inner); alternatives.size() > 1) {
         contract->name = "Union";
-        for (const auto &alternative : alternatives) contract->alternatives.push_back(resolveContract(alternative, environment, span, checkIntersectionMethods));
+        for (const auto &alternative : alternatives) contract->alternatives.push_back(resolveContract(alternative, environment, span));
         return contract;
     }
     auto components = typeIntersections(type);
     if (!components.empty()) {
         contract->name = "Intersection";
         for (const auto &component : components) {
-            auto part = resolveContract(component, environment, span, checkIntersectionMethods);
-            if (part->nullable || (part->all.empty() && (!part->nominal || part->nominal->kind != Kind::TraitType)))
-                throw Error(span, "Intersections require non-null trait components", "type");
+            auto part = resolveContract(component, environment, span);
             if (part->all.empty()) contract->all.push_back(part);
             else contract->all.insert(contract->all.end(), part->all.begin(), part->all.end());
-        }
-        std::sort(contract->all.begin(), contract->all.end(), [](const auto &first, const auto &second) { return std::less<Object *>{}(first->nominal, second->nominal); });
-        contract->all.erase(std::unique(contract->all.begin(), contract->all.end(), [](const auto &first, const auto &second) { return first->nominal == second->nominal; }), contract->all.end());
-        if (contract->all.size() == 1) { auto single = std::make_shared<TypeContract>(*contract->all[0]); single->nullable = contract->nullable; return single; }
-        if (checkIntersectionMethods) {
-            std::unordered_map<std::string, std::pair<Ast, Object *>> methods;
-            for (const auto &part : contract->all) for (const auto &method : part->nominal->code->children) {
-                auto inserted = methods.emplace(method->text, std::make_pair(method, part->nominal->parent));
-                if (inserted.second) continue;
-                auto previous = inserted.first->second;
-                if (method->parameters.size() != previous.first->parameters.size() ||
-                    !sameContract(resolveContract(method->type, part->nominal->parent, span, false), resolveContract(previous.first->type, previous.second, span, false)))
-                    throw Error(span, "Conflicting intersection method '" + method->text + "'", "type");
-                for (size_t position = 0; position < method->parameters.size(); position++)
-                    if (method->parameters[position].name != previous.first->parameters[position].name ||
-                        !sameContract(resolveContract(method->parameters[position].type, part->nominal->parent, span, false), resolveContract(previous.first->parameters[position].type, previous.second, span, false)))
-                        throw Error(span, "Conflicting intersection method '" + method->text + "'", "type");
-            }
         }
         return contract;
     }
     size_t generic = text.find('['); contract->name = text.substr(0, generic);
     if (contract->name.find('.') != std::string::npos || (generic != std::string::npos && contract->name != "List" && contract->name != "Map" && contract->name != "Tuple" && contract->name != "Set")) {
-        Object *type = resolveObjectPath(contract->name, environment, span);
-        if (type == objectType) contract->name = "Object";
-        if (type->kind == Kind::ClassType && type->builtinCollection) contract->name = type->text;
+        Object *named = resolveObjectPath(contract->name, environment, span);
+        if (named == objectType) contract->name = "Object";
+        if (named->kind == Kind::ClassType && named->builtinCollection) contract->name = named->text;
     }
-    if (generic != std::string::npos && contract->name != "List" && contract->name != "Tuple" && contract->name != "Map" && contract->name != "Set")
-        throw Error(span, "Unsupported generic annotation '" + type + "'", "type");
-    if (generic != std::string::npos) {
-        auto arguments = typeArguments(text); size_t expected = contract->name == "Map" ? 2 : 1;
-        if (arguments.size() != expected) throw Error(span, contract->name + " requires " + std::to_string(expected) + " type arguments", "type");
-        if (contract->name == "Map") {
-            contract->key = resolveContract(arguments[0], environment, span, checkIntersectionMethods);
-            if (contract->key->nominal || !std::set<std::string>{"Any", "Int", "Float", "Bool", "Null", "String", "Bytes"}.count(contract->key->name))
-                throw Error(span, "Map key annotations must be primitive or Any", "type");
-        }
-        contract->element = resolveContract(arguments.back(), environment, span, checkIntersectionMethods);
-    }
-    static const std::set<std::string> builtin{"Any", "Object", "Int", "Float", "Bool", "Null", "String", "Bytes", "List", "Tuple", "Map", "Set", "Function", "Generator", "Task", "Resource"};
+    static const std::set<std::string> builtin{"Object", "Int", "Float", "Bool", "Null", "String", "Bytes", "List", "Tuple", "Map", "Set", "Generator", "Task", "Resource"};
     if (builtin.count(contract->name)) {
         if (generic == std::string::npos) builtinContracts.emplace(type, contract);
         return contract;
@@ -475,96 +448,39 @@ Object *Runtime::resolveObjectPath(const std::string &name, Object *environment,
     }
     return object(resolved, span);
 }
-namespace {
-bool sameContract(const Contract &first, const Contract &second) {
-    if (!first || !second) return first == second;
-    if (first->all.size() != second->all.size()) return false;
-    for (size_t position = 0; position < first->all.size(); position++) if (!sameContract(first->all[position], second->all[position])) return false;
-    return first->nullable == second->nullable && first->nominal == second->nominal &&
-        (first->nominal || first->name == second->name) && sameContract(first->key, second->key) && sameContract(first->element, second->element);
-}
-bool primitiveKey(Value value) {
-    if (!std::holds_alternative<Object *>(value)) return true;
-    Kind kind = std::get<Object *>(value)->kind;
-    return kind == Kind::String || kind == Kind::Bytes;
-}
-}
-void Runtime::requireType(Value value, const Contract &contract, const Span &span) {
-    if (!contract) return;
-    if (!contract->nominal && contract->all.empty() && !contract->element && !std::holds_alternative<Object *>(value)) {
-        const std::string &name = contract->name;
-        if (name == "Any" || (contract->nullable && std::holds_alternative<std::monostate>(value))) return;
-        if ((name == "Int" && std::holds_alternative<int64_t>(value)) || (name == "Float" && std::holds_alternative<double>(value)) ||
-            (name == "Bool" && std::holds_alternative<bool>(value)) || (name == "Null" && std::holds_alternative<std::monostate>(value))) return;
+bool Runtime::valueMatches(Value candidate, const Contract &expected, const Span &span) {
+    (void)span;
+    if (!expected) return true;
+    if (expected->nullable && std::holds_alternative<std::monostate>(candidate)) return true;
+    if (expected->name == "Object" && !expected->nominal) return !std::holds_alternative<std::monostate>(candidate);
+    if (!expected->all.empty()) { for (const auto &part : expected->all) if (!valueMatches(candidate, part, span)) return false; return true; }
+    if (!expected->alternatives.empty()) { for (const auto &alternative : expected->alternatives) if (valueMatches(candidate, alternative, span)) return true; return false; }
+    Object *instance = std::holds_alternative<Object *>(candidate) ? std::get<Object *>(candidate) : nullptr;
+    if (expected->nominal && expected->nominal->kind == Kind::TraitType) {
+        if (instance && instance->origin && (instance->origin->kind == Kind::ClassType || instance->origin->kind == Kind::RecordType)) {
+            for (Object *type = instance->origin; type; type = type->baseClass)
+                if (std::find(type->traits.begin(), type->traits.end(), expected->nominal) != type->traits.end()) return true;
+            return false;
+        }
+        if (instance && expected->nominal == sizedTrait)
+            return instance->kind == Kind::List || instance->kind == Kind::Tuple || instance->kind == Kind::Map || instance->kind == Kind::String || instance->kind == Kind::Bytes;
+        return false;
     }
-    struct Pending { Object *collection; Contract key, element; };
-    std::vector<Pending> pending;
-    std::unordered_map<Object *, size_t> staged;
-    std::function<void(Value, const Contract &)> validate = [&](Value candidate, const Contract &expected) {
-        if (!expected || expected->name == "Any") return;
-        if (expected->nullable && std::holds_alternative<std::monostate>(candidate)) return;
-        if (expected->name == "Object" && !expected->nominal) { if (std::holds_alternative<std::monostate>(candidate)) throw Error(span, "Object does not accept null; use Object?", "type"); return; }
-        if (!expected->all.empty()) { for (const auto &part : expected->all) validate(candidate, part); return; }
-        if (!expected->alternatives.empty()) {
-            for (const auto &alternative : expected->alternatives) {
-                try { validate(candidate, alternative); return; }
-                catch (const Error &failure) { if (failure.category != "type") throw; }
-            }
-            throw Error(span, "Expected a union member, got " + typeOf(candidate), "type");
-        }
-        bool valid = false; Object *instance = std::holds_alternative<Object *>(candidate) ? std::get<Object *>(candidate) : nullptr;
-        if (expected->nominal && expected->nominal->kind == Kind::TraitType) {
-            if (instance && instance->origin && (instance->origin->kind == Kind::ClassType || instance->origin->kind == Kind::RecordType)) {
-                for (Object *type = instance->origin; type; type = type->baseClass)
-                    if (std::find(type->traits.begin(), type->traits.end(), expected->nominal) != type->traits.end()) valid = true;
-            }
-            else if (instance && expected->nominal == sizedTrait)
-                valid = instance->kind == Kind::List || instance->kind == Kind::Tuple || instance->kind == Kind::Map || instance->kind == Kind::String || instance->kind == Kind::Bytes;
-        } else if (expected->nominal) {
-            if (instance && instance->origin) {
-                for (Object *type = instance->origin; type; type = type->baseClass) if (type == expected->nominal) valid = true;
-            }
-        }
-        else if (expected->name == "Int") valid = std::holds_alternative<int64_t>(candidate);
-        else if (expected->name == "Float") valid = std::holds_alternative<double>(candidate);
-        else if (expected->name == "Bool") valid = std::holds_alternative<bool>(candidate);
-        else if (expected->name == "Null") valid = std::holds_alternative<std::monostate>(candidate);
-        else if (instance && expected->name == "List") valid = instance->kind == Kind::List;
-        else if (instance && expected->name == "Tuple") valid = instance->kind == Kind::Tuple;
-        else if (instance && expected->name == "Map") valid = instance->kind == Kind::Map;
-        else if (instance && expected->name == "Set") valid = instance->kind == Kind::Set;
-        else if (instance && instance->kind != Kind::Record && instance->kind != Kind::Instance && instance->kind != Kind::Variant) valid = typeOf(candidate) == expected->name;
-        if (!valid) throw Error(span, "Expected " + expected->name + ", got " + typeOf(candidate), "type");
-        if (!expected->element || !instance) return;
-        if (instance->kind == Kind::Map) {
-            for (const auto &entry : instance->entries) {
-                if (!primitiveKey(entry.first)) throw Error(span, "Map keys must be primitive values", "type");
-                validate(entry.first, expected->key); validate(entry.second, expected->element);
-            }
-        } else for (Value item : instance->items) validate(item, expected->element);
-        if (instance->kind != Kind::List && instance->kind != Kind::Map && instance->kind != Kind::Set) return;
-        if ((instance->elementContract && !sameContract(instance->elementContract, expected->element)) ||
-            (instance->keyContract && !sameContract(instance->keyContract, expected->key)))
-            throw Error(span, "Conflicting collection element annotations", "type");
-        auto found = staged.find(instance);
-        if (found != staged.end()) {
-            const auto &attached = pending[found->second];
-            if (!sameContract(attached.key, expected->key) || !sameContract(attached.element, expected->element))
-                throw Error(span, "Conflicting collection element annotations", "type");
-            return;
-        }
-        staged.emplace(instance, pending.size());
-        pending.push_back({instance, expected->key, expected->element});
-    };
-    validate(value, contract);
-    for (const auto &attached : pending) {
-        attached.collection->keyContract = attached.key;
-        attached.collection->elementContract = attached.element;
+    if (expected->nominal) {
+        if (instance && instance->origin) for (Object *type = instance->origin; type; type = type->baseClass) if (type == expected->nominal) return true;
+        return false;
     }
-}
-bool Runtime::valueMatches(Value value, const Contract &contract, const Span &span) {
-    try { requireType(std::move(value), contract, span); return true; }
-    catch (const Error &failure) { if (failure.category != "type") throw; return false; }
+    if (expected->name == "Int") return std::holds_alternative<int64_t>(candidate);
+    if (expected->name == "Float") return std::holds_alternative<double>(candidate);
+    if (expected->name == "Bool") return std::holds_alternative<bool>(candidate);
+    if (expected->name == "Null") return std::holds_alternative<std::monostate>(candidate);
+    if (!instance) return false;
+    if (expected->name == "List") return instance->kind == Kind::List;
+    if (expected->name == "Tuple") return instance->kind == Kind::Tuple;
+    if (expected->name == "Map") return instance->kind == Kind::Map;
+    if (expected->name == "Set") return instance->kind == Kind::Set;
+    if (instance->kind != Kind::Record && instance->kind != Kind::Instance && instance->kind != Kind::Variant) return typeOf(candidate) == expected->name;
+    return false;
 }
 Binding &Runtime::lookup(Object *environment, const std::string &name, const Span &span) {
     for (Object *scope = environment; scope; scope = scope->parent) {
@@ -575,10 +491,9 @@ Binding &Runtime::lookup(Object *environment, const std::string &name, const Spa
     }
     throw Error(span, "Undeclared name '" + name + "'", "name");
 }
-void Runtime::define(Object *environment, const std::string &name, Value value, bool mutableBinding, const std::string &type, const Span &span, Contract contract) {
+void Runtime::define(Object *environment, const std::string &name, Value value, bool mutableBinding, const std::string &type, const Span &span) {
     if (environment->bindings.count(name) && !(shadowGlobals && environment == global)) throw Error(span, "Duplicate declaration '" + name + "'", "name");
-    if (!contract) contract = resolveContract(type, environment, span);
-    requireType(value, contract, span); environment->bindings[name] = {value, mutableBinding, type, std::move(contract)};
+    environment->bindings[name] = {value, mutableBinding, type};
     bindingEpoch++;
 }
 Value Runtime::native(const std::string &name, std::function<Value(const std::vector<Argument> &, const Span &)> function) {
@@ -699,22 +614,18 @@ Value Runtime::binary(const std::string &operation, Value left, Value right, con
             result->items.insert(result->items.end(), second->items.begin(), second->items.end()); return result;
         }
     }
-    if (!config.enforceContracts && operation == "+") {
+    if (operation == "+") {
         auto isText = [&](const Value &value) { return std::holds_alternative<Object *>(value) && std::get<Object *>(value)->kind == Kind::String; };
         if (isText(left) || isText(right)) return text(stringify(left, span) + stringify(right, span), false, span);
     }
     if (std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right)) {
         int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right), result = 0;
-        bool strict = config.enforceContracts;  // checked programs wrap like Java; contract mode keeps overflow errors
-        if (operation == "+") { if (__builtin_add_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
-        if (operation == "-") { if (__builtin_sub_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
-        if (operation == "*") { if (__builtin_mul_overflow(first, second, &result) && strict) throw Error(span, "Int overflow", "overflow"); return result; }
+        if (operation == "+") { __builtin_add_overflow(first, second, &result); return result; }
+        if (operation == "-") { __builtin_sub_overflow(first, second, &result); return result; }
+        if (operation == "*") { __builtin_mul_overflow(first, second, &result); return result; }
         if (operation == "//" || operation == "%") {
             if (!second) throw Error(span, "Division by zero", "value");
-            if (first == INT64_MIN && second == -1) {
-                if (strict) throw Error(span, "Int overflow", "overflow");
-                return operation == "//" ? INT64_MIN : int64_t(0);
-            }
+            if (first == INT64_MIN && second == -1) return operation == "//" ? INT64_MIN : int64_t(0);
             int64_t quotient = first / second, remainder = first % second;
             if (remainder && ((remainder < 0) != (second < 0))) { quotient--; remainder += second; }
             return operation == "//" ? quotient : remainder;
@@ -723,9 +634,9 @@ Value Runtime::binary(const std::string &operation, Value left, Value right, con
             if (second < 0) throw Error(span, "Int exponent must be non-negative; use Math.toFloat for fractional powers", "value");
             int64_t base = first; result = 1; uint64_t exponent = static_cast<uint64_t>(second);
             while (exponent) {
-                if ((exponent & 1) && __builtin_mul_overflow(result, base, &result) && strict) throw Error(span, "Int overflow", "overflow");
+                if ((exponent & 1) && __builtin_mul_overflow(result, base, &result)) {}
                 exponent >>= 1;
-                if (exponent && __builtin_mul_overflow(base, base, &base) && strict) throw Error(span, "Int overflow", "overflow");
+                if (exponent && __builtin_mul_overflow(base, base, &base)) {}
             }
             return result;
         }
@@ -763,7 +674,6 @@ Value Runtime::index(Value value, Value key, const Span &span) {
     Object *instance = object(value, span);
     if (instance->kind == Kind::Map) {
         if (!primitiveKey(key)) throw Error(span, "Map keys must be primitive values", "type");
-        requireType(key, instance->keyContract, span);
         for (const auto &entry : instance->entries) if (equal(entry.first, key)) return entry.second;
         throw Error(span, "Missing map key", "key");
     }
@@ -956,7 +866,6 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         auto values = positional(arguments, span);
         if (values.size() != function->code->names.size()) throw Error(span, "Enum payload arity mismatch", "call");
         Object *result = allocate(Kind::Variant, span); result->origin = function->origin; result->text = function->text;
-        for (size_t index = 0; index < values.size(); index++) requireType(values[index], resolveContract(function->code->names[index], function->origin->parent, span), span);
         result->items = values; return result;
     }
     if (function->kind != Kind::Function && function->kind != Kind::RecordType && function->kind != Kind::ClassType) throw Error(span, "Value is not callable", "type");
@@ -964,14 +873,14 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         if (!function->bytecodeAttempted) {
             std::optional<ProfileScope> profile;
             if (config.profiler) profile.emplace(config.profiler.get(), "Compile", "vm", span);
-            function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, !config.enforceContracts); function->bytecodeAttempted = true;
+            function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, true); function->bytecodeAttempted = true;
         }
         if (function->bytecode) {
             if (config.profiler) config.profiler->bytecodeCalls++;
             FrameScope frame(*this, function->code->text.empty() ? "<anonymous>" : function->code->text.c_str(), function->code->span, function->parent);
             try {
                 Value result = executeBytecode(*function->bytecode, function->parent, arguments, span, function->bytecode->captures ? &function->items : nullptr); roots.push_back(result);
-                requireType(result, resolveContract(function->code->type, function->parent, span), span); return result;
+                return result;
             } catch (...) { captureFailure(std::current_exception()); throw; }
         }
     }
@@ -984,12 +893,12 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
             Object *record = allocate(function->collectionKind, span); record->origin = function; roots.push_back(record);
             Object *defaults = allocate(Kind::Environment, span); defaults->parent = function->parent; roots.push_back(defaults);
             for (const auto &entry : classFields(function)) {
-                const auto &field = entry.first; Contract contract = resolveContract(field.type, entry.second->parent, span);
-                Binding binding{{}, field.mutableBinding, field.type, contract, false, false};
+                const auto &field = entry.first;
+                Binding binding{{}, field.mutableBinding, field.type, false, false};
                 binding.visibility = field.visibility; binding.declaringClass = entry.second;
                 if (field.defaultValue) {
                     Object *scope = allocate(Kind::Environment, span); roots.push_back(scope); scope->parent = entry.second->classScope ? entry.second->classScope : entry.second->parent; scope->bindings = defaults->bindings;
-                    binding.value = evaluate(field.defaultValue, scope); requireType(binding.value, contract, span); binding.initialized = true;
+                    binding.value = evaluate(field.defaultValue, scope); binding.initialized = true;
                 }
                 else if (!custom) throw Error(span, "Collection subclass fields require defaults or a custom init", "type");
                 record->bindings.emplace(field.name, binding); defaults->bindings.emplace(field.name, binding);
@@ -1009,7 +918,6 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         base->parent = receiver; base->origin = methodOwner->baseClass;
         define(environment, "super", base, false, "", span);
     }
-    Contract returnContract = resolveContract(function->code->type, function->parent, span);
     auto parameters = function->code->parameters;
     std::vector<Object *> parameterOwners(parameters.size(), function);
     if (function->kind == Kind::ClassType) {
@@ -1051,7 +959,7 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
             value = evaluate(parameter.defaultValue, scope);
         }
         else throw Error(span, "Missing argument '" + parameter.name + "'", "call");
-        define(environment, parameter.name, value, false, parameter.type, span, resolveContract(parameter.type, parameterOwners[index]->parent, span));
+        define(environment, parameter.name, value, false, parameter.type, span);
     }
     if (function->kind == Kind::RecordType || function->kind == Kind::ClassType) {
         Object *record = allocate(function->kind == Kind::ClassType ? Kind::Instance : Kind::Record, span);
@@ -1082,7 +990,7 @@ Value Runtime::call(Value callable, const std::vector<Argument> &arguments, cons
         catch (const Returned &returned) { result = returned.value; }
         catch (const Broken &) { throw Error(span, "break cannot cross a function boundary", "syntax"); }
         catch (const Continued &) { throw Error(span, "continue cannot cross a function boundary", "syntax"); }
-        roots.push_back(result); requireType(result, returnContract, span); return result;
+        roots.push_back(result); return result;
     } catch (...) { captureFailure(std::current_exception()); throw; }
 }
 
@@ -1417,7 +1325,7 @@ void Runtime::implement(const Ast &node, Object *environment) {
         additions.emplace(method->text, method);
     }
     for (const auto &signature : trait->code->children) {
-        Ast method; Object *owner = environment;
+        Ast method;
         auto added = additions.find(signature->text);
         if (added != additions.end()) method = added->second;
         else {
@@ -1426,20 +1334,19 @@ void Runtime::implement(const Ast &node, Object *environment) {
                 if (signature->kind != "function") throw Error(node->span, "Missing trait method '" + signature->text + "'", "type");
                 for (const auto &field : target->code->parameters) if (field.name == signature->text)
                     throw Error(node->span, "Default method conflicts with a field", "type");
-                method = signature; owner = trait->parent; defaults.emplace(signature->text, signature);
+                method = signature; defaults.emplace(signature->text, signature);
             } else {
                 if (existing->staticMember || existing->visibility != Visibility::Public) throw Error(node->span, "Trait methods must be public instance methods", "type");
-                Object *function = object(existing->value, node->span); method = function->code; owner = function->parent;
+                Object *function = object(existing->value, node->span); method = function->code;
                 if (signature->kind == "function" && function->origin && function->origin->kind == Kind::TraitType && function->origin != trait)
                     throw Error(node->span, "Conflicting trait defaults; define an explicit method", "type");
             }
         }
-        if (method->parameters.size() != signature->parameters.size() || hasYield(method->children[0]) ||
-            !sameContract(resolveContract(method->type, owner, node->span), resolveContract(signature->type, trait->parent, node->span)))
+        if (method->parameters.size() != signature->parameters.size() || hasYield(method->children[0]))
             throw Error(method->span, "Trait method signature mismatch: '" + signature->text + "'", "type");
         for (size_t index = 0; index < signature->parameters.size(); index++) {
             const auto &expected = signature->parameters[index]; const auto &actual = method->parameters[index];
-            if (actual.rest || actual.name != expected.name || !sameContract(resolveContract(actual.type, owner, node->span), resolveContract(expected.type, trait->parent, node->span)))
+            if (actual.rest || actual.name != expected.name)
                 throw Error(method->span, "Trait parameter signature mismatch: '" + signature->text + "'", "type");
         }
     }
@@ -1485,13 +1392,11 @@ void Runtime::executeDeclaration(const Ast &node, Object *environment) {
                     if (previous->code->type != "Any" && !entry->type.empty() && entry->type != previous->code->type) throw Error(entry->span, "Native override return mismatch", "type");
                     continue;
                 }
-                if (entry->parameters.size() != previous->code->parameters.size() || hasYield(entry->children[0]) != hasYield(previous->code->children[0]) ||
-                    !sameContract(resolveContract(entry->type, environment, entry->span), resolveContract(previous->code->type, previous->parent, entry->span)))
+                if (entry->parameters.size() != previous->code->parameters.size() || hasYield(entry->children[0]) != hasYield(previous->code->children[0]))
                     throw Error(entry->span, "Override signature mismatch", "type");
                 for (size_t position = 0; position < entry->parameters.size(); position++) {
                     const auto &actual = entry->parameters[position]; const auto &expected = previous->code->parameters[position];
-                    if (actual.name != expected.name || actual.rest != expected.rest || bool(actual.defaultValue) != bool(expected.defaultValue) ||
-                        !sameContract(resolveContract(actual.type, environment, entry->span), resolveContract(expected.type, previous->parent, entry->span))) throw Error(entry->span, "Override parameter signature mismatch", "type");
+                    if (actual.name != expected.name || actual.rest != expected.rest || bool(actual.defaultValue) != bool(expected.defaultValue)) throw Error(entry->span, "Override parameter signature mismatch", "type");
                 }
             }
         }
@@ -1545,7 +1450,7 @@ void Runtime::executeDeclaration(const Ast &node, Object *environment) {
     else if (node->kind == "enum") {
         Object *enumeration = allocate(Kind::EnumType, node->span); enumeration->text = node->text; enumeration->code = node; enumeration->parent = environment;
         for (const Ast &variant : node->children) {
-            if (!config.enforceContracts && variant->names.empty()) {
+            if (variant->names.empty()) {
                 Object *value = allocate(Kind::Variant, variant->span); value->origin = enumeration; value->text = variant->text;
                 define(enumeration, variant->text, value, false, "", variant->span);
                 continue;
@@ -1811,13 +1716,6 @@ void Runtime::mark(Value value) {
         if (instance && !instance->marked) { instance->marked = true; pending.push_back(instance); }
     };
     enqueue(value);
-    std::function<void(const Contract &)> contractRoots = [&](const Contract &contract) {
-        if (!contract) return;
-        if (contract->nominal) enqueue(contract->nominal);
-        contractRoots(contract->element);
-        contractRoots(contract->key);
-        for (const auto &part : contract->all) contractRoots(part);
-    };
     while (!pending.empty()) {
         Object *instance = pending.back(); pending.pop_back();
         if (instance->parent) enqueue(instance->parent);
@@ -1826,8 +1724,6 @@ void Runtime::mark(Value value) {
         if (instance->methodOwner) enqueue(instance->methodOwner);
         if (instance->accessClass) enqueue(instance->accessClass);
         if (instance->classScope) enqueue(instance->classScope);
-        contractRoots(instance->elementContract);
-        contractRoots(instance->keyContract);
         if (instance->taskOwner) enqueue(instance->taskOwner);
         if (instance->taskParent) enqueue(instance->taskParent);
         for (Object *child : instance->children) enqueue(child);
@@ -1835,7 +1731,7 @@ void Runtime::mark(Value value) {
         enqueue(instance->taskValue); enqueue(instance->taskCarried);
         for (Value item : instance->items) enqueue(item);
         for (const auto &entry : instance->entries) { enqueue(entry.first); enqueue(entry.second); }
-        for (const auto &binding : instance->bindings) { enqueue(binding.second.value); contractRoots(binding.second.contract); if (binding.second.declaringClass) enqueue(binding.second.declaringClass); }
+        for (const auto &binding : instance->bindings) { enqueue(binding.second.value); if (binding.second.declaringClass) enqueue(binding.second.declaringClass); }
         for (Object *scope : instance->scopes) enqueue(scope);
         for (const auto &iteration : instance->iterations) enqueue(iteration.source);
         for (const auto &scope : instance->deferred) for (const auto &action : scope) {
@@ -1858,13 +1754,6 @@ void Runtime::collect() {
         for (Value value : byteFrames[depth].locals) mark(value);
         for (Value value : byteFrames[depth].stack) mark(value);
         for (const auto &method : byteFrames[depth].methods) { if (method.receiver) mark(method.receiver); if (method.owner) mark(method.owner); }
-        std::function<void(const Contract &)> contractRoots = [&](const Contract &contract) {
-            if (!contract) return;
-            if (contract->nominal) mark(contract->nominal);
-            contractRoots(contract->key); contractRoots(contract->element);
-            for (const auto &part : contract->all) contractRoots(part);
-        };
-        for (const auto &contract : byteFrames[depth].contracts) contractRoots(contract);
     }
     for (const auto &module : modules) mark(module.second);
     for (const auto &type : nativeMethods) for (const auto &method : type.second) mark(method.second);
@@ -1975,32 +1864,29 @@ void Runtime::set(const std::string &name, Value value) { requireRunning(); defi
 void Runtime::appendItem(Value list, Value item, const Span &span) {
     requireRunning(); Object *target = object(list, span);
     if (target->kind != Kind::List) throw Error(span, "append requires a List", "type");
-    requireType(item, target->elementContract, span); target->items.push_back(item);
+    target->items.push_back(item);
 }
 void Runtime::setItem(Value list, size_t position, Value item, const Span &span) {
     requireRunning(); Object *target = object(list, span);
     if (target->kind != Kind::List) throw Error(span, "set requires a List", "type");
     if (position >= target->items.size()) throw Error(span, "List index out of range", "index");
-    requireType(item, target->elementContract, span); target->items[position] = item;
+    target->items[position] = item;
 }
 bool Runtime::lookupEntry(Value map, Value key, Value &value, const Span &span) {
     requireRunning(); Object *target = object(map, span);
     if (target->kind != Kind::Map || !primitiveKey(key)) throw Error(span, "Map lookup requires a Map and primitive key", "type");
-    requireType(key, target->keyContract, span);
     for (const auto &entry : target->entries) if (equal(entry.first, key)) { value = entry.second; return true; }
     value = {}; return false;
 }
 void Runtime::setEntry(Value map, Value key, Value value, const Span &span) {
     requireRunning(); Object *target = object(map, span);
     if (target->kind != Kind::Map || !primitiveKey(key)) throw Error(span, "Map set requires a Map and primitive key", "type");
-    requireType(key, target->keyContract, span); requireType(value, target->elementContract, span);
     for (auto &entry : target->entries) if (equal(entry.first, key)) { entry.second = value; return; }
     target->entries.emplace_back(key, value);
 }
 bool Runtime::removeEntry(Value map, Value key, const Span &span) {
     requireRunning(); Object *target = object(map, span);
     if (target->kind != Kind::Map || !primitiveKey(key)) throw Error(span, "Map remove requires a Map and primitive key", "type");
-    requireType(key, target->keyContract, span);
     for (auto entry = target->entries.begin(); entry != target->entries.end(); ++entry)
         if (equal(entry->first, key)) { target->entries.erase(entry); return true; }
     return false;
@@ -2018,7 +1904,7 @@ Value Runtime::run(const std::string &source, const std::string &file) {
 Value Runtime::run(const Ast &program, bool echoLastExpression) {
     requireRunning();
     steps = 0; size_t start = roots.size(); Value result;
-    shadowGlobals = echoLastExpression && !config.enforceContracts;
+    shadowGlobals = echoLastExpression;
     FrameScope frame(*this, "<script>", program->span, global);
     std::optional<ProfileScope> executionProfile;
     if (config.profiler) executionProfile.emplace(config.profiler.get(), "Execute", "vm", program->span);
@@ -2027,7 +1913,7 @@ Value Runtime::run(const Ast &program, bool echoLastExpression) {
         if (!config.debug) {
             std::optional<ProfileScope> profile;
             if (config.profiler) profile.emplace(config.profiler.get(), "Compile", "vm", program->span);
-            compiled = compileBytecode(program, config.optimizationLevel, echoLastExpression, !config.enforceContracts);
+            compiled = compileBytecode(program, config.optimizationLevel, echoLastExpression, true);
         }
         if (compiled) { if (config.profiler) config.profiler->bytecodePrograms++; result = executeBytecode(*compiled, global, {}, program->span); }
         else { if (config.profiler) config.profiler->lexicalPrograms++; executeBlock(program, global, false, &result, echoLastExpression); }

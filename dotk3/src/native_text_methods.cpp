@@ -10,7 +10,7 @@ Value TextMethods::split(Runtime &runtime, Object *receiver, const std::vector<A
     const auto &separator = needle(arguments, span)->text;
     if (separator.empty()) throw Error(span, "Split separator cannot be empty", "value");
     for (size_t index = 0; index < receiver->text.size(); index++) runtime.tick(span);
-    Object *parts = runtime.allocate(Kind::List, span); runtime.roots.push_back(parts); parts->elementContract = runtime.resolveContract("String", runtime.prelude, span);
+    Object *parts = runtime.allocate(Kind::List, span); runtime.roots.push_back(parts);
     size_t start = 0;
     for (;;) {
         runtime.tick(span); size_t found = receiver->text.find(separator, start);

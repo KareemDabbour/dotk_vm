@@ -264,7 +264,7 @@ lexical resource regions or transactions.
 
 ## Versioned Native Module Registration
 
-DK3NativeModule and DK3NativeExport use DK3_MODULE_ABI_VERSION=1. Initialize with
+DK3NativeModule and DK3NativeExport use DK3_MODULE_ABI_VERSION=2 (each export carries a type signature the checker sees). Initialize with
 dk3_module_init, supply one module name, optional docs and contextual named exports,
 then dk3_register_module. Names are single ASCII identifiers, excluding language
 keywords. Duplicate exports and existing global/core/module names fail without
