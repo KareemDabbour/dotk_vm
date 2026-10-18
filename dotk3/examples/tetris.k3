@@ -1,11 +1,11 @@
 from tetris_model import Tetris
 
 fn play() -> Null {
-    Random.seed(System.monotonicMillis())
+    Random.seed(Time.monotonicMillis())
     var game = Tetris()
     var paused = false
     var running = true
-    var fallenAt = System.monotonicMillis()
+    var fallenAt = Time.monotonicMillis()
     var dirty = true
     IO.Terminal.open()
     defer IO.Terminal.close()
@@ -18,25 +18,25 @@ fn play() -> Null {
             if game.gameOver { picture += "Game over. r restart, q quit\n" }
             IO.write("\x1b[H" + picture + "\x1b[J")
             dirty = false
-            System.gc()
+            GC.collect()
         }
         let key = IO.Terminal.readKey(16)
         if key != null {
             if key == 113 or key == 3 { running = false }
-            else if key == 112 { paused = not paused; dirty = true; fallenAt = System.monotonicMillis() }
+            else if key == 112 { paused = not paused; dirty = true; fallenAt = Time.monotonicMillis() }
             else if key == 114 and game.gameOver { game = Tetris(); paused = false; dirty = true }
             else if not paused and not game.gameOver {
                 if key == 97 { game.move(-1) }
                 else if key == 100 { game.move(1) }
                 else if key == 119 { game.rotate() }
                 else if key == 115 { game.down() }
-                else if key == 32 { game.drop(); fallenAt = System.monotonicMillis() }
+                else if key == 32 { game.drop(); fallenAt = Time.monotonicMillis() }
                 dirty = true
             }
         }
         var interval = 500 - (game.lines // 10) * 40
         if interval < 80 { interval = 80 }
-        let now = System.monotonicMillis()
+        let now = Time.monotonicMillis()
         if not paused and not game.gameOver and now - fallenAt >= interval { game.down(); fallenAt = now; dirty = true }
     }
 }

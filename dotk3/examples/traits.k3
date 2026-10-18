@@ -31,7 +31,7 @@ let sized: List<Sized> = [bag, [1, 2, 3], {"x": 1}, "abc"]
 print(size(bag), len(bag), describe(bag))
 print(size(sized[1]), size(sized[2]), size(sized[3]))
 let read = bag.read
-System.gc()
+GC.collect()
 print(read())
 print(Reflection.members(Readable))
 

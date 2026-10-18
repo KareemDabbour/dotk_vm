@@ -6,20 +6,20 @@ require 'timeout'
 binary = File.expand_path(ARGV.fetch(0))
 Timeout.timeout(30) do
   Dir.mktmpdir('dotk3-profiler') do |directory|
-    source = "fn work(limit: Int) -> Int { var total = 0; var index = 0; while index < limit { total += index; index += 1 }; return total }; System.print(work(2000)); System.gc(); System.delay(10)"
+    source = "fn work(limit: Int) -> Int { var total = 0; var index = 0; while index < limit { total += index; index += 1 }; return total }; System.print(work(2000)); GC.collect(); Time.sleep(10)"
     output, errors, result = Open3.capture3(binary, '--profile-vm', 'simple', '-e', source)
     raise 'Simple VM profile failed' unless result.success? && output == "1999000\n" && errors.include?('VM profile (simple)') && errors.include?('GC:') && !errors.include?('Opcodes:') && !errors.include?('Allocation sites')
     speed = File.join(directory, 'source.speedscope.json')
     trace = File.join(directory, 'vm.trace.json')
     output, errors, result = Open3.capture3(binary, '--profile', '--profile-vm', 'verbose', '--profile-output', speed, '--profile-trace', trace, '-O1', '-e', source)
-    raise 'Combined profiles changed execution' unless result.success? && output == "1999000\n" && errors.include?('source CPU profile') && errors.include?('Opcodes:') && errors.include?('optimization O1') && errors.include?('1 slot-bytecode calls, 0 lexical-bytecode calls') && errors.include?('System.delay')
+    raise 'Combined profiles changed execution' unless result.success? && output == "1999000\n" && errors.include?('source CPU profile') && errors.include?('Opcodes:') && errors.include?('optimization O1') && errors.include?('1 slot-bytecode calls, 0 lexical-bytecode calls') && errors.include?('Time.sleep')
     profile = JSON.parse(File.read(speed))
     sampled = profile.fetch('profiles').first
     raise 'Speedscope schema incorrect' unless profile['$schema'].include?('speedscope') && sampled['type'] == 'sampled' && sampled['unit'] == 'nanoseconds' && sampled['samples'].size == sampled['weights'].size && sampled['weights'].sum == sampled['endValue']
     raise 'Source sampler returned no stacks' unless sampled['samples'].any? && profile['shared']['frames'].any? { |frame| frame['name'] == 'work' }
     sampled['samples'].each { |stack| raise 'Invalid sample frame' unless stack.all? { |frame| frame >= 0 && frame < profile['shared']['frames'].size } }
     events = JSON.parse(File.read(trace)).fetch('traceEvents')
-    raise 'Perfetto events missing' unless events.any? { |event| event['name'] == 'GC' } && events.any? { |event| event['name'] == 'Compile' } && events.any? { |event| event['name'] == 'native:System.delay' && event['dur'] >= 5000 }
+    raise 'Perfetto events missing' unless events.any? { |event| event['name'] == 'GC' } && events.any? { |event| event['name'] == 'Compile' } && events.any? { |event| event['name'] == 'native:Time.sleep' && event['dur'] >= 5000 }
     %w[simple verbose].each do |mode|
       output, errors, result = Open3.capture3(binary, '--profile-vm', mode, '-e', 'fn failed() { let items: List<Int> = []; items[0] }; failed()')
       raise 'Failed script lost its exit/profile' unless result.exitstatus == 65 && errors.include?('IndexError') && errors.include?('VM profile') && output.empty?

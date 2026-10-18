@@ -9,7 +9,7 @@ fn makeAdder(base: Int) {
 }
 
 let addFive = makeAdder(5)
-System.gc()
+GC.collect()
 print(double(3), addFive(10))
 fn(value: Int) -> Null { print(value) }(7)
 

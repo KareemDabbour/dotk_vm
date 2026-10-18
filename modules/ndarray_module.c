@@ -1091,12 +1091,16 @@ static Value nd_to_list_native(int argc, Value *argv, bool *hasError, bool *push
 Value make_ndarray_value(DotKNdArray *arr)
 {
     ObjForeign *f = AS_FOREIGN(g_api->makeForeign(TYPE_NDARRAY, arr, true));
+    g_api->pushValue(OBJ_VAL(f));
 
-    g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("dtype", 5, true)), (arr->dtype == ND_DTYPE_INT64) ? g_api->makeString("int64", 5, true) : g_api->makeString("float64", 7, true));
+    Value dtype = (arr->dtype == ND_DTYPE_INT64) ? g_api->makeString("int64", 5, true) : g_api->makeString("float64", 7, true);
+    g_api->pushValue(dtype);
+    g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("dtype", 5, true)), dtype);
+    g_api->popValue();
     g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("ndim", 4, true)), NUM_VAL((double)arr->ndim));
     g_api->setTableValue(&f->fields, AS_STR(g_api->makeString("size", 4, true)), NUM_VAL((double)arr->size));
 
-    return OBJ_VAL(f);
+    return g_api->popValue();
 }
 
 bool dotk_init_module(const DotKNativeApi *api)

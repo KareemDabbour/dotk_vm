@@ -17,7 +17,9 @@
 
 #define DEBUG_PRINT_VERBOSE_CUSTOM_OBJECTS 1
 
+#ifndef DEBUG_STRESS_GC
 #define DEBUG_STRESS_GC 0
+#endif
 #define DEBUG_LOG_GC
 #undef DEBUG_LOG_GC
 #define DEBUG_ALLOCATIONS
@@ -65,6 +67,8 @@ static void sigSegvHandler(int signum)
 }
 
 extern pthread_mutex_t GVL;
+pthread_mutex_t *vmExecutionLock(void);
+void *vmScannerState(void);
 
 static void acquireGVL(const char *reason, const char *file, int line)
 {
@@ -72,7 +76,7 @@ static void acquireGVL(const char *reason, const char *file, int line)
     pthread_t tid = pthread_self();
     printf("thread %lu locking GVL for %s at %s:%d...\n", (unsigned long)tid, reason, file, line);
 #endif
-    pthread_mutex_lock(&GVL);
+    pthread_mutex_lock(vmExecutionLock());
 #ifdef DEBUG_LOG_THREAD
     printf("thread %lu locked GVL for %s at %s:%d\n", (unsigned long)tid, reason, file, line);
 #endif
@@ -84,7 +88,7 @@ static void releaseGVL(const char *reason, const char *file, int line)
     pthread_t tid = pthread_self();
     printf("thread %lu unlocking GVL at %s:%d...\n", (unsigned long)tid, file, line);
 #endif
-    pthread_mutex_unlock(&GVL);
+    pthread_mutex_unlock(vmExecutionLock());
 #ifdef DEBUG_LOG_THREAD
     printf("thread %lu unlocked GVL at %s:%d\n", (unsigned long)tid, file, line);
 #endif

@@ -24,7 +24,7 @@ fn serve(port: Int, limit: Int) -> Null {
             try { reply(client) } catch error { IO.write(f"HTTP rejected: {error.message}\n") }
             handled += 1
         }
-        System.gc()
+        GC.collect()
     }
 }
 

@@ -91,7 +91,7 @@ export class Tetris {
         }
         self.clearRows()
         self.spawn()
-        System.gc()
+        GC.collect()
     }
 
     fn down() -> Bool {

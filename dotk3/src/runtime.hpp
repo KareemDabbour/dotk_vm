@@ -45,6 +45,24 @@ struct SocketHandle : ResourceInfo {
     virtual uint16_t port() const = 0;
 };
 
+struct FileHandle : ResourceInfo {
+    FileHandle() : ResourceInfo("File") {}
+    virtual void close() = 0;
+    virtual std::string read(size_t maximum) = 0;  // empty at end of file
+    virtual std::optional<std::string> readLine(size_t maximum) = 0;
+    virtual void write(const std::string &bytes) = 0;
+    virtual int64_t seek(int64_t offset, int origin) = 0;  // origin: 0 start, 1 current, 2 end; returns the new position
+    virtual void flush() = 0;
+};
+// Paths are host-defined names; any operation left empty is reported as an unavailable capability.
+struct FileSystem {
+    std::function<std::shared_ptr<FileHandle>(const std::string &path, const std::string &mode)> open;
+    std::function<std::vector<std::string>(const std::string &)> list;
+    std::function<bool(const std::string &)> isDirectory;
+    std::function<void(const std::string &)> makeDirectory, remove;
+    std::function<void(const std::string &, const std::string &)> rename;
+};
+
 enum class Kind { Environment, String, Bytes, List, Tuple, Map, Function, Native,
                   RecordType, Record, ClassType, Instance, BoundMethod, TraitType, EnumType, Constructor, Variant, Module, Generator, Task, Resource, Super, Set };
 class Runtime;
@@ -151,8 +169,11 @@ struct Config {
     std::function<std::string(const std::string &, size_t)> readFile;
     std::function<std::optional<uint64_t>(const std::string &)> fileSize;
     size_t maxFileBytes = 4 * 1024 * 1024;
+    FileSystem fileSystem;
+    std::function<std::optional<std::string>(const std::string &)> environment;
     std::function<std::optional<std::string>()> readLine;
     std::function<uint64_t()> monotonicMillis;
+    std::function<uint64_t()> wallMillis;
     std::function<void(uint64_t)> delay;
     size_t maxInputBytes = 64 * 1024;
     uint64_t maxDelayMillis = 1000;
@@ -195,6 +216,9 @@ class Runtime {
     void installCore();
     void installJson();
     void installNetwork();
+    void installFiles();
+    void installLibrary();
+    void installStdlib();
     void installRequests();
     void installNativeMethods();
     Value callNativeMethod(Object *receiver, const NativeMethod &method, const std::vector<Argument> &arguments, const Span &span);
@@ -210,6 +234,7 @@ class Runtime {
     size_t cleanupDepth = 0;
     bool collectionRequested = false;
     size_t nextCollection = 4096;
+    size_t collections = 0;
     uint64_t bindingEpoch = 0;
     bool shadowGlobals = false;
     size_t callDepth = 0;

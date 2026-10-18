@@ -6,6 +6,7 @@
 #include "include/object.h"
 #include "include/optimizer.h"
 #include "include/scanner.h"
+#include "include/vm.h"
 
 // #ifdef DEBUG_PRINT_CODE
 #include "include/debug.h"
@@ -14,7 +15,7 @@
 typedef struct _Parser
 {
     Token prev;
-    Token current;
+    Token currentToken;
     char *file;
     bool hadError;
     bool panicMode;
@@ -97,20 +98,58 @@ typedef struct _ClassCompiler
     bool hasSuperClass;
 } ClassCompiler;
 
-Parser parser;
-Compiler *current = NULL;
-ClassCompiler *currentClass = NULL;
+typedef struct
+{
+    Parser parserData;
+    Compiler *compilerData;
+    ClassCompiler *classData;
+    int loopStart;
+    int loopScope;
+    int loopEnd;
+    int breakCount;
+    int breaks[UINT8_COUNT];
+    bool ternary;
+    bool asyncPending;
+    int thenOffset;
+    int elseOffset;
+    int optimizationLevel;
+} CompilerState;
 
-int innermostLoopStart = -1;
-int innermostLoopScopeDepth = 0;
-int innermostLoopEnd = -1;
-int numberOfBreaks = 0;
-int breakAddresses[UINT8_COUNT] = {0};
-bool inTernary = false;
-static bool pendingAsync = false;
-int ternaryThen = -1;
-int ternaryElse = -1;
-static int gCompilerOptimizationLevel = 1;
+static CompilerState cliCompilerState = {
+    .loopStart = -1, .loopEnd = -1, .thenOffset = -1, .elseOffset = -1, .optimizationLevel = 1};
+
+static CompilerState *compilerState(void)
+{
+    return vm.compilerState ? (CompilerState *)vm.compilerState : &cliCompilerState;
+}
+
+void *createCompilerState(void)
+{
+    CompilerState *state = (CompilerState *)calloc(1, sizeof(CompilerState));
+    if (state)
+    {
+        state->loopStart = -1;
+        state->loopEnd = -1;
+        state->thenOffset = -1;
+        state->elseOffset = -1;
+        state->optimizationLevel = 1;
+    }
+    return state;
+}
+
+#define parser (compilerState()->parserData)
+#define currentCompiler (compilerState()->compilerData)
+#define currentClass (compilerState()->classData)
+#define innermostLoopStart (compilerState()->loopStart)
+#define innermostLoopScopeDepth (compilerState()->loopScope)
+#define innermostLoopEnd (compilerState()->loopEnd)
+#define numberOfBreaks (compilerState()->breakCount)
+#define breakAddresses (compilerState()->breaks)
+#define inTernary (compilerState()->ternary)
+#define pendingAsync (compilerState()->asyncPending)
+#define ternaryThen (compilerState()->thenOffset)
+#define ternaryElse (compilerState()->elseOffset)
+#define gCompilerOptimizationLevel (compilerState()->optimizationLevel)
 
 static void expression();
 static void declareVar(bool isConst);
@@ -160,7 +199,7 @@ typedef struct
 
 static inline Chunk *currentChunk()
 {
-    return &current->function->chunk;
+    return &currentCompiler->function->chunk;
 }
 
 static void errorAt(Token *token, const char *message)
@@ -169,6 +208,11 @@ static void errorAt(Token *token, const char *message)
         return;
     parser.panicMode = true;
     parser.hadError = true;
+    if (vm.embedded)
+    {
+        vmHostCompileError(parser.file, token->line, token->col, message);
+        return;
+    }
     fprintf(stderr, "%s:%d:%d Error", parser.file, token->line, token->col);
     if (token->type == TOKEN_EOF)
     {
@@ -186,27 +230,42 @@ static void error(const char *message)
     errorAt(&parser.prev, message);
 }
 
+void resetCompilerState(void)
+{
+    currentCompiler = NULL;
+    currentClass = NULL;
+    memset(&parser, 0, sizeof(parser));
+    innermostLoopStart = -1;
+    innermostLoopScopeDepth = 0;
+    innermostLoopEnd = -1;
+    numberOfBreaks = 0;
+    inTernary = false;
+    pendingAsync = false;
+    ternaryThen = -1;
+    ternaryElse = -1;
+}
+
 static void errorAtCurrent(const char *message)
 {
-    errorAt(&parser.current, message);
+    errorAt(&parser.currentToken, message);
 }
 
 static void advance()
 {
-    parser.prev = parser.current;
+    parser.prev = parser.currentToken;
     for (;;)
     {
-        parser.current = scanToken();
-        // printf("TOKEN: %s - '%.*s'\n", TOKEN_NAMES[parser.current.type], parser.current.len, parser.current.start);
-        if (parser.current.type != TOKEN_ERROR)
+        parser.currentToken = scanToken();
+        // printf("TOKEN: %s - '%.*s'\n", TOKEN_NAMES[parser.currentCompiler.type], parser.currentCompiler.len, parser.currentCompiler.start);
+        if (parser.currentToken.type != TOKEN_ERROR)
             break;
-        errorAtCurrent(parser.current.start);
+        errorAtCurrent(parser.currentToken.start);
     }
 }
 
 static void consume(TokenType type, const char *message)
 {
-    if (parser.current.type == type)
+    if (parser.currentToken.type == type)
     {
         advance();
         return;
@@ -216,7 +275,7 @@ static void consume(TokenType type, const char *message)
 
 static bool check(TokenType type)
 {
-    return parser.current.type == type;
+    return parser.currentToken.type == type;
 }
 
 static bool match(TokenType type)
@@ -232,7 +291,7 @@ static bool looksLikeUnpackAssignmentStart()
     if (!check(TOKEN_LEFT_PAREN))
         return false;
 
-    const char *p = parser.current.start;
+    const char *p = parser.currentToken.start;
     int depth = 0;
 
     while (*p)
@@ -289,17 +348,17 @@ static void unpackAssignmentStatementAfterLeftParen()
         }
 
         uint8_t setOp;
-        int arg = resolveLocal(current, &name);
+        int arg = resolveLocal(currentCompiler, &name);
         bool isConst = false;
         if (arg != -1)
         {
             setOp = OP_SET_LOCAL;
-            isConst = current->locals[arg].isConst;
+            isConst = currentCompiler->locals[arg].isConst;
         }
-        else if ((arg = resolveUpValue(current, &name)) != -1)
+        else if ((arg = resolveUpValue(currentCompiler, &name)) != -1)
         {
             setOp = OP_SET_UPVALUE;
-            isConst = current->upValues[arg].isConst;
+            isConst = currentCompiler->upValues[arg].isConst;
         }
         else
         {
@@ -398,7 +457,7 @@ static void emitReturn()
     Chunk *chunk = currentChunk();
     if (chunk != NULL && chunk->size > 0 && (chunk->code[chunk->size - 1] == OP_RETURN || chunk->code[chunk->size - 1] == OP_RETURN_NIL || chunk->code[chunk->size - 1] == OP_RETURN_THIS))
         return;
-    if (current->type == TYPE_INITIALIZER)
+    if (currentCompiler->type == TYPE_INITIALIZER)
         emitByte(OP_RETURN_THIS);
     else
         emitByte(OP_RETURN_NIL);
@@ -407,7 +466,7 @@ static void emitReturn()
 static uint16_t makeConstant(Value value)
 {
     int constant = addConst(currentChunk(), value);
-    // int constant = writeConst(currentChunk(), value, parser.current.line);
+    // int constant = writeConst(currentChunk(), value, parser.currentCompiler.line);
     if (constant > UINT16_MAX)
     {
         error("Too many constants in one chunk.");
@@ -437,7 +496,7 @@ static void patchJump(int offset)
 static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool isRepl, bool printBytecode)
 {
     parser.file = file;
-    compiler->enclosing = current;
+    compiler->enclosing = currentCompiler;
     compiler->function = NULL;
     compiler->type = type;
     compiler->localCount = 0;
@@ -449,19 +508,19 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
     compiler->printBytecode = printBytecode;
     compiler->isInTryCatch = type == TYPE_TRY || type == TYPE_CATCH;
     compiler->function = newFunction();
-    current = compiler;
+    currentCompiler = compiler;
     if (type == TYPE_ANONYMOUS)
-        current->function->name = copyString("<anon_fn>", 10);
+        currentCompiler->function->name = copyString("<anon_fn>", 10);
     else if (type == TYPE_TRY)
-        current->function->name = copyString("<try>", 5);
+        currentCompiler->function->name = copyString("<try>", 5);
     else if (type == TYPE_CATCH)
-        current->function->name = copyString("<catch>", 7);
+        currentCompiler->function->name = copyString("<catch>", 7);
     else if (type != TYPE_SCRIPT)
-        current->function->name = copyString(parser.prev.start, parser.prev.len);
+        currentCompiler->function->name = copyString(parser.prev.start, parser.prev.len);
     else
-        current->function->name = copyString(file, strlen(file));
+        currentCompiler->function->name = copyString(file, strlen(file));
 
-    Local *local = &current->locals[current->localCount++];
+    Local *local = &currentCompiler->locals[currentCompiler->localCount++];
     local->depth = 0;
     local->name.start = "";
     local->name.len = 0;
@@ -477,7 +536,7 @@ static void initCompiler(Compiler *compiler, FunctionType type, char *file, bool
 static ObjFunction *endCompiler()
 {
     emitReturn();
-    ObjFunction *func = current->function;
+    ObjFunction *func = currentCompiler->function;
 
     if (!parser.hadError && gCompilerOptimizationLevel > 0)
     {
@@ -510,7 +569,7 @@ static ObjFunction *endCompiler()
     }
 
     // #if DEBUG_PRINT_CODE
-    if (unlikely(current->printBytecode))
+    if (unlikely(currentCompiler->printBytecode))
         if (!parser.hadError)
         {
             const char *fname = func->name != NULL ? func->name->chars : "<script>";
@@ -534,7 +593,7 @@ static ObjFunction *endCompiler()
             disassembleChunk(currentChunk(), fname);
         }
     // #endif
-    current = current->enclosing;
+    currentCompiler = currentCompiler->enclosing;
     return func;
 }
 
@@ -551,7 +610,7 @@ static void list(bool canAssign)
         emitBytes(OP_BUILD_LIST, (uint8_t)0);
         addLocal(synthToken("$comp_result"), false);
         markInitialized();
-        int resultSlot = current->localCount - 1;
+        int resultSlot = currentCompiler->localCount - 1;
 
         consume(TOKEN_IDENTIFIER, "Expect loop variable name after 'for' in list comprehension.");
         Token itemName = parser.prev;
@@ -560,19 +619,19 @@ static void list(bool canAssign)
         expression();
         addLocal(synthToken("$comp_source"), true);
         markInitialized();
-        int sourceSlot = current->localCount - 1;
+        int sourceSlot = currentCompiler->localCount - 1;
 
         emitConst(NUM_VAL(0));
         addLocal(synthToken("$comp_index"), false);
         markInitialized();
-        int indexSlot = current->localCount - 1;
+        int indexSlot = currentCompiler->localCount - 1;
 
         int loopStart = currentChunk()->size;
 
         emitBytes(OP_GET_LOCAL, (uint16_t)indexSlot);
         namedVariable(synthToken("len"), false);
         emitBytes(OP_GET_LOCAL, (uint16_t)sourceSlot);
-        current->lastCallOffset = currentChunk()->size;
+        currentCompiler->lastCallOffset = currentChunk()->size;
         emitBytes(OP_CALL, (uint16_t)1);
         emitByte(OP_LESS);
 
@@ -716,19 +775,19 @@ static void subscript(bool canAssign)
 
 static void beginScope()
 {
-    current->scopeDepth++;
+    currentCompiler->scopeDepth++;
 }
 
 static void endScope()
 {
-    current->scopeDepth--;
-    while (current->localCount > 0 && current->locals[current->localCount - 1].depth > current->scopeDepth)
+    currentCompiler->scopeDepth--;
+    while (currentCompiler->localCount > 0 && currentCompiler->locals[currentCompiler->localCount - 1].depth > currentCompiler->scopeDepth)
     {
-        if (current->locals[current->localCount - 1].isCaptured)
+        if (currentCompiler->locals[currentCompiler->localCount - 1].isCaptured)
             emitByte(OP_CLOSE_UPVALUE);
         else
             emitByte(OP_POP);
-        current->localCount--;
+        currentCompiler->localCount--;
     }
 }
 
@@ -847,8 +906,8 @@ static void emitCallFromArgInfo(ArgInfo args, bool isSelf)
     }
     else
     {
-        current->lastCallOffset = currentChunk()->size;
-        current->lastCallIsSelf = isSelf;
+        currentCompiler->lastCallOffset = currentChunk()->size;
+        currentCompiler->lastCallIsSelf = isSelf;
         emitBytes(OP_CALL, args.positional);
     }
 }
@@ -977,17 +1036,17 @@ static ArgInfo argList()
 
 static void call(bool canAssign)
 {
-    // Check if the callee (already compiled) was a GET_GLOBAL for the current
+    // Check if the callee (already compiled) was a GET_GLOBAL for the currentCompiler
     // function's name — this indicates a potential self-recursive tail call.
     bool isSelf = false;
     {
         Chunk *chunk = currentChunk();
         int sz = chunk->size;
-        if (sz >= 2 && chunk->code[sz - 2] == OP_GET_GLOBAL && current->type == TYPE_FUNCTION && current->function->name != NULL)
+        if (sz >= 2 && chunk->code[sz - 2] == OP_GET_GLOBAL && currentCompiler->type == TYPE_FUNCTION && currentCompiler->function->name != NULL)
         {
             uint16_t constIdx = chunk->code[sz - 1];
             Value nameVal = chunk->constants.values[constIdx];
-            if (IS_STR(nameVal) && AS_STR(nameVal) == current->function->name)
+            if (IS_STR(nameVal) && AS_STR(nameVal) == currentCompiler->function->name)
                 isSelf = true;
         }
     }
@@ -1122,7 +1181,7 @@ static void expression()
 
 static void returnStatement()
 {
-    if (current->type == TYPE_SCRIPT)
+    if (currentCompiler->type == TYPE_SCRIPT)
     {
         error("Can't return from top-level code");
         return;
@@ -1134,10 +1193,10 @@ static void returnStatement()
     }
     else
     {
-        if (current->type == TYPE_INITIALIZER)
+        if (currentCompiler->type == TYPE_INITIALIZER)
             error("Can't return a value from a class's constructor.");
 
-        if (current->hasYield)
+        if (currentCompiler->hasYield)
             error("Can't return a value from a generator function.");
 
         expression();
@@ -1146,9 +1205,9 @@ static void returnStatement()
         // and it was a self-recursive call, patch it to OP_TAIL_CALL.
         {
             Chunk *chunk = currentChunk();
-            if (current->lastCallOffset >= 0 && current->lastCallOffset == chunk->size - 2 && chunk->code[current->lastCallOffset] == OP_CALL && current->lastCallIsSelf)
+            if (currentCompiler->lastCallOffset >= 0 && currentCompiler->lastCallOffset == chunk->size - 2 && chunk->code[currentCompiler->lastCallOffset] == OP_CALL && currentCompiler->lastCallIsSelf)
             {
-                chunk->code[current->lastCallOffset] = OP_TAIL_CALL;
+                chunk->code[currentCompiler->lastCallOffset] = OP_TAIL_CALL;
             }
         }
         emitByte(OP_RETURN);
@@ -1190,14 +1249,14 @@ static bool isImplicitYieldTerminator(TokenType type)
 
 static void yieldStatement()
 {
-    if (current->type == TYPE_SCRIPT)
+    if (currentCompiler->type == TYPE_SCRIPT)
     {
         error("Can't yield from top-level code");
         return;
     }
 
-    current->hasYield = true;
-    if (match(TOKEN_SEMICOLON) || isImplicitYieldTerminator(parser.current.type))
+    currentCompiler->hasYield = true;
+    if (match(TOKEN_SEMICOLON) || isImplicitYieldTerminator(parser.currentToken.type))
         emitByte(OP_NIL);
     else
     {
@@ -1211,13 +1270,13 @@ static void yieldStatement()
 
 static void yieldExpr(bool canAssign)
 {
-    if (current->type == TYPE_SCRIPT)
+    if (currentCompiler->type == TYPE_SCRIPT)
     {
         error("Can't yield from top-level code");
         return;
     }
 
-    current->hasYield = true;
+    currentCompiler->hasYield = true;
     if (check(TOKEN_SEMICOLON) || check(TOKEN_RIGHT_PAREN) || check(TOKEN_RIGHT_BRACE) || check(TOKEN_EOF) || check(TOKEN_COMMA))
         emitByte(OP_NIL);
     else
@@ -1248,7 +1307,7 @@ static void block()
 static void function(FunctionType type)
 {
     Compiler compiler;
-    initCompiler(&compiler, type, parser.file, current->isRepl, current->printBytecode);
+    initCompiler(&compiler, type, parser.file, currentCompiler->isRepl, currentCompiler->printBytecode);
     if (pendingAsync)
     {
         compiler.isAsyncFn = true;
@@ -1278,26 +1337,26 @@ static void function(FunctionType type)
             consume(TOKEN_IDENTIFIER, "Expect parameter name.");
             Token parameter = parser.prev;
 
-            current->function->arity++;
-            current->function->isVariadic = hasVariadicParam;
+            currentCompiler->function->arity++;
+            currentCompiler->function->isVariadic = hasVariadicParam;
 
-            if (current->function->arity >= UINT16_MAX)
+            if (currentCompiler->function->arity >= UINT16_MAX)
                 errorAtCurrent("Can't have more than 65535 parameters");
 
             declareVar(false);
-            addFunctionParamName(current->function, &parameter);
+            addFunctionParamName(currentCompiler->function, &parameter);
             defineVar(0);
 
             // Check for default value: param = <expression>
             if (!isVariadicParam && match(TOKEN_EQUAL))
             {
                 hasDefaults = true;
-                if (current->function->defaultStart < 0)
-                    current->function->defaultStart = current->function->arity - 1;
-                current->function->defaultCount++;
+                if (currentCompiler->function->defaultStart < 0)
+                    currentCompiler->function->defaultStart = currentCompiler->function->arity - 1;
+                currentCompiler->function->defaultCount++;
 
                 // Get the local slot for this parameter
-                uint8_t slot = (uint8_t)(current->localCount - 1);
+                uint8_t slot = (uint8_t)(currentCompiler->localCount - 1);
                 // Emit: OP_DEFAULT_LOCAL slot offset_placeholder
                 // If the local is not UNDEF, jump past the default expression
                 emitByte(OP_DEFAULT_LOCAL);
@@ -1325,9 +1384,9 @@ static void function(FunctionType type)
             {
                 // Non-default, non-variadic param: count towards minArity
                 if (!hasVariadicParam)
-                    current->function->minArity = current->function->arity;
+                    currentCompiler->function->minArity = currentCompiler->function->arity;
                 else if (!isVariadicParam)
-                    current->function->minArity = current->function->arity - 1;
+                    currentCompiler->function->minArity = currentCompiler->function->arity - 1;
             }
 
             if (hasVariadicParam && check(TOKEN_COMMA))
@@ -1346,7 +1405,7 @@ static void function(FunctionType type)
         consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
         block();
     }
-    // optimizeFunction(current->function);
+    // optimizeFunction(currentCompiler->function);
     ObjFunction *function = endCompiler();
     function->isGenerator = compiler.hasYield;
     function->isAsync = compiler.isAsyncFn;
@@ -1513,7 +1572,7 @@ static void varDeclaration()
         UnpackTarget targets[UINT8_COUNT];
         int targetCount = 0;
         int restIndex = -1;
-        int firstLocal = current->localCount;
+        int firstLocal = currentCompiler->localCount;
 
         if (check(TOKEN_RIGHT_PAREN))
             error("Unpack declaration needs at least one target.");
@@ -1553,10 +1612,10 @@ static void varDeclaration()
         emitByte((uint8_t)targetCount);
         emitByte(restIndex >= 0 ? (uint8_t)(restIndex + 1) : (uint8_t)0);
 
-        if (current->scopeDepth > 0)
+        if (currentCompiler->scopeDepth > 0)
         {
-            for (int i = firstLocal; i < current->localCount; i++)
-                current->locals[i].depth = current->scopeDepth;
+            for (int i = firstLocal; i < currentCompiler->localCount; i++)
+                currentCompiler->locals[i].depth = currentCompiler->scopeDepth;
         }
         else
         {
@@ -1591,7 +1650,7 @@ static void constDeclaration()
     expression();
     // consume(TOKEN_SEMICOLON, "Expect ';' after constant declaration.");
     match(TOKEN_SEMICOLON);
-    if (current->scopeDepth > 0)
+    if (currentCompiler->scopeDepth > 0)
         defineVar(global);
     else
         emitBytes(OP_DEF_CONST_GLOBAL, global);
@@ -1600,7 +1659,7 @@ static void constDeclaration()
 static void expressionStatement()
 {
     expression();
-    if (current->isRepl)
+    if (currentCompiler->isRepl)
     {
         if (match(TOKEN_SEMICOLON))
             advance();
@@ -1698,25 +1757,25 @@ static void forStatement()
         expression();
         addLocal(synthToken("$for_iterable"), true);
         markInitialized();
-        int iterableSlot = current->localCount - 1;
+        int iterableSlot = currentCompiler->localCount - 1;
 
         emitBytes(OP_GET_LOCAL, (uint16_t)iterableSlot);
         emitBytes(OP_INVOKE, identifierConst(&(Token){.start = "_iter_", .len = 6}));
         emitByte((uint8_t)0);
         addLocal(synthToken("$for_iterator"), true);
         markInitialized();
-        int iteratorSlot = current->localCount - 1;
+        int iteratorSlot = currentCompiler->localCount - 1;
 
         emitByte(OP_NIL);
         addLocal(synthToken("$for_next"), false);
         markInitialized();
-        int nextSlot = current->localCount - 1;
+        int nextSlot = currentCompiler->localCount - 1;
 
         int surroundingLoopStart = innermostLoopStart;
         int surroundingLoopScopeDepth = innermostLoopScopeDepth;
         int numberOfBreaksPrior = numberOfBreaks;
         innermostLoopStart = currentChunk()->size;
-        innermostLoopScopeDepth = current->scopeDepth;
+        innermostLoopScopeDepth = currentCompiler->scopeDepth;
 
         emitBytes(OP_GET_LOCAL, (uint16_t)iteratorSlot);
         emitBytes(OP_INVOKE, identifierConst(&(Token){.start = "_next_", .len = 6}));
@@ -1770,9 +1829,9 @@ static void forStatement()
     }
     else if (match(TOKEN_VAR))
     {
-        loopVarName = parser.current;
+        loopVarName = parser.currentToken;
         varDeclaration();
-        loopVar = current->localCount - 1;
+        loopVar = currentCompiler->localCount - 1;
     }
     else
         expressionStatement();
@@ -1781,7 +1840,7 @@ static void forStatement()
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
     int numberOfBreaksPrior = numberOfBreaks;
     innermostLoopStart = currentChunk()->size;
-    innermostLoopScopeDepth = current->scopeDepth;
+    innermostLoopScopeDepth = currentCompiler->scopeDepth;
 
     int exitJump = -1;
     if (!match(TOKEN_SEMICOLON))
@@ -1815,7 +1874,7 @@ static void forStatement()
     //     addLocal(loopVarName);
     //     markInitialized();
 
-    //     innerVar = current->localCount - 1;
+    //     innerVar = currentCompiler->localCount - 1;
     // }
 
     statement();
@@ -1887,7 +1946,7 @@ static void whileStatement()
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
     int surroundingLoopEnd = innermostLoopEnd;
     innermostLoopStart = currentChunk()->size;
-    innermostLoopScopeDepth = current->scopeDepth;
+    innermostLoopScopeDepth = currentCompiler->scopeDepth;
 
     consume(TOKEN_LEFT_PAREN, "Expect '(' after 'while' ");
     expression();
@@ -1917,11 +1976,11 @@ static void synchronize()
 {
     parser.panicMode = false;
 
-    while (parser.current.type != TOKEN_EOF)
+    while (parser.currentToken.type != TOKEN_EOF)
     {
         if (parser.prev.type == TOKEN_SEMICOLON)
             return;
-        switch (parser.current.type)
+        switch (parser.currentToken.type)
         {
         case TOKEN_CLASS:
         case TOKEN_FUN:
@@ -1990,14 +2049,14 @@ static void continueStatement()
     match(TOKEN_SEMICOLON);
 
     // Discard any locals created inside the loop.
-    for (int i = current->localCount - 1;
-         i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
+    for (int i = currentCompiler->localCount - 1;
+         i >= 0 && currentCompiler->locals[i].depth > innermostLoopScopeDepth;
          i--)
     {
         emitByte(OP_POP);
     }
 
-    // Jump to top of current innermost loop.
+    // Jump to top of currentCompiler innermost loop.
     emitLoop(innermostLoopStart);
 }
 
@@ -2011,10 +2070,10 @@ static void breakStatement()
 
     // consume(TOKEN_SEMICOLON, "Expect ';' after 'break'.");
     match(TOKEN_SEMICOLON);
-    // if (!current->isInTryCatch)
+    // if (!currentCompiler->isInTryCatch)
     // {
-    for (int i = current->localCount - 1;
-         i >= 0 && current->locals[i].depth > innermostLoopScopeDepth;
+    for (int i = currentCompiler->localCount - 1;
+         i >= 0 && currentCompiler->locals[i].depth > innermostLoopScopeDepth;
          i--)
     {
         emitByte(OP_POP);
@@ -2028,7 +2087,7 @@ static void enterTryCatch()
 {
     // This is a bit of a hack. We're going to compile the try block as a function, then store it in the closure of the try-catch block.
 
-    // And because of this, we need to save the state of the current compiler, and then restore it after we're done compiling the try block.
+    // And because of this, we need to save the state of the currentCompiler compiler, and then restore it after we're done compiling the try block.
     int surroundingLoopStart = innermostLoopStart;
     int surroundingBreakAddrCount = numberOfBreaks;
     int surroundingLoopScopeDepth = innermostLoopScopeDepth;
@@ -2038,7 +2097,7 @@ static void enterTryCatch()
     innermostLoopScopeDepth = 0;
     innermostLoopEnd = -1;
     Compiler compiler;
-    initCompiler(&compiler, TYPE_TRY, parser.file, current->isRepl, current->printBytecode);
+    initCompiler(&compiler, TYPE_TRY, parser.file, currentCompiler->isRepl, currentCompiler->printBytecode);
     beginScope();
     statement();
     endScope();
@@ -2070,7 +2129,7 @@ static void enterTryCatch()
     numberOfBreaks = 0;
     innermostLoopScopeDepth = 0;
     innermostLoopEnd = -1;
-    initCompiler(&compiler, TYPE_CATCH, parser.file, current->isRepl, current->printBytecode);
+    initCompiler(&compiler, TYPE_CATCH, parser.file, currentCompiler->isRepl, currentCompiler->printBytecode);
     beginScope();
     uint16_t catchVar = parseVariable("Expect variable name", false);
     defineVar(catchVar);
@@ -2547,7 +2606,7 @@ static void namedVariable(Token name, bool canAssign)
     } while (false)
 
     uint8_t getOp, setOp;
-    int arg = resolveLocal(current, &name);
+    int arg = resolveLocal(currentCompiler, &name);
     bool isConst = false;
     bool isUnresolved = false;
 
@@ -2555,13 +2614,13 @@ static void namedVariable(Token name, bool canAssign)
     {
         getOp = OP_GET_LOCAL;
         setOp = OP_SET_LOCAL;
-        isConst = current->locals[arg].isConst;
+        isConst = currentCompiler->locals[arg].isConst;
     }
-    else if ((arg = resolveUpValue(current, &name)) != -1)
+    else if ((arg = resolveUpValue(currentCompiler, &name)) != -1)
     {
         getOp = OP_GET_UPVALUE;
         setOp = OP_SET_UPVALUE;
-        isConst = current->upValues[arg].isConst;
+        isConst = currentCompiler->upValues[arg].isConst;
     }
     else
     {
@@ -2867,7 +2926,7 @@ static void parsePrecedence(Precedence precedence)
     bool canAssign = precedence <= PREC_ASSIGNMENT;
     prefixRule(canAssign);
 
-    while (precedence <= getRule(parser.current.type)->precedence)
+    while (precedence <= getRule(parser.currentToken.type)->precedence)
     {
         advance();
         ParseFn infixRule = getRule(parser.prev.type)->infix;
@@ -2949,30 +3008,30 @@ static int resolveUpValue(Compiler *compiler, Token *name)
 
 static void addLocal(Token name, bool isConst)
 {
-    if (current->localCount == LOCALS_MAX)
+    if (currentCompiler->localCount == LOCALS_MAX)
     {
         error("Too many local variables in function.");
         return;
     }
 
-    Local *local = &current->locals[current->localCount++];
+    Local *local = &currentCompiler->locals[currentCompiler->localCount++];
     local->name = name;
     local->depth = -1;
     local->isCaptured = false;
     local->isConst = isConst;
 
-    setFunctionLocalName(current->function, current->localCount - 1, &name);
+    setFunctionLocalName(currentCompiler->function, currentCompiler->localCount - 1, &name);
 }
 
 static void declareVar(bool isConst)
 {
-    if (current->scopeDepth == 0)
+    if (currentCompiler->scopeDepth == 0)
         return;
     Token *name = &parser.prev;
-    for (int i = current->localCount - 1; i >= 0; i--)
+    for (int i = currentCompiler->localCount - 1; i >= 0; i--)
     {
-        Local *local = &current->locals[i];
-        if (local->depth != -1 && local->depth < current->scopeDepth)
+        Local *local = &currentCompiler->locals[i];
+        if (local->depth != -1 && local->depth < currentCompiler->scopeDepth)
         {
             break;
         }
@@ -2990,7 +3049,7 @@ static uint16_t parseVariable(const char *errMsg, bool isConst)
     consume(TOKEN_IDENTIFIER, errMsg);
 
     declareVar(isConst);
-    if (current->scopeDepth > 0)
+    if (currentCompiler->scopeDepth > 0)
         return 0;
 
     return identifierConst(&parser.prev);
@@ -3003,7 +3062,7 @@ static uint16_t declareVariableFromToken(Token name, bool isConst)
     declareVar(isConst);
     parser.prev = savedPrev;
 
-    if (current->scopeDepth > 0)
+    if (currentCompiler->scopeDepth > 0)
         return 0;
 
     return identifierConst(&name);
@@ -3011,14 +3070,14 @@ static uint16_t declareVariableFromToken(Token name, bool isConst)
 
 static void markInitialized()
 {
-    if (current->scopeDepth == 0)
+    if (currentCompiler->scopeDepth == 0)
         return;
-    current->locals[current->localCount - 1].depth = current->scopeDepth;
+    currentCompiler->locals[currentCompiler->localCount - 1].depth = currentCompiler->scopeDepth;
 }
 
 static void defineVar(uint16_t global)
 {
-    if (current->scopeDepth > 0)
+    if (currentCompiler->scopeDepth > 0)
     {
         markInitialized();
         return;
@@ -3107,7 +3166,7 @@ static void exportStatement()
         expression();
         match(TOKEN_SEMICOLON);
 
-        if (current->scopeDepth > 0)
+        if (currentCompiler->scopeDepth > 0)
             defineVar(global);
         else
             emitBytes(OP_DEF_CONST_GLOBAL, global);
@@ -3222,7 +3281,7 @@ int compileGetOptimizationLevel(void)
 
 void markCompilerRoots()
 {
-    Compiler *compiler = current;
+    Compiler *compiler = currentCompiler;
     while (compiler != NULL)
     {
         markObj((Obj *)compiler->function);

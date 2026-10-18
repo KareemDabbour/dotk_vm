@@ -77,6 +77,18 @@ typedef struct ImportSourceNode
 
 typedef struct _VM
 {
+    void *compilerState;
+    void *scannerState;
+    bool builtinModulesLoaded[128];
+    Value concatPrefix;
+    Value yieldedValue;
+    Value sentValue;
+    bool yieldActive;
+    bool yieldHit;
+    bool stringifyTruncated;
+    bool bytecodeOutput;
+    bool stackOutput;
+    uint64_t randomState;
     /* Threading — every execution context lives in a DotKThread.
        mainThread is allocated once in initVM().
        currentThread always points to whoever is active. */
@@ -179,6 +191,8 @@ typedef struct _VM
     Obj **grayStack;
     ImportSourceNode *importSources;
     bool gcDisabled;
+    bool embedded;
+    bool asyncPoolInitialized;
     bool isInTryCatch;
     bool isRepl;
     ObjString *lastError;
@@ -201,16 +215,39 @@ typedef enum
 } InterpretResult;
 
 void initVM(bool printBytecode, bool printExecStack);
+void initVMForHost(void);
+void vmResetHostExecution(bool poisoned);
+InterpretResult vmCallFromHost(int argumentCount, Value *result);
+void vmHostMarkRoots(void);
+void vmHostWrite(const char *bytes, size_t length);
+void vmHostCompileError(const char *file, int line, int column, const char *message);
+void vmHostRuntimeError(const char *message, const char *trace, Position position);
+void *vmHostReallocate(void *pointer, size_t oldSize, size_t newSize);
+char *vmHostOwnStringBuffer(char *buffer, size_t size);
+void vmHostAllocationFailure(void);
+size_t vmHostHeapLimit(void);
+bool vmHostCheckExecution(void);
+bool vmHostNativeAllowed(const char *name);
+char *vmHostResolveModule(const char *name);
+char *vmHostRetainFilename(const char *name);
+void vmEnsureArgumentGlobals(void);
+Value vmHostInvokeNative(ObjNative *native, int argumentCount, Value *arguments, bool *hasError);
+bool vmResumeHostTask(ObjGenerator *generator, Value *result);
+void vmHostRecordCollection(void);
 void freeVM();
 
 InterpretResult interpret(const char *source, char *file, bool printExpressions, int argC, char **argV);
 extern VM vm;
+extern _Thread_local VM *dotkCurrentVM;
+void vmSelectInstance(VM *instance, pthread_mutex_t *lock);
+#define vm (*dotkCurrentVM)
 void push(Value value);
 Value pop();
 Value popN(int n);
 void rotateStack();
 Value peek(int distance);
 void runtimeError(const char *format, ...);
+void vmMarkTransientRoots(void);
 ObjClass *getVmClass(Value val);
 // static void defineNative(const char *name, NativeFn function);
 

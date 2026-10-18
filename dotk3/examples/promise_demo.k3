@@ -1,0 +1,23 @@
+from promise import Promise
+from System import print
+from Time import make, monotonicMillis
+
+let first = Promise<Int>(fn(resolve: fn(Int) -> Null, reject: fn(Object?) -> Null) -> Null { resolve(20) })
+let label = first.then(fn(value: Int) -> Int { return value + 1 }).then(fn(value: Int) -> String { return f"value {value}" })
+let failing: Promise<Int> = Promise.rejected("boom")
+let recovered = failing.then(fn(value: Int) -> Int { return value }).otherwise(fn(error: Object?) -> Int { return -1 })
+let doubled = first.andThen(fn(value: Int) -> Promise<Int> { return Promise.resolved(value * 2) })
+let everything = Promise.all([first, doubled, recovered])
+let fastest = Promise.race([doubled, first])
+let cleanup = first.ensure(fn() -> Null { print("ensure ran") })
+let thrown = first.then(fn(value: Int) -> Int { throw "inside then" })
+
+print("before run:", label.status())
+print("callbacks run:", Promise.run())
+label.then(fn(text: String) -> Null { print(text); return null })
+everything.then(fn(values: List<Int>) -> Null { print("all", values); return null })
+fastest.then(fn(value: Int) -> Null { print("race", value); return null })
+thrown.otherwise(fn(error: Object?) -> Int { print("caught", error); return 0 })
+print(f"after first run: {monotonicMillis()}")
+Promise.run()
+print(f"after second run: {monotonicMillis()}")

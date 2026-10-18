@@ -7,4 +7,7 @@ void compileSetOptimizationLevel(int level);
 int compileGetOptimizationLevel(void);
 void markCompilerRoots();
 
+void resetCompilerState(void);
+void *createCompilerState(void);
+
 #endif

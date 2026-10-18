@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 binary=${1:?Expected CLI binary path}
+plugin=${2:-}
 
 output=$("$binary" --help)
 case "$output" in
@@ -49,7 +50,7 @@ grep -Fq 'Call stack:' "$work/trace-error"
 grep -Fq 'leaf()' "$work/trace-error"
 grep -Fq 'main()' "$work/trace-error"
 ruby -e 'abort "ANSI escaped into redirected diagnostics" if File.binread(ARGV[0]).include?("\e[")' "$work/trace-error"
-output=$("$binary" -e 'var count = 0; while count < 200000 { count += 1; if count % 1000 == 0 { System.gc() } }; System.print(count)')
+output=$("$binary" -e 'var count = 0; while count < 200000 { count += 1; if count % 1000 == 0 { GC.collect() } }; System.print(count)')
 expect '200000' "$output"
 if "$binary" --steps 100 -e 'while true {}' >"$work/steps-output" 2>"$work/steps-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 65
@@ -105,6 +106,66 @@ test "$exit_code" -eq 65
 grep -Fq 'read limit' "$work/files-error"
 if "$binary" --files-root >"$work/files-output" 2>"$work/files-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 64
+mkdir -p "$work/rw"
+output=$("$binary" --files-root "$work/rw" --files-write -e 'let f = Files.open("a.txt", "w"); Files.write(f, "one\ntwo"); Files.close(f); Files.close(f); let r = Files.open("a.txt"); System.print(Files.readLine(r), Files.readLine(r), Files.readLine(r)); Files.close(r); Files.append("a.txt", "!"); Files.mkdir("d"); Files.rename("a.txt", "d/b.txt"); System.print(Files.list("d"), Files.size("d/b.txt"), Files.isDirectory("d")); Files.remove("d/b.txt")')
+expect 'one two null
+[b.txt] 8 true' "$output"
+test ! -e "$work/rw/d/b.txt"
+for code in 'Files.writeText("x", "y")' 'Files.open("x", "w")' 'Files.mkdir("x")'; do
+    output=$("$binary" --files-root "$work/files" -e "try { $code } catch error { System.print(error.kind) }")
+    expect 'io' "$output"
+    output=$("$binary" -e "try { $code } catch error { System.print(error.kind) }")
+    expect 'capability' "$output"
+done
+output=$("$binary" --files-root "$work/rw" --files-write -e 'try { Files.writeText("../escape", "y") } catch error { System.print(error.kind) }')
+expect 'io' "$output"
+test ! -e "$work/escape"
+if "$binary" --files-write -e 'null' >"$work/files-output" 2>"$work/files-error"; then exit 1; else exit_code=$?; fi
+test "$exit_code" -eq 70
+output=$(DOTK_TEST_VALUE=abc "$binary" --env -e 'System.print(System.env("DOTK_TEST_VALUE"), System.env("DOTK_MISSING_VALUE"))')
+expect 'abc null' "$output"
+output=$("$binary" -e 'try { System.env("HOME") } catch error { System.print(error.kind) }')
+expect 'capability' "$output"
+output=$("$binary" -e 'System.print(Collections.sorted([3, 1, 2]), Collections.max(["a", "c", "b"]), Reflection.isInstance([1], List), GC.stats()["objects"] > 0)')
+expect '[1, 2, 3] c true true' "$output"
+output=$("$binary" -e 'let t = Time.make(2024, 2, 29, 13, 45, 30, 250); System.print(t, Time.format(t), Time.parts(t)["weekday"], Time.parse("2024-02-29T13:45:30.250Z") == t, Time.format(-1))')
+expect '1709214330250 2024-02-29T13:45:30Z 4 true 1969-12-31T23:59:59Z' "$output"
+output=$("$binary" -e 'System.print(Path.join("a", "b/", "c.txt"), Path.name("/x/y.tar.gz"), Path.stem("/x/y.tar.gz"), Path.extension("y.tar.gz"), Path.parent("/x/y"), Path.normalize("/a/./b/../c//d"))')
+expect 'a/b/c.txt y.tar.gz y.tar .gz /x /a/c/d' "$output"
+output=$("$binary" -e 'System.print(Encoding.toBase64("Many hands"), Encoding.fromBase64("YQ=="), Encoding.toHex("hi"), Encoding.urlEncode("a b"), Hash.sha256("abc"), Hash.crc32("123456789"))')
+expect 'TWFueSBoYW5kcw== b"\x61" 6869 a%20b ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad 3421780262' "$output"
+output=$("$binary" -e 'fn describe(v: Object?) -> String { return match v { n: Int => f"int {n}", s: String => s, xs: List<?> => "list", _: Null => "null", _ => "other" } }; System.print(describe(1), describe("a"), describe([1]), describe(null), describe(2.5))')
+expect 'int 1 a list null other' "$output"
+if "$binary" -e 'let v: Int | String = 1; System.print(match v { n: Int => 1 })' >"$work/match-output" 2>"$work/match-error"; then exit 1; else exit_code=$?; fi
+test "$exit_code" -eq 65
+grep -Fq 'not exhaustive' "$work/match-error"
+output=$("$binary" -e 'System.print(Text.parseInt("42"), Text.parseInt(" -7 "), Text.parseInt("ff", 16), Text.tryParseInt("4x"), Text.tryParseInt("+-1"), Text.tryParseInt("9223372036854775808"), Text.parseFloat("3.5e2"), Text.tryParseFloat("nan"), Text.tryParseFloat("1e999"), Text.parseBool("True"))')
+expect '42 -7 255 null null null 350 null null true' "$output"
+output=$("$binary" -e 'try { Text.parseInt("abc") } catch error { System.print(error.kind) }')
+expect 'value' "$output"
+if [ -n "${plugin:-}" ]; then
+    output=$("$binary" --native "$plugin" -e 'System.print(Stats.gcd(12, 18)); let s = Stats.create(); Stats.add(s, 1.0); Stats.add(s, 3.0); System.print(Stats.summary(s)["mean"]); try { Stats.mean([]) } catch error { System.print(error.kind) }')
+    expect '6
+2
+native' "$output"
+    if "$binary" --native "$plugin" -e 'Stats.gcd("a", 1)' >"$work/plugin-output" 2>"$work/plugin-error"; then exit 1; else exit_code=$?; fi
+    test "$exit_code" -eq 65
+    printf '%s\n' 'Stats.gcd(1, 2)' >"$work/plugin-check.k3"
+    "$binary" --native "$plugin" --check "$work/plugin-check.k3" >/dev/null
+    if "$binary" --native "$work/missing-plugin" -e 'null' >"$work/plugin-output" 2>"$work/plugin-error"; then exit 1; else exit_code=$?; fi
+    test "$exit_code" -eq 70
+    mkdir -p "$work/imports"
+    cp "$plugin" "$work/imports/stats_module.${plugin##*.}"
+    printf '%s\n' 'from Stats import gcd' 'export fn twice(a: Int) -> Int { return gcd(a, a) * 2 }' >"$work/imports/helper.k3"
+    printf '%s\n' 'import Stats' 'import helper' 'System.print(Stats.gcd(12, 18), helper.twice(5))' >"$work/imports/main.k3"
+    output=$("$binary" "$work/imports/main.k3")
+    expect '6 10' "$output"
+    printf '%s\n' 'import helper' 'System.print(helper.twice(4))' >"$work/imports/nested.k3"
+    output=$("$binary" "$work/imports/nested.k3")
+    expect '8' "$output"
+    output=$("$binary" -e 'try { import Stats } catch error { System.print(1) }' 2>&1 || true)
+    case "$output" in *Stats*) ;; *) exit 1 ;; esac
+fi
 output=$("$binary" -e 'fn(value: Int) -> Null { System.print(value) }(7)')
 expect '7' "$output"
 output=$(printf '%s\n' 'let add = fn(value: Int) -> Int => value + 1' 'add(2)' ':quit' | "$binary" --repl)
@@ -124,7 +185,7 @@ expect '12
 if ! grep -q "Undefined name 'missing'" "$work/error"; then
     printf '%s\n' 'REPL error was not reported' >&2; exit 1
 fi
-output=$(printf '%s\n' 'defer fn() { System.gc() }(); ["retained", 2]' ':quit' | "$binary" --repl)
+output=$(printf '%s\n' 'defer fn() { GC.collect() }(); ["retained", 2]' ':quit' | "$binary" --repl)
 expect '[retained, 2]' "$output"
 output=$(printf '%s\n' 'System.print("} [ (") # {' '1 +' '2' ':reset' 'let kept = 9' 'kept' ':quit' | "$binary" --repl)
 expect '} [ (

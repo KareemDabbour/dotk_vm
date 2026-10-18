@@ -8,7 +8,7 @@ print(removed, entries)
 
 fn more() {
     yield Entry(4)
-    System.gc()
+    GC.collect()
     yield Entry(5)
 }
 
@@ -16,7 +16,7 @@ entries.extend(more())
 entries.extend(entries)
 print(entries)
 let insert = entries.insert
-System.gc()
+GC.collect()
 insert(entries.length(), Entry(6))
 print(entries.removeAt(0).value, entries.length())
 print(Reflection.members(entries))

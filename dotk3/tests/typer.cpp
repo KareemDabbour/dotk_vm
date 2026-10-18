@@ -181,7 +181,7 @@ int main() {
     // IO and network modules.
     accepts("IO.write('hi')\nlet line: String? = IO.readLine()\nlet t: String = Files.readText('a')\nlet s: Resource = IO.Sockets.listen('127.0.0.1', 0)\nlet c: Resource? = Sockets.accept(s, 10)\nlet r: Map<String, Object?> = Requests.get('http://x')\nTerminal.open()");
     accepts("from Sockets import receive as read, send\nfn f(s: Resource) -> Int { let b: Bytes? = read(s, 8)\nreturn send(s, 'x') }");
-    accepts("fn f(o: System.Object, e: System.Error) -> Null { }");
+    accepts("fn f(o: Object, e: Error) -> Null { }");
 
     // Core library.
     accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: List<Int> = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");

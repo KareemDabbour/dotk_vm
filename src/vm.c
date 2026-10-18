@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <regex.h>
 #include <stdarg.h>
@@ -20,11 +21,33 @@
 #include <string.h>
 #include <time.h>
 
+#undef vm
 VM vm;
-Value prefixStr = NIL_VAL;
+pthread_mutex_t GVL;
+static VM *const cliRuntime = &vm;
+_Thread_local VM *dotkCurrentVM = &vm;
+static _Thread_local pthread_mutex_t *currentExecutionLock = &GVL;
+#define vm (*dotkCurrentVM)
+#define prefixStr (vm.concatPrefix)
 FILE *file;
-bool printBytecodeGlobal = false;
-bool printExecStackGlobaL = false;
+#define printBytecodeGlobal (vm.bytecodeOutput)
+#define printExecStackGlobaL (vm.stackOutput)
+
+void vmSelectInstance(VM *instance, pthread_mutex_t *lock)
+{
+    dotkCurrentVM = instance ? instance : cliRuntime;
+    currentExecutionLock = lock ? lock : &GVL;
+}
+
+pthread_mutex_t *vmExecutionLock(void)
+{
+    return currentExecutionLock;
+}
+
+void *vmScannerState(void)
+{
+    return vm.scannerState;
+}
 
 static bool trackImportSource(char *source)
 {
@@ -69,6 +92,7 @@ static const char *gDebugScript = NULL;
 static int gDebugScriptPos = 0;
 
 static bool invoke(ObjString *name, int argc);
+static void closeUpvalues(Value *last);
 static bool invokeKw(ObjString *name, int positionalCount, int keywordCount);
 static void setNativeMethod(Table *table, const char *name, NativeFn fn);
 static void *threadEntryPoint(void *arg);
@@ -94,11 +118,18 @@ static ObjString *valueToObjStringDynamic(Value val);
 static uint32_t hashValueDeep(Value value);
 static ObjString *getFunctionParamName(ObjFunction *function, int index);
 static ObjString *getFunctionLocalName(ObjFunction *function, int index);
-static bool gStringifyTruncated = false;
-static bool gYieldTrapActive = false;
-static bool gYieldTrapHit = false;
-static Value gYieldTrapValue = NIL_VAL;
-static Value gYieldSendValue = NIL_VAL;
+#define gStringifyTruncated (vm.stringifyTruncated)
+#define gYieldTrapActive (vm.yieldActive)
+#define gYieldTrapHit (vm.yieldHit)
+#define gYieldTrapValue (vm.yieldedValue)
+#define gYieldSendValue (vm.sentValue)
+
+void vmMarkTransientRoots(void)
+{
+    markValue(prefixStr);
+    markValue(gYieldTrapValue);
+    markValue(gYieldSendValue);
+}
 
 static inline uint32_t hashNumberBits(double number)
 {
@@ -944,6 +975,33 @@ void runtimeError(const char *format, ...)
     vsnprintf(buff, needed + 1, format, args);
     vm.lastError = takeString(buff, needed);
     va_end(args);
+    if (vm.embedded)
+    {
+        Position position = {0};
+        position.file = "<host>";
+        position.lineStart = "";
+        if (vm.frameCount > 0)
+        {
+            CallFrame *frame = &vm.frames[vm.frameCount - 1];
+            int offset = (int)(frame->ip - frame->closure->function->chunk.code) - 1;
+            position = getPos(&frame->closure->function->chunk, offset);
+        }
+        char hostTrace[2048];
+        int traceLength = snprintf(hostTrace, sizeof(hostTrace), "  %s:%d:%d\n",
+                                   position.file ? position.file : "<host>", position.line, position.col);
+        if (traceLength < 0)
+            traceLength = 0;
+        if (traceLength >= (int)sizeof(hostTrace))
+            traceLength = sizeof(hostTrace) - 1;
+        vm.lastErrorTrace = copyString(hostTrace, traceLength);
+        if (!vm.isInTryCatch)
+        {
+            vmHostRuntimeError(vm.lastError->chars, vm.lastErrorTrace->chars, position);
+            closeUpvalues(vm.stack);
+        }
+        resetStack();
+        return;
+    }
     int len = 0;
     int traceCap = 1024;
     char *trace = ALLOCATE(char, traceCap);
@@ -961,8 +1019,9 @@ void runtimeError(const char *format, ...)
             int n = snprintf(trace + len, traceCap - len, "Error in:\n");
             if (len + n >= traceCap)
             {
+                int oldCap = traceCap;
                 traceCap = GROW_CAPACITY(traceCap);
-                trace = GROW_ARRAY(char, trace, len, traceCap);
+                trace = GROW_ARRAY(char, trace, oldCap, traceCap);
                 n = snprintf(trace + len, traceCap - len, "Error in:\n");
             }
             len += n;
@@ -1011,6 +1070,7 @@ void runtimeError(const char *format, ...)
         }
         len += n;
     }
+    trace = GROW_ARRAY(char, trace, traceCap, (size_t)len + 1);
     vm.lastErrorTrace = takeString(trace, len);
 
     resetStack();
@@ -2318,11 +2378,14 @@ NATIVE_FN(fileInitNative)
     }
     ObjForeign *f = newForeignObj(TYPE_FILE, file, false);
     f->klass = vm.fileClass;
-    tableSet(&f->fields, copyString("mode", 4), OBJ_VAL(copyString(mode, (int)strlen(mode))));
+    push(OBJ_VAL(f));
+    push(OBJ_VAL(copyString(mode, (int)strlen(mode))));
+    tableSet(&f->fields, copyString("mode", 4), peek(0));
+    pop();
     tableSet(&f->fields, copyString("name", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
 
-    return OBJ_VAL(f);
+    return pop();
 }
 
 NATIVE_FN(sqlExecNative)
@@ -2425,7 +2488,9 @@ NATIVE_FN(sqlQueryNative)
     }
     ObjInstance *ret = newInstance(vm.baseObj);
 
+    push(OBJ_VAL(ret));
     ObjList *rows = newList();
+    push(OBJ_VAL(rows));
     int col_count = sqlite3_column_count(stmt);
     ObjList *row = newList();
     push(OBJ_VAL(row));
@@ -2436,6 +2501,7 @@ NATIVE_FN(sqlQueryNative)
     }
     // appendToList(rows, OBJ_VAL(row));
     tableSet(&ret->fields, copyString("columns", 7), OBJ_VAL(row));
+    pop();
     while (sqlite3_step(stmt) == SQLITE_ROW)
     {
         ObjList *row = newList();
@@ -2481,7 +2547,7 @@ NATIVE_FN(sqlQueryNative)
     sqlite3_finalize(stmt);
     tableSet(&ret->fields, copyString("rows", 4), OBJ_VAL(rows));
     pop();
-    return OBJ_VAL(ret);
+    return pop();
 }
 NATIVE_FN(sqlInitNative)
 {
@@ -2511,10 +2577,11 @@ NATIVE_FN(sqlInitNative)
 
     ObjForeign *f = newForeignObj(TYPE_SQLITE, db, false);
     f->klass = vm.sqlClass;
+    push(OBJ_VAL(f));
     tableSet(&f->fields, copyString("path", 4), argv[0]);
     tableSet(&f->fields, copyString("isClosed", 8), BOOL_VAL(false));
 
-    return OBJ_VAL(f);
+    return pop();
 }
 
 // NATIVE_FN(regexExecNative)
@@ -2712,17 +2779,18 @@ static Value typeOf(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 static Value gcNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
-    int before = vm.bytesAllocated;
+    size_t before = vm.bytesAllocated;
     collectGarbage();
-    return NUM_VAL((double)(before - vm.bytesAllocated));
+    return NUM_VAL(before >= vm.bytesAllocated ? (double)(before - vm.bytesAllocated) : 0);
 }
 
 NATIVE_FN(vmStatsNative)
 {
     ObjInstance *stats = newInstance(vm.baseObj);
+    push(OBJ_VAL(stats));
     tableSet(&stats->fields, copyString("bytesAllocated", 14), NUM_VAL((double)vm.bytesAllocated));
     tableSet(&stats->fields, copyString("nextGC", 6), NUM_VAL((double)vm.nextGC));
-    return OBJ_VAL(stats);
+    return pop();
 }
 
 static Value sinNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -2794,6 +2862,12 @@ static Value lenNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 
 static Value exitNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
+    if (vm.embedded)
+    {
+        runtimeError("exit() is unavailable in a host VM");
+        *hasError = true;
+        return NIL_VAL;
+    }
     disableRawMode();
     if (argc != 1)
         exit(0);
@@ -3169,9 +3243,8 @@ static char *valueToStringSized(Value val, char *buff, size_t cap, int *len)
 
 static ObjString *valueToObjStringDynamic(Value val)
 {
-    size_t cap = STR_BUFF;
-    if (cap < 64)
-        cap = 64;
+    push(val);
+    size_t cap = 64;
 
     while (true)
     {
@@ -3181,12 +3254,21 @@ static ObjString *valueToObjStringDynamic(Value val)
         valueToStringSized(val, buf, cap, &len);
 
         if (!gStringifyTruncated)
-            return takeString(buf, len);
+        {
+            buf = GROW_ARRAY(char, buf, cap, (size_t)len + 1);
+            ObjString *result = takeString(buf, len);
+            pop();
+            return result;
+        }
 
         FREE_ARRAY(char, buf, cap);
 
         if (cap > (SIZE_MAX / 2))
-            return copyString("<value too large>", 17);
+        {
+            ObjString *result = copyString("<value too large>", 17);
+            pop();
+            return result;
+        }
 
         cap *= 2;
     }
@@ -3472,6 +3554,18 @@ static Value listCastNative(int argc, Value *argv, bool *hasError, bool *pushedV
     return NIL_VAL;
 }
 
+static unsigned runtimeRandom(void)
+{
+    if (!vm.embedded)
+        return (unsigned)rand();
+    uint64_t random = vm.randomState;
+    random ^= random >> 12;
+    random ^= random << 25;
+    random ^= random >> 27;
+    vm.randomState = random;
+    return (unsigned)((random * UINT64_C(2685821657736338717)) % ((uint64_t)RAND_MAX + 1));
+}
+
 static Value randomIntNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
 {
     if (argc != 2)
@@ -3498,7 +3592,7 @@ static Value randomIntNative(int argc, Value *argv, bool *hasError, bool *pushed
         *hasError = true;
         return NIL_VAL;
     }
-    return NUM_VAL(rand() % (int)(AS_NUM(argv[1]) - AS_NUM(argv[0]) + 1) + AS_NUM(argv[0]));
+    return NUM_VAL(runtimeRandom() % (int)(AS_NUM(argv[1]) - AS_NUM(argv[0]) + 1) + AS_NUM(argv[0]));
 }
 
 static Value randNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -3509,7 +3603,7 @@ static Value randNative(int argc, Value *argv, bool *hasError, bool *pushedValue
         *hasError = true;
         return NIL_VAL;
     }
-    return NUM_VAL((double)rand() / RAND_MAX);
+    return NUM_VAL((double)runtimeRandom() / RAND_MAX);
 }
 
 static Value printErrNative(int argc, Value *argv, bool *hasError, bool *pushedValue)
@@ -4287,6 +4381,8 @@ static Value openFileNative(int argc, Value *argv, bool *hasError, bool *pushedV
 
 static void defineNative(const char *name, NativeFn function)
 {
+    if (vm.embedded && !vmHostNativeAllowed(name))
+        return;
     push(OBJ_VAL(copyString(name, (int)strlen(name))));
     ObjNative *native = newNative(function);
     native->name = name;
@@ -4298,6 +4394,8 @@ static void defineNative(const char *name, NativeFn function)
 
 static void defineNativeWithParams(const char *name, NativeFn function, NativeParamDef *params, int paramCount)
 {
+    if (vm.embedded && !vmHostNativeAllowed(name))
+        return;
     push(OBJ_VAL(copyString(name, (int)strlen(name))));
     ObjNative *native = newNativeWithParams(function, params, paramCount);
     native->name = name;
@@ -4311,7 +4409,9 @@ static void setNativeMethod(Table *table, const char *name, NativeFn fn)
 {
     ObjNative *native = newNative(fn);
     native->name = name;
+    push(OBJ_VAL(native));
     tableSet(table, copyString(name, (int)strlen(name)), OBJ_VAL(native));
+    pop();
 }
 
 static Value namedNativeVal(const char *name, NativeFn fn)
@@ -4328,9 +4428,9 @@ void vmDefineNative(const char *name, NativeFn function)
 
 void vmDefineGlobalValue(const char *name, Value value)
 {
-    push(OBJ_VAL(copyString(name, (int)strlen(name))));
     push(value);
-    tableSet(&vm.globals, AS_STR(peek(1)), peek(0));
+    push(OBJ_VAL(copyString(name, (int)strlen(name))));
+    tableSet(&vm.globals, AS_STR(peek(0)), peek(1));
     pop();
     pop();
 }
@@ -4352,7 +4452,9 @@ void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function)
     if (clazz == NULL || name == NULL || function == NULL)
         return;
 
+    push(OBJ_VAL(clazz));
     ObjString *methodName = copyString(name, (int)strlen(name));
+    push(OBJ_VAL(methodName));
     Value method = namedNativeVal(name, function);
     tableSet(&clazz->methods, methodName, method);
 
@@ -4399,13 +4501,17 @@ void vmDefineClassMethod(ObjClass *clazz, const char *name, NativeFn function)
         clazz->sizeFn = method;
     else if (canonical == vm.hashStr || strcmp(name, "_hash_") == 0)
         clazz->hashFn = method;
+    pop();
+    pop();
 }
 
 void vmDefineClassStaticMethod(ObjClass *clazz, const char *name, NativeFn function)
 {
     if (clazz == NULL || name == NULL || function == NULL)
         return;
-    tableSet(&clazz->methods, copyString(name, (int)strlen(name)), namedNativeVal(name, function));
+    push(OBJ_VAL(clazz));
+    setNativeMethod(&clazz->methods, name, function);
+    pop();
 }
 
 static Value vmApiMakeString(const char *chars, int len, bool interned)
@@ -4988,7 +5094,9 @@ static bool callNativeNormalized(ObjNative *native, int argCount)
     NativeFn fn = native->function;
     bool hasError = false;
     bool pushedValue = false;
-    Value result = fn(argCount, vm.stackTop - argCount, &hasError, &pushedValue);
+    Value result = native->hostBinding ?
+        vmHostInvokeNative(native, argCount, vm.stackTop - argCount, &hasError) :
+        fn(argCount, vm.stackTop - argCount, &hasError, &pushedValue);
     if (hasError)
         return false;
     if (!pushedValue)
@@ -5024,7 +5132,9 @@ static bool callValue(Value callee, int argC)
             }
             bool hasError = false;
             bool pushedValue = false;
-            Value result = bound->native->function(argC, vm.stackTop - argC, &hasError, &pushedValue);
+            Value result = bound->native->hostBinding ?
+                vmHostInvokeNative(bound->native, argC, vm.stackTop - argC, &hasError) :
+                bound->native->function(argC, vm.stackTop - argC, &hasError, &pushedValue);
             if (hasError)
                 return false;
             if (!pushedValue)
@@ -5062,7 +5172,9 @@ static bool callValue(Value callee, int argC)
             NativeFn native = nativeObj->function;
             bool hasError = false;
             bool pushedValue = false;
-            Value result = native(argC, vm.stackTop - argC, &hasError, &pushedValue);
+            Value result = nativeObj->hostBinding ?
+                vmHostInvokeNative(nativeObj, argC, vm.stackTop - argC, &hasError) :
+                native(argC, vm.stackTop - argC, &hasError, &pushedValue);
             if (hasError)
                 return false;
             if (!pushedValue)
@@ -5087,6 +5199,11 @@ static bool callValue(Value callee, int argC)
         case OBJ_CLOSURE:
         {
             ObjClosure *closure = AS_CLOSURE(callee);
+            if (vm.embedded && closure->function->isAsync)
+            {
+                runtimeError("Async execution is unavailable in a host VM");
+                return false;
+            }
             if (closure->function->isGenerator)
             {
                 int normalizedArgCount = 0;
@@ -5912,16 +6029,8 @@ static void concatenate()
 
 static Value concatenateList(ObjList *a, ObjList *b)
 {
-    // ObjList *b = AS_LIST(peek(0));
-    // ObjList *a = AS_LIST(peek(1));
-
-    int capacity = a->capacity + b->capacity;
-    int count = a->count + b->count;
-
     ObjList *result = newList();
-    result->capacity = capacity;
-    // result->count = count;
-    result->items = ALLOCATE(Value, count);
+    push(OBJ_VAL(result));
     for (int i = 0; i < a->count; i++)
     {
         appendToList(result, a->items[i]);
@@ -5930,9 +6039,7 @@ static Value concatenateList(ObjList *a, ObjList *b)
     {
         appendToList(result, b->items[i]);
     }
-    // pop();
-    // pop();
-    return OBJ_VAL(result);
+    return pop();
 }
 
 ObjClass *primativeClass(char *name)
@@ -6128,6 +6235,9 @@ static bool initAsyncWorkerPool(void)
     pthread_mutex_init(&vm.asyncTaskMutex, NULL);
     pthread_cond_init(&vm.asyncTaskCond, NULL);
     pthread_cond_init(&vm.asyncTaskNotFullCond, NULL);
+    vm.asyncPoolInitialized = true;
+    if (vm.embedded)
+        return true;
 
     int workers = 0;
     const char *envWorkers = getenv("DOTK_ASYNC_WORKERS");
@@ -6172,6 +6282,8 @@ static bool initAsyncWorkerPool(void)
 
 static void shutdownAsyncWorkerPool(void)
 {
+    if (!vm.asyncPoolInitialized)
+        return;
     pthread_mutex_lock(&vm.asyncTaskMutex);
     vm.asyncPoolShutdown = true;
     vm.asyncTasksRejected += (uint64_t)vm.asyncTaskQueueCount;
@@ -6206,6 +6318,7 @@ static void shutdownAsyncWorkerPool(void)
     pthread_cond_destroy(&vm.asyncTaskCond);
     pthread_cond_destroy(&vm.asyncTaskNotFullCond);
     pthread_mutex_destroy(&vm.asyncTaskMutex);
+    vm.asyncPoolInitialized = false;
 }
 
 static int resolveAsyncQueueMax(int workerCount)
@@ -6474,6 +6587,12 @@ static void *threadEntryPoint(void *arg)
 
 NATIVE_FN(threadInitNative)
 {
+    if (vm.embedded)
+    {
+        runtimeError("Threads are unavailable in a host VM");
+        *hasError = true;
+        return NIL_VAL;
+    }
     if (argc < 1)
     {
         runtimeError("Thread() expects at least 1 argument (a callable).");
@@ -8203,10 +8322,12 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
                 }
 
                 ObjString *piece = valueToObjStringDynamic(argv[num]);
+                push(OBJ_VAL(piece));
                 ENSURE_RESULT_CAP(piece->len);
                 memcpy(result + len, piece->chars, (size_t)piece->len);
                 len += (size_t)piece->len;
                 result[len] = '\0';
+                pop();
                 i = endPos;
             }
             else if (str[i + 1] == '}')
@@ -8215,10 +8336,12 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
                     numFormats = argc - 1;
 
                 ObjString *piece = valueToObjStringDynamic(argv[numFormats]);
+                push(OBJ_VAL(piece));
                 ENSURE_RESULT_CAP(piece->len);
                 memcpy(result + len, piece->chars, (size_t)piece->len);
                 len += (size_t)piece->len;
                 result[len] = '\0';
+                pop();
 
                 numFormats++;
             }
@@ -8233,6 +8356,7 @@ static Value formatNative(int argc, Value *argv, bool *hasError, bool *pushedVal
         i++;
     }
 
+    result = GROW_ARRAY(char, result, resultCap, len + 1);
     ObjString *out = takeString(result, (int)len);
 #undef ENSURE_RESULT_CAP
     return OBJ_VAL(out);
@@ -10616,6 +10740,8 @@ static void initPrimitiveClassesModule()
     setNativeMethod(&sb->methods, "toArray", sbToArrayNative);
 
     /* Thread class */
+    if (vm.embedded)
+        return;
     vm.threadClass = NULL;
     ObjClass *threadClass = primativeClass("Thread");
     vm.threadClass = threadClass;
@@ -10684,14 +10810,28 @@ void registerBuiltinCoreModule()
 
 ////////////////////////////////////////////////////////////////////////////
 
-void initVM(bool printBytecode, bool printExecStack)
+static void initVMInternal(bool printBytecode, bool printExecStack, bool embedded)
 {
-    if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
+    void *compilerState = vm.compilerState;
+    void *scannerState = vm.scannerState;
+    memset(&vm, 0, sizeof(vm));
+    vm.compilerState = compilerState;
+    vm.scannerState = scannerState;
+    vm.embedded = embedded;
+    vm.randomState = UINT64_C(0x9e3779b97f4a7c15) ^ (uint64_t)(uintptr_t)&vm;
+    prefixStr = NIL_VAL;
+    gYieldTrapValue = NIL_VAL;
+    gYieldSendValue = NIL_VAL;
+    gYieldTrapActive = false;
+    gYieldTrapHit = false;
+    resetCompilerState();
+    if (!embedded)
     {
-        fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
+        if (signal(SIGPIPE, sigpipeHandler) == SIG_ERR)
+            fprintf(stderr, "[ERROR]::Pipe signal handler setup failed!!");
+        signal(SIGINT, sigShutdownHandler);
+        signal(SIGTERM, sigShutdownHandler);
     }
-    signal(SIGINT, sigShutdownHandler);
-    signal(SIGTERM, sigShutdownHandler);
     // if (signal(SIGSEGV, sigSegvHandler) == SIG_ERR)
     // {
     //     fprintf(stderr, "[ERROR]::SegV signal handler setup failed!!");
@@ -10699,12 +10839,19 @@ void initVM(bool printBytecode, bool printExecStack)
     acquireGVL("MAIN", __FILE__, __LINE__);
     printBytecodeGlobal = printBytecode;
     printExecStackGlobaL = printExecStack;
-    srand(time(NULL));
+    if (!embedded)
+        srand(time(NULL));
     resetStack();
 
     /* Allocate the main thread — vm.currentThread always points
        to whoever is actively running on the VM. */
     vm.mainThread = (DotKThread *)malloc(sizeof(DotKThread));
+    if (!vm.mainThread)
+    {
+        if (embedded)
+            vmHostAllocationFailure();
+        exit(1);
+    }
     memset(vm.mainThread, 0, sizeof(DotKThread));
     vm.mainThread->status = THREAD_RUNNING;
     vm.mainThread->stackTop = vm.mainThread->stack;
@@ -10728,7 +10875,7 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.objects = NULL;
     vm.bytesAllocated = 0;
     vm.nextGC = 1024L * 1024L;
-    vm.maxHeapSize = 1024L * 1024L * 1024L * 4; // 4GB
+    vm.maxHeapSize = embedded ? vmHostHeapLimit() : 1024UL * 1024UL * 1024UL * 4;
     vm.grayCount = 0;
     vm.grayCapacity = 0;
     vm.grayStack = NULL;
@@ -10738,7 +10885,7 @@ void initVM(bool printBytecode, bool printExecStack)
     vm.profilerEntries = NULL;
     vm.profilerEntryCount = 0;
     vm.profilerEntryCapacity = 0;
-    vm.profilerEnabled = getenv("DOTK_PROFILE") != NULL;
+    vm.profilerEnabled = !embedded && getenv("DOTK_PROFILE") != NULL;
     vm.callGraphEntries = NULL;
     vm.callGraphEntryCount = 0;
     vm.callGraphEntryCapacity = 0;
@@ -10848,23 +10995,59 @@ void initVM(bool printBytecode, bool printExecStack)
     snapshotGlobals(&preloadBefore);
     importBuiltinModule(copyString("primitives", 10));
     ObjNamespace *primitiveExports = collectGlobalDiff(&preloadBefore);
+    push(OBJ_VAL(primitiveExports));
     freeTable(&preloadBefore);
     tableSet(&vm.imports, copyString("primitives", 10), OBJ_VAL(primitiveExports));
     tableSet(&vm.imports, copyString("primitives.k", 12), OBJ_VAL(primitiveExports));
+    pop();
 
     snapshotGlobals(&preloadBefore);
     importBuiltinModule(copyString("core", 4));
     ObjNamespace *coreExports = collectGlobalDiff(&preloadBefore);
+    push(OBJ_VAL(coreExports));
     freeTable(&preloadBefore);
     tableSet(&vm.imports, copyString("core", 4), OBJ_VAL(coreExports));
     tableSet(&vm.imports, copyString("core.k", 6), OBJ_VAL(coreExports));
+    pop();
 
-    snapshotGlobals(&preloadBefore);
-    importBuiltinModule(copyString("file", 4));
-    ObjNamespace *fileExports = collectGlobalDiff(&preloadBefore);
-    freeTable(&preloadBefore);
-    tableSet(&vm.imports, copyString("file", 4), OBJ_VAL(fileExports));
-    tableSet(&vm.imports, copyString("file.k", 6), OBJ_VAL(fileExports));
+    if (!embedded)
+    {
+        snapshotGlobals(&preloadBefore);
+        importBuiltinModule(copyString("file", 4));
+        ObjNamespace *fileExports = collectGlobalDiff(&preloadBefore);
+        push(OBJ_VAL(fileExports));
+        freeTable(&preloadBefore);
+        tableSet(&vm.imports, copyString("file", 4), OBJ_VAL(fileExports));
+        tableSet(&vm.imports, copyString("file.k", 6), OBJ_VAL(fileExports));
+        pop();
+    }
+}
+
+void initVM(bool printBytecode, bool printExecStack)
+{
+    initVMInternal(printBytecode, printExecStack, false);
+}
+
+void initVMForHost(void)
+{
+    initVMInternal(false, false, true);
+}
+
+void vmResetHostExecution(bool poisoned)
+{
+    if (!poisoned)
+        closeUpvalues(vm.stack);
+    resetStack();
+    vm.nextWideOp = 0;
+    vm.isInTryCatch = false;
+    vm.currentModuleExports = NULL;
+    vm.currentLoadingModule = NULL;
+    prefixStr = NIL_VAL;
+    gYieldTrapValue = NIL_VAL;
+    gYieldSendValue = NIL_VAL;
+    gYieldTrapActive = false;
+    gYieldTrapHit = false;
+    resetCompilerState();
 }
 
 void vmEnableDebugger(bool enabled)
@@ -11000,7 +11183,7 @@ int getValidStringIndex(ObjString *string, int index)
     return index;
 }
 
-void indexStringBySlice(Value sliceVal, ObjString *str)
+bool indexStringBySlice(Value sliceVal, ObjString *str)
 {
     ObjSlice *slice = AS_SLICE(sliceVal);
     int start = getValidStringIndex(str, slice->start);
@@ -11010,7 +11193,7 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
     if (step == 0)
     {
         runtimeError("Slice step cannot be zero");
-        return;
+        return false;
     }
 
     if (start < 0)
@@ -11028,10 +11211,10 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
         if (len <= 0)
         {
             push(OBJ_VAL(copyString("", 0)));
-            return;
+            return true;
         }
         push(OBJ_VAL(copyString(str->chars + start, len)));
-        return;
+        return true;
     }
 
     bool reversed = step < 0;
@@ -11040,19 +11223,19 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
     {
         int low = start < end ? start : end;
         int high = start < end ? end : start;
-        for (int i = high - 1; i >= low; i += step)
+        for (int64_t i = (int64_t)high - 1; i >= low; i += step)
             count++;
     }
     else
     {
-        for (int i = start; i < end; i += step)
+        for (int64_t i = start; i < end; i += step)
             count++;
     }
 
     if (count <= 0)
     {
         push(OBJ_VAL(copyString("", 0)));
-        return;
+        return true;
     }
 
     char *substring = ALLOCATE(char, count + 1);
@@ -11061,14 +11244,14 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
     {
         int low = start < end ? start : end;
         int high = start < end ? end : start;
-        for (int i = high - 1; i >= low; i += step)
+        for (int64_t i = (int64_t)high - 1; i >= low; i += step)
         {
             substring[subIndex++] = str->chars[i];
         }
     }
     else
     {
-        for (int i = start; i < end; i += step)
+        for (int64_t i = start; i < end; i += step)
         {
             substring[subIndex++] = str->chars[i];
         }
@@ -11078,15 +11261,24 @@ void indexStringBySlice(Value sliceVal, ObjString *str)
     // FREE_ARRAY(char, substring, count + 1);
 
     push(OBJ_VAL(ret));
+    return true;
 }
 
-void indexBySlice(Value sliceVal, ObjList *list)
+bool indexBySlice(Value sliceVal, ObjList *list)
 {
-    Value *result;
     ObjSlice *slice = AS_SLICE(sliceVal);
     int start = getValidListIndex(list, slice->start);
     int end = getValidListIndex(list, slice->end);
     int step = slice->step;
+    if (step == 0)
+    {
+        runtimeError("Slice step cannot be zero");
+        return false;
+    }
+    if (start < 0)
+        start = 0;
+    if (end < 0)
+        end = 0;
     bool reversed = step < 0;
     ObjList *ret = newList();
     push(OBJ_VAL(ret));
@@ -11094,18 +11286,19 @@ void indexBySlice(Value sliceVal, ObjList *list)
     {
         int low = start < end ? start : end;
         int high = start < end ? end : start;
-        for (int i = high - 1; i >= low; i += step)
+        for (int64_t i = (int64_t)high - 1; i >= low; i += step)
         {
             appendToList(ret, indexFromList(list, i));
         }
     }
     else
     {
-        for (int i = start; i < end; i += step)
+        for (int64_t i = start; i < end; i += step)
         {
             appendToList(ret, indexFromList(list, i));
         }
     }
+    return true;
 }
 
 InterpretResult run(bool isRepl, int runUntilFrame)
@@ -11134,6 +11327,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         }                                                                                              \
         if (unlikely((printExecStackGlobaL && vm.currentThread == vm.mainThread) || gDebuggerEnabled)) \
             goto loop_top;                                                                             \
+        if (unlikely(vm.embedded) && !vmHostCheckExecution())                                          \
+            return INTERPRET_RUNTIME_ERROR;                                                            \
         if (unlikely(vm.profilerEnabled && frame->startTimeNs == 0))                                   \
             frame->startTimeNs = nowNs();                                                              \
         inst = READ_BYTE();                                                                            \
@@ -11161,6 +11356,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 #ifdef DOTK_USE_COMPUTED_GOTO
     loop_top:;
 #endif
+        if (unlikely(vm.embedded) && !vmHostCheckExecution())
+            return INTERPRET_RUNTIME_ERROR;
         // #if DEBUG_TRACE_EXEC
         if (unlikely(printExecStackGlobaL))
         {
@@ -11507,6 +11704,20 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 runtimeError("Expected number as slice start but got '%s'", valueTypeName(peek(2)));
                 return INTERPRET_RUNTIME_ERROR;
             }
+            for (int operand = 0; operand < 3; operand++)
+            {
+                double number = AS_NUM(peek(operand));
+                if (!isfinite(number) || number < INT_MIN || number > INT_MAX)
+                {
+                    runtimeError("Slice components must be finite numbers in integer range");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+            }
+            if ((int)AS_NUM(peek(0)) == 0)
+            {
+                runtimeError("Slice step cannot be zero");
+                return INTERPRET_RUNTIME_ERROR;
+            }
             int step = (int)AS_NUM(pop());
             int end = (int)AS_NUM(pop());
             int start = (int)AS_NUM(pop());
@@ -11599,7 +11810,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             uint8_t targetCount = READ_BYTE();
             uint8_t starIndexPlusOne = READ_BYTE();
             int starIndex = starIndexPlusOne == 0 ? -1 : (int)starIndexPlusOne - 1;
-            Value source = pop();
+            Value source = peek(0);
+            Value *sourceRoot = vm.stackTop - 1;
 
             if (starIndex >= (int)targetCount)
             {
@@ -11621,6 +11833,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     }
                     for (int i = 0; i < sourceCount; i++)
                         push(items[i]);
+                    memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
+                    vm.stackTop--;
                     DISPATCH();
                 }
 
@@ -11648,6 +11862,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     int srcIndex = sourceCount - tailCount + i;
                     push(items[srcIndex]);
                 }
+                memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
+                vm.stackTop--;
                 DISPATCH();
             }
 
@@ -11665,6 +11881,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     }
                     for (int i = 0; i < sourceCount; i++)
                         push(OBJ_VAL(copyString(str->chars + i, 1)));
+                    memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
+                    vm.stackTop--;
                     DISPATCH();
                 }
 
@@ -11692,6 +11910,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     int srcIndex = sourceCount - tailCount + i;
                     push(OBJ_VAL(copyString(str->chars + srcIndex, 1)));
                 }
+                memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
+                vm.stackTop--;
                 DISPATCH();
             }
 
@@ -11706,6 +11926,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 return INTERPRET_RUNTIME_ERROR;
 
             Value iterator = pop();
+            push(iterator);
             while (true)
             {
                 oldFrameCount = vm.frameCount;
@@ -11720,6 +11941,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     break;
                 appendToList(materialized, next);
             }
+            pop();
 
             int sourceCount = materialized->count;
             Value *items = materialized->items;
@@ -11737,6 +11959,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 Value *rootSlot = vm.stackTop - targetCount - 1;
                 for (int i = 0; i < targetCount; i++)
                     rootSlot[i] = rootSlot[i + 1];
+                vm.stackTop--;
+                memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
                 vm.stackTop--;
                 DISPATCH();
             }
@@ -11770,6 +11994,8 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             for (int i = 0; i < targetCount; i++)
                 rootSlot[i] = rootSlot[i + 1];
             vm.stackTop--;
+            memmove(sourceRoot, sourceRoot + 1, targetCount * sizeof(Value));
+            vm.stackTop--;
             DISPATCH();
         }
         case OP_INDEX_SUBSCR:
@@ -11796,7 +12022,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 else if (IS_SLICE(indexVal))
                 {
-                    indexStringBySlice(indexVal, str);
+                    push(listVal);
+                    push(indexVal);
+                    if (!indexStringBySlice(indexVal, str))
+                        return INTERPRET_RUNTIME_ERROR;
+                    Value sliced = pop();
+                    pop();
+                    pop();
+                    push(sliced);
                 }
                 else
                 {
@@ -11859,7 +12092,14 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 ObjList *list = AS_LIST(listVal);
-                indexBySlice(indexVal, list);
+                push(listVal);
+                push(indexVal);
+                if (!indexBySlice(indexVal, list))
+                    return INTERPRET_RUNTIME_ERROR;
+                Value sliced = pop();
+                pop();
+                pop();
+                push(sliced);
             }
             else
             {
@@ -12362,6 +12602,16 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 break;
             }
             int strLen = 0;
+            if (vm.embedded)
+            {
+                ObjString *text = valueToObjStringDynamic(peek(0));
+                push(OBJ_VAL(text));
+                vmHostWrite(text->chars, (size_t)text->len);
+                vmHostWrite("\n", 1);
+                pop();
+                pop();
+                DISPATCH();
+            }
             char *str = ALLOCATE(char, STR_BUFF * 2); // TODO: make value to string dynamically resize the buffer
             // char str[STR_BUFF] = {0};
             valueToString(pop(), str, &strLen);
@@ -12389,13 +12639,16 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 else
                 {
-                    Value notStr = pop();
-                    ObjString *str = AS_STR(pop());
+                    Value notStr = peek(0);
+                    ObjString *str = AS_STR(peek(1));
 
                     char valStr[STR_BUFF] = {0};
                     int len = 0;
                     valueToString(notStr, valStr, &len);
-                    push(OBJ_VAL(addTwoStrings(str->chars, valStr, str->len, len)));
+                    ObjString *result = addTwoStrings(str->chars, valStr, str->len, len);
+                    pop();
+                    pop();
+                    push(OBJ_VAL(result));
                     break;
                 }
             }
@@ -12417,19 +12670,25 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 }
                 else
                 {
-                    ObjString *str = AS_STR(pop());
-                    Value notStr = pop();
+                    ObjString *str = AS_STR(peek(0));
+                    Value notStr = peek(1);
 
                     char valStr[STR_BUFF] = {0};
                     int len = 0;
                     valueToString(notStr, valStr, &len);
-                    push(OBJ_VAL(addTwoStrings(valStr, str->chars, len, str->len)));
+                    ObjString *result = addTwoStrings(valStr, str->chars, len, str->len);
+                    pop();
+                    pop();
+                    push(OBJ_VAL(result));
                     break;
                 }
             }
             else if (IS_LIST(peek(0)) && IS_LIST(peek(1)))
             {
-                push(concatenateList(AS_LIST(pop()), AS_LIST(pop())));
+                Value result = concatenateList(AS_LIST(peek(1)), AS_LIST(peek(0)));
+                pop();
+                pop();
+                push(result);
             }
             else if (IS_NUM(peek(0)) && IS_NUM(peek(1)))
             {
@@ -12810,7 +13069,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
-                pop();
+                if (vm.embedded)
+                {
+                    vm.stackTop = frame->slots;
+                    push(result);
+                }
+                else
+                    pop();
                 if (vm.profilerEnabled)
                 {
                     profilerDump("/tmp/dotk_profile.csv");
@@ -12846,7 +13111,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
-                pop();
+                if (vm.embedded)
+                {
+                    vm.stackTop = frame->slots;
+                    push(result);
+                }
+                else
+                    pop();
                 if (vm.profilerEnabled)
                 {
                     profilerDump("/tmp/dotk_profile.csv");
@@ -12878,7 +13149,13 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             vm.frameCount--;
             if (vm.frameCount == 0)
             {
-                pop();
+                if (vm.embedded)
+                {
+                    vm.stackTop = frame->slots;
+                    push(result);
+                }
+                else
+                    pop();
                 if (vm.profilerEnabled)
                 {
                     profilerDump("/tmp/dotk_profile.csv");
@@ -12966,15 +13243,27 @@ InterpretResult run(bool isRepl, int runUntilFrame)
         case OP_IMPORT:
         op_OP_IMPORT:
         {
-            Value file = pop();
+            Value file = peek(0);
+            Value *importRoot = vm.stackTop - 1;
             if (IS_STR(file))
             {
                 ObjString *filePath = AS_STR(file);
+                char *source = NULL;
                 Value importedValue;
                 if (tableGet(&vm.imports, filePath, &importedValue) && IS_NAMESPACE(importedValue))
                 {
-                    push(importedValue);
+                    *importRoot = importedValue;
                     break;
+                }
+                if (vm.embedded)
+                {
+                    source = vmHostResolveModule(filePath->chars);
+                    if (!source)
+                    {
+                        runtimeError("Module '%s' is not provided by the host", filePath->chars);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    goto moduleSourceReady;
                 }
 
                 if (filePath->len > 2 &&
@@ -12985,7 +13274,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     if (tableGet(&vm.imports, trimmed, &importedValue) && IS_NAMESPACE(importedValue))
                     {
                         tableSet(&vm.imports, filePath, importedValue);
-                        push(importedValue);
+                        *importRoot = importedValue;
                         break;
                     }
                 }
@@ -13001,7 +13290,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     if (tableGet(&vm.imports, withExtKey, &importedValue) && IS_NAMESPACE(importedValue))
                     {
                         tableSet(&vm.imports, filePath, importedValue);
-                        push(importedValue);
+                        *importRoot = importedValue;
                         break;
                     }
                 }
@@ -13017,7 +13306,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     tableSet(&vm.imports, filePath, OBJ_VAL(builtinExports));
                     restoreTable(&vm.globals, &globalsBefore);
                     restoreTable(&vm.constGlobals, &constGlobalsBefore);
-                    push(OBJ_VAL(builtinExports));
+                    *importRoot = OBJ_VAL(builtinExports);
                     break;
                 }
 
@@ -13026,7 +13315,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 
                 if (tableGet(&vm.imports, filePath, &importedValue) && IS_NAMESPACE(importedValue))
                 {
-                    push(importedValue);
+                    *importRoot = importedValue;
                     break;
                 }
 
@@ -13063,7 +13352,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                         {
                             ObjNamespace *soExports = collectGlobalDiff(&soGlobalsBefore);
                             tableSet(&vm.imports, filePath, OBJ_VAL(soExports));
-                            push(OBJ_VAL(soExports));
+                            *importRoot = OBJ_VAL(soExports);
                             restoreTable(&vm.globals, &soGlobalsBefore);
                             restoreTable(&vm.constGlobals, &soConstGlobalsBefore);
                             break;
@@ -13077,25 +13366,25 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 if (loadedSo)
                     break;
 
-                if (filePath->chars[filePath->len - 1] != 'k' || filePath->chars[filePath->len - 2] != '.')
+                if (filePath->len < 2 || filePath->chars[filePath->len - 1] != 'k' || filePath->chars[filePath->len - 2] != '.')
                 {
-                    char *newPath = (char *)malloc(filePath->len + 3);
+                    char *newPath = ALLOCATE(char, filePath->len + 3);
                     memcpy(newPath, filePath->chars, filePath->len);
                     newPath[filePath->len] = '.';
                     newPath[filePath->len + 1] = 'k';
                     newPath[filePath->len + 2] = '\0';
                     filePath = takeString(newPath, filePath->len + 2);
+                    *importRoot = OBJ_VAL(filePath);
                 }
 
                 Value value;
                 if (tableGet(&vm.imports, filePath, &value) && IS_NAMESPACE(value))
                 {
-                    push(value);
+                    *importRoot = value;
                     break;
                 }
 
                 // Check known working directories
-                char *source = NULL;
                 for (int i = 0; workingDirs[i] != NULL; i++)
                 {
                     char fullPath[PATH_MAX];
@@ -13113,6 +13402,7 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
                 }
 
+            moduleSourceReady:
                 if (!trackImportSource(source))
                 {
                     free(source);
@@ -13128,10 +13418,19 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                 vm.currentLoadingModule = moduleNamespace;
                 vm.currentModuleHasExplicitExports = false;
 
-                CallFrame preImport = *frame;
+                int preImportFrameCount = vm.frameCount;
+                CallFrame preImport[FRAMES_MAX];
+                memcpy(preImport, vm.frames, preImportFrameCount * sizeof(CallFrame));
+                for (int caller = 0; caller < preImportFrameCount; caller++)
+                    push(OBJ_VAL(preImport[caller].closure));
+                if (previousModuleExports)
+                    push(OBJ_VAL(previousModuleExports));
+                if (previousLoadingModule)
+                    push(OBJ_VAL(previousLoadingModule));
                 vm.frameCount = 0;
 
-                InterpretResult res = interpret(source, filePath->chars, false, 0, NULL);
+                char *moduleFile = vm.embedded ? vmHostRetainFilename(filePath->chars) : filePath->chars;
+                InterpretResult res = interpret(source, moduleFile, false, 0, NULL);
                 if (!vm.currentModuleHasExplicitExports)
                     exportAllModuleGlobals(moduleNamespace);
                 ObjNamespace *resolvedExports = moduleNamespace;
@@ -13152,9 +13451,10 @@ InterpretResult run(bool isRepl, int runUntilFrame)
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 tableSet(&vm.imports, filePath, OBJ_VAL(resolvedExports));
-                vm.frameCount = 1;
-                vm.frames[0] = preImport;
-                push(OBJ_VAL(resolvedExports));
+                vm.frameCount = preImportFrameCount;
+                memcpy(vm.frames, preImport, preImportFrameCount * sizeof(CallFrame));
+                *importRoot = OBJ_VAL(resolvedExports);
+                vm.stackTop = importRoot + 1;
             }
             else
             {
@@ -13292,9 +13592,9 @@ InterpretResult run(bool isRepl, int runUntilFrame)
             }
             ObjClosure *catchBlock = AS_CLOSURE(peek(0));
             ObjInstance *error = newInstance(vm.errorClass);
+            push(OBJ_VAL(error));
             tableSet(&error->fields, copyString("message", 7), OBJ_VAL(vm.lastError));
             tableSet(&error->fields, copyString("stackTrace", 10), OBJ_VAL(vm.lastErrorTrace));
-            push(OBJ_VAL(error));
             call(catchBlock, 1);
             if (run(isRepl, vm.frameCount) == INTERPRET_RUNTIME_ERROR)
             {
@@ -13355,6 +13655,31 @@ InterpretResult run(bool isRepl, int runUntilFrame)
 #undef DISPATCH
 }
 
+bool vmResumeHostTask(ObjGenerator *generator, Value *result)
+{
+    return runGeneratorNext(generator, result, NIL_VAL);
+}
+
+InterpretResult vmCallFromHost(int argumentCount, Value *result)
+{
+    if (!callValue(peek(argumentCount), argumentCount))
+        return INTERPRET_RUNTIME_ERROR;
+    if (vm.frameCount > 0 && run(false, -1) != INTERPRET_OK)
+        return INTERPRET_RUNTIME_ERROR;
+    *result = pop();
+    return INTERPRET_OK;
+}
+
+void vmEnsureArgumentGlobals(void)
+{
+    Value arguments;
+    if (!tableGet(&vm.globals, copyString("ARG_V", 5), &arguments))
+    {
+        vmDefineGlobalValue("ARG_V", OBJ_VAL(newList()));
+        vmDefineGlobalValue("ARG_C", NUM_VAL(0));
+    }
+}
+
 InterpretResult interpret(const char *source, char *file, bool printExpressions, int argC, char **argV)
 {
     bool b4 = vm.isRepl;
@@ -13362,21 +13687,17 @@ InterpretResult interpret(const char *source, char *file, bool printExpressions,
     if (argC > 0)
     {
         ObjList *args = newList();
+        push(OBJ_VAL(args));
         for (int i = 0; i < argC; i++)
             appendToList(args, OBJ_VAL(copyString(argV[i], (int)strlen(argV[i]))));
 
-        tableSet(&vm.globals, copyString("ARG_V", 5), OBJ_VAL(args));
-        tableSet(&vm.globals, copyString("ARG_C", 5), NUM_VAL(argC));
+        vmDefineGlobalValue("ARG_V", OBJ_VAL(args));
+        vmDefineGlobalValue("ARG_C", NUM_VAL(argC));
+        pop();
     }
     else
     {
-        // check to see if the ARG_V and ARG_C are already defined
-        Value argV;
-        if (!tableGet(&vm.globals, copyString("ARG_V", 5), &argV))
-        {
-            tableSet(&vm.globals, copyString("ARG_V", 5), OBJ_VAL(newList()));
-            tableSet(&vm.globals, copyString("ARG_C", 5), NUM_VAL(0));
-        }
+        vmEnsureArgumentGlobals();
     }
     ObjString *file_ = copyString(file, (int)strlen(file));
     tableSet(&vm.imports, file_, NUM_VAL(0));

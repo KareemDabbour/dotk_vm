@@ -62,7 +62,7 @@ static void networkTests() {
     dk3::Runtime httpRuntime(config);
     std::string header = "POST /echo HTTP/1.1\r\nHost: local\r\nContent-Length: 4\r\n\r\n";
     http->incoming = {header.substr(0, 9), header.substr(9), std::string("A\0", 2), "BC"};
-    httpRuntime.run("let socket = Sockets.listen('127.0.0.1', 0); let message = Http.readRequest(socket, 100); let method = message['method']; let body = message['body']; let host = message['headers']['host']; System.gc(); Http.writeResponse(socket, 200, body);", "http-fragments.k3");
+    httpRuntime.run("let socket = Sockets.listen('127.0.0.1', 0); let message = Http.readRequest(socket, 100); let method = message['method']; let body = message['body']; let host = message['headers']['host']; GC.collect(); Http.writeResponse(socket, 200, body);", "http-fragments.k3");
     assert(std::get<dk3::Object *>(httpRuntime.get("body"))->text == std::string("A\0BC", 4));
     assert(std::get<dk3::Object *>(httpRuntime.get("method"))->text == "POST" && std::get<dk3::Object *>(httpRuntime.get("host"))->text == "local");
     assert(http->sent == "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: 4\r\n\r\n" + std::string("A\0BC", 4));
@@ -156,7 +156,7 @@ static void nativeRegistrationTests() {
             runtime.registerNativeMethod({dk3::Kind::Bytes, "extension" + std::to_string(index), "Null", 0, 0,
                 [](dk3::Runtime &, dk3::Object *, const auto &, const dk3::Span &) -> dk3::Value { return {}; }});
         }
-        runtime.run("System.gc(); let detachedProbeResult = detachedProbe('a'); let directProbeResult = [1,2].probe('a', 0); class ExtendedList extends List {}; let inheritedProbe = ExtendedList([1]).probe('a')", "native-registration-lifetime.k3");
+        runtime.run("GC.collect(); let detachedProbeResult = detachedProbe('a'); let directProbeResult = [1,2].probe('a', 0); class ExtendedList extends List {}; let inheritedProbe = ExtendedList([1]).probe('a')", "native-registration-lifetime.k3");
         assert(std::get<int64_t>(runtime.get("detachedProbeResult")) == 4 && std::get<int64_t>(runtime.get("directProbeResult")) == 5 && std::get<int64_t>(runtime.get("inheritedProbe")) == 3);
         auto original = *bound->origin->nativeMethod;
         auto invalidArity = definition; invalidArity.minimumArguments = 3;
@@ -187,16 +187,16 @@ static void methodDispatchTests() {
         dk3::Runtime runtime(config);
         runtime.run(R"(
             var receiver = [3];
-            fn dropReceiver() { receiver = null; System.gc(); return 3 }
+            fn dropReceiver() { receiver = null; GC.collect(); return 3 }
             let retainedNative = receiver.contains(dropReceiver());
-            class Parent { fn read(value: Int) -> Int { System.gc(); return value + 3 } }
+            class Parent { fn read(value: Int) -> Int { GC.collect(); return value + 3 } }
             class Child extends Parent { fn read(value: Int) -> Int { return super.read(value) + 10 } }
             var child = Child();
-            fn dropChild() { child = null; System.gc(); return 2 }
+            fn dropChild() { child = null; GC.collect(); return 2 }
             let retainedScript = child.read(dropChild());
             class Holder { var action: Any = fn(value) => value + 1 }
             let holder = Holder();
-            fn replaceAction() { holder.action = fn(value) => 100; System.gc(); return 3 }
+            fn replaceAction() { holder.action = fn(value) => 100; GC.collect(); return 3 }
             let selectedField = holder.action(replaceAction());
             let replacedField = holder.action(3);
             holder.action = [7].contains;
@@ -206,7 +206,7 @@ static void methodDispatchTests() {
             fn detachedString() { return 'alpha'.contains }
             fn detachedBytes() { return b'abc'.length }
             let listMethod = detachedList(); let stringMethod = detachedString(); let bytesMethod = detachedBytes();
-            System.gc();
+            GC.collect();
             let retainedDetached = listMethod(5) and stringMethod('ph') and bytesMethod() == 3;
             var effects = 0;
             fn effect() { effects += 1; return 1 }
@@ -242,7 +242,7 @@ int main() {
         dk3::Runtime parity(parityConfig);
         parity.run("var regularTotal = 0; for (var regularIndex = 0; regularIndex < 8; regularIndex += 1) { if regularIndex == 2 { continue }; if regularIndex == 6 { break }; regularTotal += regularIndex }; var omittedIndex = 0; for (; omittedIndex < 3; omittedIndex += 1) {}; var openIndex = 0; for (;;) { openIndex += 1; if openIndex < 4 { continue }; break }", "regular-for.k3");
         assert(std::get<int64_t>(parity.get("regularTotal")) == 13 && std::get<int64_t>(parity.get("omittedIndex")) == 3 && std::get<int64_t>(parity.get("openIndex")) == 4);
-        parity.run("var cleanupCount = 0; fn counted() { for (var step = 0; step < 5; step++) { try { if step == 1 { continue }; if step == 4 { break }; yield step } catch error {} finally { cleanupCount += 1 } } }; let countedValues = List(counted()); fn callbacksFromLoop() { let saved = []; for (var step = 0; step < 3; step++) { let copy = step; saved.append(fn() => copy) }; return saved }; let loopCallbacks = callbacksFromLoop(); System.gc(); let firstCallback = loopCallbacks[0](); let lastCallback = loopCallbacks[2](); var nestedCount = 0; for (var outer = 0; outer < 3; outer++) { for (var inner = 0; inner < 3; inner++) { if inner == 1 { continue }; nestedCount += 1 } }", "bytecode-control-coverage.k3");
+        parity.run("var cleanupCount = 0; fn counted() { for (var step = 0; step < 5; step++) { try { if step == 1 { continue }; if step == 4 { break }; yield step } catch error {} finally { cleanupCount += 1 } } }; let countedValues = List(counted()); fn callbacksFromLoop() { let saved = []; for (var step = 0; step < 3; step++) { let copy = step; saved.append(fn() => copy) }; return saved }; let loopCallbacks = callbacksFromLoop(); GC.collect(); let firstCallback = loopCallbacks[0](); let lastCallback = loopCallbacks[2](); var nestedCount = 0; for (var outer = 0; outer < 3; outer++) { for (var inner = 0; inner < 3; inner++) { if inner == 1 { continue }; nestedCount += 1 } }", "bytecode-control-coverage.k3");
         assert(std::get<int64_t>(parity.get("cleanupCount")) == 5 && std::get<int64_t>(parity.get("firstCallback")) == 0 && std::get<int64_t>(parity.get("lastCallback")) == 2 && std::get<int64_t>(parity.get("nestedCount")) == 6);
         auto countedValues = std::get<dk3::Object *>(parity.get("countedValues")); assert(countedValues->items.size() == 3 && std::get<int64_t>(countedValues->items[1]) == 2);
         parity.registerNative("publishShadow", [&](const auto &, const dk3::Span &) -> dk3::Value { parity.set("Text", int64_t{42}); return {}; });
@@ -264,7 +264,7 @@ int main() {
     }
     {
         dk3::Runtime simple;
-        simple.run("fn choose(value: Int) -> List[Int] { if value == 0 { return [1] } else if value == 1 { let local = [2]; System.gc(); return local } else { return [3] } }; let chosen = choose(1); System.gc(); let chosenValue = chosen[0]; fn emptyResult() {}; let empty = emptyResult(); fn nestedReturn() { { return 4 } }; let nested = nestedReturn()", "simple-returns.k3");
+        simple.run("fn choose(value: Int) -> List[Int] { if value == 0 { return [1] } else if value == 1 { let local = [2]; GC.collect(); return local } else { return [3] } }; let chosen = choose(1); GC.collect(); let chosenValue = chosen[0]; fn emptyResult() {}; let empty = emptyResult(); fn nestedReturn() { { return 4 } }; let nested = nestedReturn()", "simple-returns.k3");
         assert(std::get<int64_t>(simple.get("chosenValue")) == 2 && std::get<int64_t>(simple.get("nested")) == 4 && std::holds_alternative<std::monostate>(simple.get("empty")));
     }
     {
@@ -336,15 +336,15 @@ int main() {
     assert(polls == 4 && std::get<int64_t>(polledRuntime.get("ticks")) == 3 && !rawEnabled);
     runtime.run("let objectInt: Object = 3\nlet objectText: Object = 'text'\nlet objectNull: Object? = null\nclass RootChild extends Object {}\nlet objectInstance: Object = RootChild()\nSystem.print(Reflection.type(Object), Reflection.type(objectInt), Reflection.type(objectInstance))", "object-root.k3");
     assert(output == "Type Int RootChild\n"); output.clear();
-    runtime.run("from System import Object as ValueObject\nlet aliasedObject: ValueObject = 1\nlet qualifiedObject: System.Object = 'value'", "object-aliases.k3");
+    runtime.run("let aliasedObject: Object = 1\nlet qualifiedObject: Object = 'value'", "object-aliases.k3");
     dk3::Config ioConfig; std::string ioOutput; size_t inputCount = 0; uint64_t delayed = 0;
     ioConfig.write = [&](const std::string &value) { ioOutput += value; };
     ioConfig.readLine = [&]() -> std::optional<std::string> { if (inputCount++) return {}; return "Ada"; };
     ioConfig.monotonicMillis = [] { return uint64_t{42}; }; ioConfig.delay = [&](uint64_t value) { delayed = value; };
     dk3::Runtime ioRuntime(ioConfig);
-    ioRuntime.run("let line: String? = IO.readLine(); IO.write(f'Hello {line}'); System.print(IO.readLine(), System.monotonicMillis()); System.delay(3)", "io-capabilities.k3");
+    ioRuntime.run("let line: String? = IO.readLine(); IO.write(f'Hello {line}'); System.print(IO.readLine(), Time.monotonicMillis()); Time.sleep(3)", "io-capabilities.k3");
     assert(ioOutput == "Hello Adanull 42\n" && delayed == 3);
-    for (const std::string &code : {"IO.readLine()", "System.monotonicMillis()", "System.delay(0)"}) {
+    for (const std::string &code : {"IO.readLine()", "Time.monotonicMillis()", "Time.sleep(0)"}) {
         bool denied = false; try { runtime.run(code, "io-disabled.k3"); } catch (const dk3::Error &error) { denied = error.category == "capability"; }
         assert(denied);
     }
@@ -352,11 +352,11 @@ int main() {
     assert(output == "true Error.Kind\ntrue\n"); output.clear();
     runtime.run("let kindMessage = match Error.Kind.Index { Error.Kind.Index => 'index matched', _ => 'other' }\nSystem.print(kindMessage)", "error-kind-match.k3");
     assert(output == "index matched\n"); output.clear();
-    runtime.run("let formattedName = 'Ada'\nvar formattedCount = 0\nfn formattedNext() -> Int { formattedCount += 1; System.gc(); return formattedCount }\nSystem.print(f'Hello {formattedName}: {1 + 2}, {{literal}}, {formattedNext()} {formattedNext()}')\nSystem.print(f\"{ {'value': 4}['value'] }\")", "formatted-strings.k3");
+    runtime.run("let formattedName = 'Ada'\nvar formattedCount = 0\nfn formattedNext() -> Int { formattedCount += 1; GC.collect(); return formattedCount }\nSystem.print(f'Hello {formattedName}: {1 + 2}, {{literal}}, {formattedNext()} {formattedNext()}')\nSystem.print(f\"{ {'value': 4}['value'] }\")", "formatted-strings.k3");
     assert(output == "Hello Ada: 3, {literal}, 1 2\n4\n"); output.clear();
     runtime.run("System.print(f'\\x7bescaped\\x7d')", "format-escapes.k3");
     assert(output == "{escaped}\n"); output.clear();
-    runtime.run("class Indexed { private let values: Map[String, Int] = {}; fn __getitem__(key: String) -> Int { System.gc(); return self.values.get(key) ?? 0 }; fn __setitem__(key: String, value: Int) -> Null { self.values[key] = value } }\nlet indexed = Indexed()\nindexed['score'] = 4\nindexed['score'] += 3\nSystem.print(indexed['score'])", "index-hooks.k3");
+    runtime.run("class Indexed { private let values: Map[String, Int] = {}; fn __getitem__(key: String) -> Int { GC.collect(); return self.values.get(key) ?? 0 }; fn __setitem__(key: String, value: Int) -> Null { self.values[key] = value } }\nlet indexed = Indexed()\nindexed['score'] = 4\nindexed['score'] += 3\nSystem.print(indexed['score'])", "index-hooks.k3");
     assert(output == "7\n"); output.clear();
     runtime.run("var indexedKeyCalls = 0\nvar indexedReceiverCalls = 0\nfn onceReceiver() -> Indexed { indexedReceiverCalls += 1; return indexed }\nfn onceKey() -> String { indexedKeyCalls += 1; return 'score' }\nonceReceiver()[onceKey()] += 1\nSystem.print(indexedReceiverCalls, indexedKeyCalls, indexed['score'])\nlet namedError = Error(message: 'legacy', kind: 'type')\nSystem.print(namedError.kind == Error.Kind.Type)", "foundation-boundaries.k3");
     assert(output == "1 1 8\ntrue\n"); output.clear();
@@ -364,9 +364,9 @@ int main() {
         bool rejected = false; try { runtime.run(code, "index-hook-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("class Printable { private let label: String; constructor(label: String) -> Null { self.label = label }; public fn toString() -> String { System.gc(); return 'item:' + self.label } }\nlet printable = Printable('Ada')\nlet converted = Text.str(printable)\nSystem.print(converted, printable, printable.toString())\nclass PrintableChild extends Printable {}\nSystem.print(PrintableChild('Grace'))", "to-string.k3");
+    runtime.run("class Printable { private let label: String; constructor(label: String) -> Null { self.label = label }; public fn toString() -> String { GC.collect(); return 'item:' + self.label } }\nlet printable = Printable('Ada')\nlet converted = Text.str(printable)\nSystem.print(converted, printable, printable.toString())\nclass PrintableChild extends Printable {}\nSystem.print(PrintableChild('Grace'))", "to-string.k3");
     assert(output == "item:Ada item:Ada item:Ada\nitem:Grace\n"); output.clear();
-    runtime.run("record VectorOperator { x: Int, y: Int; fn toString() -> String { return Text.str(self.x) + ',' + Text.str(self.y) }; fn __add__(other: VectorOperator) -> VectorOperator { System.gc(); return VectorOperator(self.x + other.x, self.y + other.y) }; fn __mul__(amount: Int) -> VectorOperator { return VectorOperator(self.x * amount, self.y * amount) }; fn __neg__() -> VectorOperator { return VectorOperator(-self.x, -self.y) }; fn __lt__(other: VectorOperator) -> Bool { return self.x < other.x } }\nlet firstVector = VectorOperator(1,2)\nlet secondVector = VectorOperator(3,4)\nSystem.print(firstVector + secondVector, firstVector * 3, -firstVector, firstVector < secondVector)\nvar compoundVector = firstVector\ncompoundVector += secondVector\nSystem.print(compoundVector)\nclass OperatorBase { let value: Int; fn __add__(other: Int) -> Int { return self.value + other } }\nclass OperatorChild extends OperatorBase {}\nSystem.print(OperatorChild(5) + 2)", "operators.k3");
+    runtime.run("record VectorOperator { x: Int, y: Int; fn toString() -> String { return Text.str(self.x) + ',' + Text.str(self.y) }; fn __add__(other: VectorOperator) -> VectorOperator { GC.collect(); return VectorOperator(self.x + other.x, self.y + other.y) }; fn __mul__(amount: Int) -> VectorOperator { return VectorOperator(self.x * amount, self.y * amount) }; fn __neg__() -> VectorOperator { return VectorOperator(-self.x, -self.y) }; fn __lt__(other: VectorOperator) -> Bool { return self.x < other.x } }\nlet firstVector = VectorOperator(1,2)\nlet secondVector = VectorOperator(3,4)\nSystem.print(firstVector + secondVector, firstVector * 3, -firstVector, firstVector < secondVector)\nvar compoundVector = firstVector\ncompoundVector += secondVector\nSystem.print(compoundVector)\nclass OperatorBase { let value: Int; fn __add__(other: Int) -> Int { return self.value + other } }\nclass OperatorChild extends OperatorBase {}\nSystem.print(OperatorChild(5) + 2)", "operators.k3");
     assert(output == "4,6 3,6 -1,-2 true\n4,6\n7\n"); output.clear();
     for (const std::string &code : {"class WrongPredicate { fn __lt__(other) { return 1 } }; WrongPredicate() < WrongPredicate()", "class PrivateOperator { private fn __add__(other) {} }", "class GeneratorOperator { fn __add__(other) { yield 1 } }", "firstVector + 1", "2 * firstVector"}) {
         bool rejected = false; try { runtime.run(code, "operator-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
@@ -376,25 +376,25 @@ int main() {
         bool rejected = false; try { runtime.run(code, "to-string-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("class VaultAccess { private var secret: Int = 3; protected var shared: Int = 2; private static let code: Int = 7; public fn read() -> Int { return self.secret + VaultAccess.code }; public fn callback(callback: Function) { callback(self) }; public fn closure() { return fn() -> Int { System.gc(); return self.secret } } }\nclass ChildAccess extends VaultAccess { fn readShared() -> Int { self.shared += 1; return self.shared } }\nlet vaultAccess = ChildAccess()\nlet privateClosure = vaultAccess.closure()\nSystem.gc()\nSystem.print(vaultAccess.read(), vaultAccess.readShared(), privateClosure())", "access-runtime.k3");
+    runtime.run("class VaultAccess { private var secret: Int = 3; protected var shared: Int = 2; private static let code: Int = 7; public fn read() -> Int { return self.secret + VaultAccess.code }; public fn callback(callback: Function) { callback(self) }; public fn closure() { return fn() -> Int { GC.collect(); return self.secret } } }\nclass ChildAccess extends VaultAccess { fn readShared() -> Int { self.shared += 1; return self.shared } }\nlet vaultAccess = ChildAccess()\nlet privateClosure = vaultAccess.closure()\nGC.collect()\nSystem.print(vaultAccess.read(), vaultAccess.readShared(), privateClosure())", "access-runtime.k3");
     assert(output == "10 3 3\n"); output.clear();
-    runtime.run("System.print(Reflection.members(vaultAccess).contains('secret'), Reflection.members(vaultAccess).contains('shared'))\nclass FactoryAccess { private let value: Int; private constructor(value: Int) -> Null { self.value = value }; public static fn create(value: Int) -> FactoryAccess { return FactoryAccess(value) }; public fn read() -> Int { return self.value } }\nlet factoryAccess = FactoryAccess.create(8)\nSystem.gc()\nSystem.print(factoryAccess.read(), Text.str(factoryAccess))", "access-reflection-factory.k3");
+    runtime.run("System.print(Reflection.members(vaultAccess).contains('secret'), Reflection.members(vaultAccess).contains('shared'))\nclass FactoryAccess { private let value: Int; private constructor(value: Int) -> Null { self.value = value }; public static fn create(value: Int) -> FactoryAccess { return FactoryAccess(value) }; public fn read() -> Int { return self.value } }\nlet factoryAccess = FactoryAccess.create(8)\nGC.collect()\nSystem.print(factoryAccess.read(), Text.str(factoryAccess))", "access-reflection-factory.k3");
     assert(output == "false false\n8 FactoryAccess()\n"); output.clear();
-    runtime.run("class AccessDefaults { private static let seed: Int = 5; private let value: Int = AccessDefaults.seed; fn read() -> Int { return self.value }; fn stream() { yield self.value; System.gc(); yield self.value + 1 } }\nlet accessDefaults = AccessDefaults()\nclass AccessDefaultChild extends AccessDefaults {}\nlet accessDefaultChild = AccessDefaultChild()\nSystem.print(accessDefaults.read(), accessDefaultChild.read())\nfor item in accessDefaults.stream() { System.print(item) }\ntrait AccessImpl { fn read() -> Int }\nclass ImplAccess { private let value: Int = 11 }\nimpl AccessImpl for ImplAccess { fn read() -> Int { return self.value } }\nSystem.print(ImplAccess().read())", "access-defaults-generators.k3");
+    runtime.run("class AccessDefaults { private static let seed: Int = 5; private let value: Int = AccessDefaults.seed; fn read() -> Int { return self.value }; fn stream() { yield self.value; GC.collect(); yield self.value + 1 } }\nlet accessDefaults = AccessDefaults()\nclass AccessDefaultChild extends AccessDefaults {}\nlet accessDefaultChild = AccessDefaultChild()\nSystem.print(accessDefaults.read(), accessDefaultChild.read())\nfor item in accessDefaults.stream() { System.print(item) }\ntrait AccessImpl { fn read() -> Int }\nclass ImplAccess { private let value: Int = 11 }\nimpl AccessImpl for ImplAccess { fn read() -> Int { return self.value } }\nSystem.print(ImplAccess().read())", "access-defaults-generators.k3");
     assert(output == "5 5\n5\n6\n11\n"); output.clear();
     for (const std::string &code : {"vaultAccess.secret", "vaultAccess.shared = 1", "VaultAccess.code", "FactoryAccess(1)", "vaultAccess.callback(fn(value) { return value.secret })", "class BadPrivateChild extends VaultAccess { fn reveal() { return self.secret } }; BadPrivateChild().reveal()"}) {
         bool rejected = false; try { runtime.run(code, "access-errors.k3"); } catch (const dk3::Error &error) { rejected = error.category == "access"; }
         assert(rejected);
     }
-    runtime.run("class CustomPlayer { let name: String; var level: Int = 1; fn init(name: String, level: Int = 1) -> Null { self.name = name; self.level = level; System.gc() } }\nclass CustomHero extends CustomPlayer { let title: String; fn init(name: String, title: String) -> Null { super.init(name, 5); self.title = title } }\nlet custom = CustomHero('Ada', 'Explorer')\nSystem.print(custom.name, custom.level, custom.title)", "custom-init.k3");
+    runtime.run("class CustomPlayer { let name: String; var level: Int = 1; fn init(name: String, level: Int = 1) -> Null { self.name = name; self.level = level; GC.collect() } }\nclass CustomHero extends CustomPlayer { let title: String; fn init(name: String, title: String) -> Null { super.init(name, 5); self.title = title } }\nlet custom = CustomHero('Ada', 'Explorer')\nSystem.print(custom.name, custom.level, custom.title)", "custom-init.k3");
     assert(output == "Ada 5 Explorer\n"); output.clear();
     runtime.run("class DefaultConstructed { let value: Int; constructor() -> Null { self.value = 42 } }\nSystem.print(DefaultConstructed().value)", "zero-constructor.k3");
     assert(output == "42\n"); output.clear();
-    runtime.run("class TaggedList extends Collections.List { var tag: String = 'items'; fn append(value: Int) -> Null { super.append(value * 2) } }\nlet tagged = TaggedList([1,2])\ntagged.append(3)\nlet typedTagged: List[Int] = tagged\nSystem.gc()\nSystem.print(tagged.length(), tagged[2], tagged.tag, Reflection.type(Collections.List))\nclass CountMap extends Map { fn count(key: String) -> Int { return self.compute(key, fn(key, old) => (old ?? 0) + 1) ?? 0 } }\nlet counted = CountMap()\nSystem.print(counted.count('x'), counted['x'])", "collection-subclasses.k3");
+    runtime.run("class TaggedList extends Collections.List { var tag: String = 'items'; fn append(value: Int) -> Null { super.append(value * 2) } }\nlet tagged = TaggedList([1,2])\ntagged.append(3)\nlet typedTagged: List[Int] = tagged\nGC.collect()\nSystem.print(tagged.length(), tagged[2], tagged.tag, Reflection.type(Collections.List))\nclass CountMap extends Map { fn count(key: String) -> Int { return self.compute(key, fn(key, old) => (old ?? 0) + 1) ?? 0 } }\nlet counted = CountMap()\nSystem.print(counted.count('x'), counted['x'])", "collection-subclasses.k3");
     assert(output == "3 6 items Type\n1 1\n"); output.clear();
     runtime.run("let unique: Set[Int] = Set([1,2,2,3])\nSystem.print(unique.length(), unique.add(2), unique.add(4), unique.remove(1))\nSystem.print(unique.values(), unique.union(Set([4,5])).values(), unique.intersection(Set([3,4])).values(), unique.difference(Set([3])).values())\nSystem.print(Set([2]).isSubsetOf(unique))\nclass NamedSet extends Set { let label: String = 'unique' }\nlet namedSet = NamedSet([1,1,2])\nfor value in namedSet { System.print(value) }\nSystem.print(namedSet.label, Reflection.type(Collections.Set))", "sets.k3");
     assert(output == "3 false true true\n[2, 3, 4] [2, 3, 4, 5] [3, 4] [2, 4]\ntrue\n1\n2\nunique Type\n"); output.clear();
-    runtime.run("from Collections import List as Sequence\nlet qualified: Collections.List[Int] = Sequence([1,2])\nlet aliasCollection: Sequence[Int] = qualified\nclass InitializedList extends List { let label: String; fn init(label: String, source: List[Int]) -> Null { super.init(source); self.label = label } }\nlet initializedList = InitializedList('numbers', qualified)\nSystem.gc()\nSystem.print(initializedList.label, initializedList[1])", "collection-qualified-init.k3");
+    runtime.run("from Collections import List as Sequence\nlet qualified: Collections.List[Int] = Sequence([1,2])\nlet aliasCollection: Sequence[Int] = qualified\nclass InitializedList extends List { let label: String; fn init(label: String, source: List[Int]) -> Null { super.init(source); self.label = label } }\nlet initializedList = InitializedList('numbers', qualified)\nGC.collect()\nSystem.print(initializedList.label, initializedList[1])", "collection-qualified-init.k3");
     assert(output == "numbers 2\n"); output.clear();
     runtime.run("class MeasuredList extends List { fn length() -> Int { return super.length() + 10 } }\nlet measuredList = MeasuredList([1,2])\nSystem.print(measuredList.length(), Collections.len(measuredList), measuredList[1])\nSystem.print(Reflection.members(initializedList).contains('label'))", "collection-reflection.k3");
     assert(output == "12 12 2\ntrue\n"); output.clear();
@@ -411,15 +411,15 @@ int main() {
         bool rejected = false; try { runtime.run(code, "custom-init-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("class StaticCounter { static var count: Int = 0; static let label: String = 'counter'; var value: Int = 0; static fn create(value: Int) -> StaticCounter { StaticCounter.count += 1; return StaticCounter(value) }; fn read() -> Int { return self.value } }\nlet staticFactory = StaticCounter.create\nSystem.gc()\nlet staticFirst = staticFactory(3)\nlet staticSecond = StaticCounter.create(5)\nSystem.print(StaticCounter.count, StaticCounter.label, staticFirst.read(), staticSecond.read())", "static-members.k3");
+    runtime.run("class StaticCounter { static var count: Int = 0; static let label: String = 'counter'; var value: Int = 0; static fn create(value: Int) -> StaticCounter { StaticCounter.count += 1; return StaticCounter(value) }; fn read() -> Int { return self.value } }\nlet staticFactory = StaticCounter.create\nGC.collect()\nlet staticFirst = staticFactory(3)\nlet staticSecond = StaticCounter.create(5)\nSystem.print(StaticCounter.count, StaticCounter.label, staticFirst.read(), staticSecond.read())", "static-members.k3");
     assert(output == "2 counter 3 5\n"); output.clear();
-    runtime.run("class OpenBase { static var shared: Int = 0; var value: Int; fn read() -> Int { return self.value } }\nclass OpenChild extends OpenBase { let label: String = 'child'; fn read() -> Int { System.gc(); return self.value * 2 } }\nlet openChild: OpenBase = OpenChild(3)\nlet inheritedRead = openChild.read\nSystem.gc()\nOpenChild.shared += 1\nSystem.print(inheritedRead(), OpenBase.shared, openChild.value)\nopenChild.value = 4\nSystem.print(openChild.read())", "class-inheritance.k3");
+    runtime.run("class OpenBase { static var shared: Int = 0; var value: Int; fn read() -> Int { return self.value } }\nclass OpenChild extends OpenBase { let label: String = 'child'; fn read() -> Int { GC.collect(); return self.value * 2 } }\nlet openChild: OpenBase = OpenChild(3)\nlet inheritedRead = openChild.read\nGC.collect()\nOpenChild.shared += 1\nSystem.print(inheritedRead(), OpenBase.shared, openChild.value)\nopenChild.value = 4\nSystem.print(openChild.read())", "class-inheritance.k3");
     assert(output == "6 1 3\n8\n"); output.clear();
-    runtime.run("class SuperChild extends OpenBase { fn read() -> Int { System.gc(); return super.read() + 10 } }\nlet superChild = SuperChild(2)\nSystem.print(superChild.read())\nclass SuperGrandchild extends SuperChild { fn read() -> Int { return super.read() + 100 } }\nSystem.print(SuperGrandchild(2).read())\nclass BaseInit { var value: Int = 0; fn init() -> Null { self.value += 1 } }\nclass ChildInit extends BaseInit { fn init() -> Null { super.init(); self.value += 10 } }\nSystem.print(ChildInit().value)", "super-dispatch.k3");
+    runtime.run("class SuperChild extends OpenBase { fn read() -> Int { GC.collect(); return super.read() + 10 } }\nlet superChild = SuperChild(2)\nSystem.print(superChild.read())\nclass SuperGrandchild extends SuperChild { fn read() -> Int { return super.read() + 100 } }\nSystem.print(SuperGrandchild(2).read())\nclass BaseInit { var value: Int = 0; fn init() -> Null { self.value += 1 } }\nclass ChildInit extends BaseInit { fn init() -> Null { super.init(); self.value += 10 } }\nSystem.print(ChildInit().value)", "super-dispatch.k3");
     assert(output == "12\n112\n11\n"); output.clear();
     runtime.run("class SuperFields extends OpenBase { fn read() -> Int { super.value += 1; return super.value } }\nlet superFields = SuperFields(4)\nSystem.print(superFields.read(), superFields.value)", "super-fields.k3");
     assert(output == "5 5\n"); output.clear();
-    runtime.run("trait InheritedReadable { fn read() -> Int }\nclass TraitParent implements InheritedReadable { var value: Int = 2; fn read() -> Int { return self.value } }\nclass TraitChild extends TraitParent {}\nlet inheritedTrait: InheritedReadable = TraitChild()\nlet baseDefault: Int = 4\nclass LexicalParent { var value: Int = baseDefault }\n{ let baseDefault: String = 'different scope'; class LexicalChild extends LexicalParent {}; System.print(LexicalChild().value) }\nSystem.print(inheritedTrait.read())\nfn localFactory() { class LocalBase { static var count: Int = 0; static fn next() -> Int { LocalBase.count += 1; return LocalBase.count }; fn read() -> Int { return 3 } }; class LocalChild extends LocalBase {}; return (LocalChild.next, LocalChild().read) }\nlet localMethods = localFactory()\nSystem.gc()\nSystem.print(localMethods[0](), localMethods[1]())", "inheritance-lifetimes.k3");
+    runtime.run("trait InheritedReadable { fn read() -> Int }\nclass TraitParent implements InheritedReadable { var value: Int = 2; fn read() -> Int { return self.value } }\nclass TraitChild extends TraitParent {}\nlet inheritedTrait: InheritedReadable = TraitChild()\nlet baseDefault: Int = 4\nclass LexicalParent { var value: Int = baseDefault }\n{ let baseDefault: String = 'different scope'; class LexicalChild extends LexicalParent {}; System.print(LexicalChild().value) }\nSystem.print(inheritedTrait.read())\nfn localFactory() { class LocalBase { static var count: Int = 0; static fn next() -> Int { LocalBase.count += 1; return LocalBase.count }; fn read() -> Int { return 3 } }; class LocalChild extends LocalBase {}; return (LocalChild.next, LocalChild().read) }\nlet localMethods = localFactory()\nGC.collect()\nSystem.print(localMethods[0](), localMethods[1]())", "inheritance-lifetimes.k3");
     assert(output == "4\n2\n1 3\n"); output.clear();
     dk3::Config inheritedConfig; std::string inheritedOutput;
     inheritedConfig.write = [&](const std::string &text) { inheritedOutput += text; };
@@ -427,7 +427,7 @@ int main() {
         return name == "base_model" ? "record Token { value: Int }; let seed: Int = 7; export class Parent { var token: Token = Token(seed); fn read() -> Int { return self.token.value } }" : "";
     };
     dk3::Runtime inheritedRuntime(inheritedConfig);
-    inheritedRuntime.run("import base_model\nclass ImportedChild extends base_model.Parent {}\nlet imported: base_model.Parent = ImportedChild()\nSystem.gc()\nSystem.print(imported.read())", "imported-inheritance.k3");
+    inheritedRuntime.run("import base_model\nclass ImportedChild extends base_model.Parent {}\nlet imported: base_model.Parent = ImportedChild()\nGC.collect()\nSystem.print(imported.read())", "imported-inheritance.k3");
     assert(inheritedOutput == "7\n");
     runtime.run("trait LateTrait { fn read() -> Int }\nclass LateBase { fn read() -> Int { return 9 } }\nclass LateChild extends LateBase {}\nimpl LateTrait for LateBase {}\nlet late: LateTrait = LateChild()\nSystem.print(late.read())", "late-inherited-trait.k3");
     assert(output == "9\n"); output.clear();
@@ -439,15 +439,15 @@ int main() {
         bool rejected = false; try { runtime.run(code, "static-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("trait BothNamed { fn name() -> String }\nclass BothBag implements BothNamed, Collections.Sized { fn name() -> String { return 'bag' }; fn length() -> Int { return 3 } }\nfn describeBoth(value: Collections.Sized & BothNamed) -> String { System.gc(); return value.name() + Text.str(value.length()) }\nlet both: Collections.Sized & BothNamed = BothBag()\nlet bothValues: List[Collections.Sized & BothNamed] = [both]\nlet bothAlias: List[BothNamed & Collections.Sized] = bothValues\nlet optionalBoth: (Collections.Sized & BothNamed)? = null\nSystem.print(describeBoth(both), bothValues[0].length())", "intersection-runtime.k3");
+    runtime.run("trait BothNamed { fn name() -> String }\nclass BothBag implements BothNamed, Collections.Sized { fn name() -> String { return 'bag' }; fn length() -> Int { return 3 } }\nfn describeBoth(value: Collections.Sized & BothNamed) -> String { GC.collect(); return value.name() + Text.str(value.length()) }\nlet both: Collections.Sized & BothNamed = BothBag()\nlet bothValues: List[Collections.Sized & BothNamed] = [both]\nlet bothAlias: List[BothNamed & Collections.Sized] = bothValues\nlet optionalBoth: (Collections.Sized & BothNamed)? = null\nSystem.print(describeBoth(both), bothValues[0].length())", "intersection-runtime.k3");
     assert(output == "bag3 3\n"); output.clear();
     for (const std::string &code : {"describeBoth([1])"}) {
         bool rejected = false; try { runtime.run(code, "intersection-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let computedMap: Map[String, Int?] = {'empty': null, 'old': 2}\nvar computeCalls = 0\nfn supply(key: String) -> Int { computeCalls += 1; System.gc(); return 7 }\nSystem.print(computedMap.computeIfAbsent('old', supply), computedMap.computeIfAbsent('empty', supply), computeCalls)\nSystem.print(computedMap.computeIfPresent('missing', fn(key, value) => value + 1))\nSystem.print(computedMap.compute('new', fn(key, value) => (value ?? 0) + 3))\nSystem.print(computedMap.computeIfPresent('old', fn(key, value) => value * 2))\nSystem.print(computedMap.putIfAbsent('old', 99), computedMap.putIfAbsent('added', 5))\nSystem.print(computedMap.merge('old', 3, fn(old, added) => old + added))\ncomputedMap.compute('old', fn(key, value) => null)\nSystem.print(computedMap.contains('old'))", "map-compute.k3");
+    runtime.run("let computedMap: Map[String, Int?] = {'empty': null, 'old': 2}\nvar computeCalls = 0\nfn supply(key: String) -> Int { computeCalls += 1; GC.collect(); return 7 }\nSystem.print(computedMap.computeIfAbsent('old', supply), computedMap.computeIfAbsent('empty', supply), computeCalls)\nSystem.print(computedMap.computeIfPresent('missing', fn(key, value) => value + 1))\nSystem.print(computedMap.compute('new', fn(key, value) => (value ?? 0) + 3))\nSystem.print(computedMap.computeIfPresent('old', fn(key, value) => value * 2))\nSystem.print(computedMap.putIfAbsent('old', 99), computedMap.putIfAbsent('added', 5))\nSystem.print(computedMap.merge('old', 3, fn(old, added) => old + added))\ncomputedMap.compute('old', fn(key, value) => null)\nSystem.print(computedMap.contains('old'))", "map-compute.k3");
     assert(output == "2 7 1\nnull\n3\n4\n4 null\n7\nfalse\n"); output.clear();
-    runtime.run("let mutatingCompute: Map[String, List[Int]] = {'x': [1]}\nlet replaced = mutatingCompute.compute('x', fn(key: String, old: List[Int]?) -> List[Int] { mutatingCompute.clear(); System.gc(); return (old ?? []) + [2] })\nSystem.print(replaced, mutatingCompute['x'])\nvar failedComputed = 0\nlet stableCompute: Map[String, Int] = {'x': 3}\ntry { stableCompute.compute('x', fn(key, old) { throw 'no result' }) } catch error { failedComputed += 1 }\nSystem.print(stableCompute['x'], failedComputed)\nlet nullCompute: Map[String, Int?] = {'x': null}\nSystem.print(nullCompute.computeIfPresent('x', fn(key, old) => 5), nullCompute.contains('x'))\nnullCompute.computeIfAbsent('x', fn(key) => null)\nSystem.print(nullCompute.contains('x'))", "map-compute-lifetimes.k3");
+    runtime.run("let mutatingCompute: Map[String, List[Int]] = {'x': [1]}\nlet replaced = mutatingCompute.compute('x', fn(key: String, old: List[Int]?) -> List[Int] { mutatingCompute.clear(); GC.collect(); return (old ?? []) + [2] })\nSystem.print(replaced, mutatingCompute['x'])\nvar failedComputed = 0\nlet stableCompute: Map[String, Int] = {'x': 3}\ntry { stableCompute.compute('x', fn(key, old) { throw 'no result' }) } catch error { failedComputed += 1 }\nSystem.print(stableCompute['x'], failedComputed)\nlet nullCompute: Map[String, Int?] = {'x': null}\nSystem.print(nullCompute.computeIfPresent('x', fn(key, old) => 5), nullCompute.contains('x'))\nnullCompute.computeIfAbsent('x', fn(key) => null)\nSystem.print(nullCompute.contains('x'))", "map-compute-lifetimes.k3");
     assert(output == "[1, 2] [1, 2]\n3 1\nnull true\ntrue\n"); output.clear();
     for (const std::string &code : {"stableCompute.merge('x', null, fn(old, added) => added)", "stableCompute.computeIfAbsent('x', 1)"}) {
         bool rejected = false; try { runtime.run(code, "map-intersection-boundaries.k3"); } catch (const dk3::Error &) { rejected = true; }
@@ -477,19 +477,19 @@ int main() {
     limitedCallbacks.run("let nextDraw = Random.int(10000)");
     dk3::Runtime shuffleControl; shuffleControl.run("Random.seed(9)\nlet nextDraw = Random.int(10000)");
     assert(dk3::Runtime::equal(limitedCallbacks.get("nextDraw"), shuffleControl.get("nextDraw")));
-    runtime.run("let mapSource: List[Int] = [1, 2, 3]\nlet mapped: List[Int] = mapSource.map(fn(value: Int) -> Int { mapSource.clear(); System.gc(); return value * 2 })\nSystem.print(mapped, mapSource)\nlet filterSource: List[Int] = [1, 2, 3, 4]\nlet filtered = filterSource.filter(fn(value: Int) -> Bool { System.gc(); return value % 2 == 0 })\nSystem.print(filtered)\nlet retainedFilter = filterSource.filter\nSystem.gc()\nSystem.print(retainedFilter(fn(value: Int) -> Bool => value > 2))", "callback-lists.k3");
+    runtime.run("let mapSource: List[Int] = [1, 2, 3]\nlet mapped: List[Int] = mapSource.map(fn(value: Int) -> Int { mapSource.clear(); GC.collect(); return value * 2 })\nSystem.print(mapped, mapSource)\nlet filterSource: List[Int] = [1, 2, 3, 4]\nlet filtered = filterSource.filter(fn(value: Int) -> Bool { GC.collect(); return value % 2 == 0 })\nSystem.print(filtered)\nlet retainedFilter = filterSource.filter\nGC.collect()\nSystem.print(retainedFilter(fn(value: Int) -> Bool => value > 2))", "callback-lists.k3");
     assert(output == "[2, 4, 6] []\n[2, 4]\n[3, 4]\n"); output.clear();
-    runtime.run("let reduced: Int = [1, 2, 3].reduce(fn(total: Int, value: Int) -> Int { System.gc(); return total + value }, 10)\nSystem.print(reduced, [].reduce(fn(total, value) => total, 7))\nvar visited = 0\nfn positive(value: Int) -> Bool { visited += 1; return value > 1 }\nSystem.print([1, 2, 3].any(positive), visited)\nvisited = 0\nSystem.print([1, 2, 3].all(positive), visited)\nSystem.print([].any(positive), [].all(positive))\nSystem.print([1, 2, 3].find(positive), [1].find(positive))\nSystem.print([null, 2].findIndex(fn(value) -> Bool => value == null), [].findIndex(positive))\nlet folded: List[Int] = [1, 2].reduce(fn(total: List[Int], value: Int) -> List[Int] { System.gc(); return total + [value] }, [])\nSystem.print(folded)", "callback-queries.k3");
+    runtime.run("let reduced: Int = [1, 2, 3].reduce(fn(total: Int, value: Int) -> Int { GC.collect(); return total + value }, 10)\nSystem.print(reduced, [].reduce(fn(total, value) => total, 7))\nvar visited = 0\nfn positive(value: Int) -> Bool { visited += 1; return value > 1 }\nSystem.print([1, 2, 3].any(positive), visited)\nvisited = 0\nSystem.print([1, 2, 3].all(positive), visited)\nSystem.print([].any(positive), [].all(positive))\nSystem.print([1, 2, 3].find(positive), [1].find(positive))\nSystem.print([null, 2].findIndex(fn(value) -> Bool => value == null), [].findIndex(positive))\nlet folded: List[Int] = [1, 2].reduce(fn(total: List[Int], value: Int) -> List[Int] { GC.collect(); return total + [value] }, [])\nSystem.print(folded)", "callback-queries.k3");
     assert(output == "16 7\ntrue 2\nfalse 1\nfalse true\n2 null\n0 -1\n[1, 2]\n"); output.clear();
-    runtime.run("var partialMap = [99]\nvar callbackEffects = 0\ntry { partialMap = [1,2,3].map(fn(value: Int) -> Int { callbackEffects += 1; if value == 2 { throw 'stop' }; return value }) } catch error {}\nSystem.print(partialMap, callbackEffects)\nclass CallbackCounter { var calls: Int = 0; fn visit(value: Int) -> Int { self.calls += 1; System.gc(); return value + self.calls } }\nlet callbackCounter = CallbackCounter()\nlet detachedCallback = callbackCounter.visit\nSystem.gc()\nSystem.print([1,2].map(detachedCallback))\nlet emptyFiltered = filterSource.filter(fn(value: Int) -> Bool => false)", "callback-failure-lifetimes.k3");
+    runtime.run("var partialMap = [99]\nvar callbackEffects = 0\ntry { partialMap = [1,2,3].map(fn(value: Int) -> Int { callbackEffects += 1; if value == 2 { throw 'stop' }; return value }) } catch error {}\nSystem.print(partialMap, callbackEffects)\nclass CallbackCounter { var calls: Int = 0; fn visit(value: Int) -> Int { self.calls += 1; GC.collect(); return value + self.calls } }\nlet callbackCounter = CallbackCounter()\nlet detachedCallback = callbackCounter.visit\nGC.collect()\nSystem.print([1,2].map(detachedCallback))\nlet emptyFiltered = filterSource.filter(fn(value: Int) -> Bool => false)", "callback-failure-lifetimes.k3");
     assert(output == "[99] 2\n[2, 4]\n"); output.clear();
     for (const std::string &code : {"[1].filter(fn(value) => 1)", "[1].any(fn(value) => null)", "[1].reduce(fn(value) => value, 0)", "[].map(1)", "[1].map(callback: fn(value) => value)"}) {
         bool rejected = false; try { runtime.run(code, "callback-list-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let parsedJson = Json.parse('{\"value\":9007199254740993,\"items\":[null,true,1.25],\"text\":\"a\\\\u0000b\"}')\nSystem.gc()\nSystem.print(parsedJson['value'], parsedJson['items'][1], parsedJson['text'].length())\nlet encodedJson = Json.stringify(parsedJson)\nlet jsonRoundTrip = Json.parse(encodedJson)\nSystem.print(jsonRoundTrip['value'], Json.stringify((1, 2)))", "json.k3");
+    runtime.run("let parsedJson = Json.parse('{\"value\":9007199254740993,\"items\":[null,true,1.25],\"text\":\"a\\\\u0000b\"}')\nGC.collect()\nSystem.print(parsedJson['value'], parsedJson['items'][1], parsedJson['text'].length())\nlet encodedJson = Json.stringify(parsedJson)\nlet jsonRoundTrip = Json.parse(encodedJson)\nSystem.print(jsonRoundTrip['value'], Json.stringify((1, 2)))", "json.k3");
     assert(output == "9007199254740993 true 3\n9007199254740993 [1,2]\n"); output.clear();
-    runtime.run("System.print(Json.parse('-9223372036854775808'), Json.parse('9223372036854775807'))\nlet unicodeJson = Json.parse('\"\\\\uD83D\\\\uDE00\"')\nSystem.print(unicodeJson.length())\nlet aliasJson = [1]\nSystem.print(Json.stringify([aliasJson, aliasJson]))\nlet typedJson: Map[String, List[Int]] = Json.parse('{\"values\":[1,2]}')\ntypedJson['values'].append(3)\nSystem.gc()", "json-boundaries.k3");
+    runtime.run("System.print(Json.parse('-9223372036854775808'), Json.parse('9223372036854775807'))\nlet unicodeJson = Json.parse('\"\\\\uD83D\\\\uDE00\"')\nSystem.print(unicodeJson.length())\nlet aliasJson = [1]\nSystem.print(Json.stringify([aliasJson, aliasJson]))\nlet typedJson: Map[String, List[Int]] = Json.parse('{\"values\":[1,2]}')\ntypedJson['values'].append(3)\nGC.collect()", "json-boundaries.k3");
     assert(output == "-9223372036854775808 9223372036854775807\n1\n[[1],[1]]\n"); output.clear();
     std::string deepJson(65, '['); deepJson += '0'; deepJson += std::string(65, ']');
     runtime.set("deepJson", runtime.text(deepJson, false, dk3::Span{}));
@@ -531,7 +531,7 @@ int main() {
         return {};
     };
     dk3::Runtime fileRuntime(fileConfig);
-    fileRuntime.run("let text = Files.readText('text')\nlet bytes = Files.readBytes('binary')\nlet present = Files.exists('text')\nlet absent = Files.exists('missing')\nlet byteSize = Files.size('text')\nSystem.gc()", "files-provider.k3");
+    fileRuntime.run("let text = Files.readText('text')\nlet bytes = Files.readBytes('binary')\nlet present = Files.exists('text')\nlet absent = Files.exists('missing')\nlet byteSize = Files.size('text')\nGC.collect()", "files-provider.k3");
     assert(dk3::Runtime::display(fileRuntime.get("text")) == std::string("a\xc3\xa9\0b", 5));
     assert(dk3::Runtime::typeOf(fileRuntime.get("bytes")) == "Bytes");
     assert(std::get<bool>(fileRuntime.get("present")) && !std::get<bool>(fileRuntime.get("absent")));
@@ -540,19 +540,19 @@ int main() {
         bool rejected = false; try { fileRuntime.run(code, "files-provider-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let searchText = 'a\\xc3\\xa9b'\nlet textContains = searchText.contains\nSystem.gc()\nSystem.print(textContains('\\xc3\\xa9'), textContains(''), textContains('missing'))", "string-contains.k3");
+    runtime.run("let searchText = 'a\\xc3\\xa9b'\nlet textContains = searchText.contains\nGC.collect()\nSystem.print(textContains('\\xc3\\xa9'), textContains(''), textContains('missing'))", "string-contains.k3");
     assert(output == "true true false\n"); output.clear();
-    runtime.run("let prefix = searchText.startsWith\nSystem.gc()\nSystem.print(prefix('a'), prefix('a\\xc3\\xa9'), prefix(''), prefix('longer than source'), prefix('b'))", "string-prefix.k3");
+    runtime.run("let prefix = searchText.startsWith\nGC.collect()\nSystem.print(prefix('a'), prefix('a\\xc3\\xa9'), prefix(''), prefix('longer than source'), prefix('b'))", "string-prefix.k3");
     assert(output == "true true true false false\n"); output.clear();
-    runtime.run("let suffix = searchText.endsWith\nSystem.gc()\nSystem.print(suffix('b'), suffix('\\xc3\\xa9b'), suffix(''), suffix('longer than source'), suffix('a'))\nSystem.print(''.startsWith(''), ''.endsWith(''))", "string-suffix.k3");
+    runtime.run("let suffix = searchText.endsWith\nGC.collect()\nSystem.print(suffix('b'), suffix('\\xc3\\xa9b'), suffix(''), suffix('longer than source'), suffix('a'))\nSystem.print(''.startsWith(''), ''.endsWith(''))", "string-suffix.k3");
     assert(output == "true true true false false\ntrue true\n"); output.clear();
-    runtime.run("let find = searchText.find\nSystem.gc()\nSystem.print(find('b'), find('\\xc3\\xa9'), find(''), find('missing'))\nSystem.print('\\xf0\\x9f\\x98\\x80x'.find('x'), 'aba'.find('a'))", "string-find.k3");
+    runtime.run("let find = searchText.find\nGC.collect()\nSystem.print(find('b'), find('\\xc3\\xa9'), find(''), find('missing'))\nSystem.print('\\xf0\\x9f\\x98\\x80x'.find('x'), 'aba'.find('a'))", "string-find.k3");
     assert(output == "2 1 0 -1\n1 0\n"); output.clear();
-    runtime.run("let split = 'a,,b,'.split\nSystem.gc()\nlet splitParts: List[String] = split(',')\nSystem.print(splitParts.length(), splitParts[1].length(), splitParts[3].length())\nSystem.print('x\\xc3\\xa9y\\xc3\\xa9'.split('\\xc3\\xa9'))\nSystem.print(''.split(',').length(), 'abc'.split('missing').length())", "string-split.k3");
+    runtime.run("let split = 'a,,b,'.split\nGC.collect()\nlet splitParts: List[String] = split(',')\nSystem.print(splitParts.length(), splitParts[1].length(), splitParts[3].length())\nSystem.print('x\\xc3\\xa9y\\xc3\\xa9'.split('\\xc3\\xa9'))\nSystem.print(''.split(',').length(), 'abc'.split('missing').length())", "string-split.k3");
     assert(output == "4 0 0\n[x, y, ]\n1 1\n"); output.clear();
-    runtime.run("let join = '|'.join\nSystem.gc()\nSystem.print(join(['a', '', 'b']), ','.join(('x', 'y')), '-'.join('ab'))\nSystem.print(''.join(['a', 'b']), 'separator'.join([]).length())\nfn joinedSource() { yield 'first'; System.gc(); yield 'second' }\nSystem.print(join(joinedSource()))\nSystem.print(','.join('a,,b,'.split(',')))", "string-join.k3");
+    runtime.run("let join = '|'.join\nGC.collect()\nSystem.print(join(['a', '', 'b']), ','.join(('x', 'y')), '-'.join('ab'))\nSystem.print(''.join(['a', 'b']), 'separator'.join([]).length())\nfn joinedSource() { yield 'first'; GC.collect(); yield 'second' }\nSystem.print(join(joinedSource()))\nSystem.print(','.join('a,,b,'.split(',')))", "string-join.k3");
     assert(output == "a||b x,y a-b\nab 0\nfirst|second\na,,b,\n"); output.clear();
-    runtime.run("var failedJoinResult = 'unchanged'\nfn failingStrings() { defer System.print('join cleanup'); yield 'a'; throw 'join failed' }\ntry { failedJoinResult = ','.join(failingStrings()) } catch error { System.print(failedJoinResult) }\nSystem.print('a\\0b'.find('\\0'), '|'.join('a\\0b'.split('\\0')))\nlet retainedParts = 'first|second'.split('|')\nSystem.gc()\nSystem.print(retainedParts[1])", "string-lifetimes.k3");
+    runtime.run("var failedJoinResult = 'unchanged'\nfn failingStrings() { defer System.print('join cleanup'); yield 'a'; throw 'join failed' }\ntry { failedJoinResult = ','.join(failingStrings()) } catch error { System.print(failedJoinResult) }\nSystem.print('a\\0b'.find('\\0'), '|'.join('a\\0b'.split('\\0')))\nlet retainedParts = 'first|second'.split('|')\nGC.collect()\nSystem.print(retainedParts[1])", "string-lifetimes.k3");
     assert(output == "join cleanup\nunchanged\n1 a|b\nsecond\n"); output.clear();
     dk3::Config stringBudget; stringBudget.stepLimit = 100;
     dk3::Runtime limitedStrings(stringBudget);
@@ -574,15 +574,15 @@ int main() {
         bool rejected = false; try { runtime.run(code, "string-contains-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("fn() { System.print('immediate') }()\nlet anonAdd: Function = fn(first: Int, second: Int = 2) -> Int => first + second\nSystem.print(anonAdd(second: 4, first: 3))\nlet anonRest = fn(first: Int, *rest) -> Int { return first + rest.length() }\nSystem.print(anonRest(1, 2, 3))\nfn anonFactory(value: Int) { return fn(addition: Int) -> Int => value + addition }\nlet anonFive = anonFactory(5)\nSystem.gc()\nSystem.print(anonFive(10))\nlet anonGenerator = fn() { defer System.print('anonymous cleanup'); yield null; yield 2 }\nfor value in anonGenerator() { System.print(value) }\nlet anonDocumented = fn() -> Int { \"\"\"Anonymous documentation.\"\"\"\nreturn 1 }\nSystem.print(Reflection.doc(anonDocumented))", "anonymous-functions.k3");
+    runtime.run("fn() { System.print('immediate') }()\nlet anonAdd: Function = fn(first: Int, second: Int = 2) -> Int => first + second\nSystem.print(anonAdd(second: 4, first: 3))\nlet anonRest = fn(first: Int, *rest) -> Int { return first + rest.length() }\nSystem.print(anonRest(1, 2, 3))\nfn anonFactory(value: Int) { return fn(addition: Int) -> Int => value + addition }\nlet anonFive = anonFactory(5)\nGC.collect()\nSystem.print(anonFive(10))\nlet anonGenerator = fn() { defer System.print('anonymous cleanup'); yield null; yield 2 }\nfor value in anonGenerator() { System.print(value) }\nlet anonDocumented = fn() -> Int { \"\"\"Anonymous documentation.\"\"\"\nreturn 1 }\nSystem.print(Reflection.doc(anonDocumented))", "anonymous-functions.k3");
     assert(output == "immediate\n7\n3\n15\nnull\n2\nanonymous cleanup\nAnonymous documentation.\n"); output.clear();
-    runtime.run("let searchable: List[Int?] = [1, null, 1]\nlet listContains = searchable.contains\nSystem.gc()\nSystem.print(listContains(1), listContains(null), listContains(2))", "list-contains.k3");
+    runtime.run("let searchable: List[Int?] = [1, null, 1]\nlet listContains = searchable.contains\nGC.collect()\nSystem.print(listContains(1), listContains(null), listContains(2))", "list-contains.k3");
     assert(output == "true true false\n"); output.clear();
-    runtime.run("let indexOf = searchable.indexOf\nSystem.gc()\nSystem.print(indexOf(1), indexOf(null), indexOf(2))\nrecord SearchPoint { value: Int }\nlet searchPoints: List[SearchPoint] = [SearchPoint(2)]\nSystem.print(searchPoints.indexOf(SearchPoint(2)))", "list-indexof.k3");
+    runtime.run("let indexOf = searchable.indexOf\nGC.collect()\nSystem.print(indexOf(1), indexOf(null), indexOf(2))\nrecord SearchPoint { value: Int }\nlet searchPoints: List[SearchPoint] = [SearchPoint(2)]\nSystem.print(searchPoints.indexOf(SearchPoint(2)))", "list-indexof.k3");
     assert(output == "0 1 -1\n0\n"); output.clear();
-    runtime.run("let clearable: List[Int] = [1, 2]\nlet listAlias = clearable\nlet listCopy = List(clearable)\nlet clearList = clearable.clear\nSystem.gc()\nclearList()\nclearList()\nSystem.print(listAlias.length(), listCopy.length())\nclearable.append(3)", "list-clear.k3");
+    runtime.run("let clearable: List[Int] = [1, 2]\nlet listAlias = clearable\nlet listCopy = List(clearable)\nlet clearList = clearable.clear\nGC.collect()\nclearList()\nclearList()\nSystem.print(listAlias.length(), listCopy.length())\nclearable.append(3)", "list-clear.k3");
     assert(output == "0 2\n"); output.clear();
-    runtime.run("let reversible: List[Int] = [1, 2, 3]\nlet reverse = reversible.reverse\nlet reverseAlias = reversible\nSystem.gc()\nreverse()\nSystem.print(reverseAlias)\nreverse()\nSystem.print(reversible)\nlet reverseEmpty: List[Int] = []\nreverseEmpty.reverse()", "list-reverse.k3");
+    runtime.run("let reversible: List[Int] = [1, 2, 3]\nlet reverse = reversible.reverse\nlet reverseAlias = reversible\nGC.collect()\nreverse()\nSystem.print(reverseAlias)\nreverse()\nSystem.print(reversible)\nlet reverseEmpty: List[Int] = []\nreverseEmpty.reverse()", "list-reverse.k3");
     assert(output == "[3, 2, 1]\n[1, 2, 3]\n"); output.clear();
     dk3::Config reverseBudget; reverseBudget.stepLimit = 30;
     dk3::Runtime limitedReverse(reverseBudget);
@@ -592,11 +592,11 @@ int main() {
     bool reverseLimited = false;
     try { limitedReverse.run("data.reverse()", "reverse-budget.k3"); } catch (const dk3::Error &error) { reverseLimited = error.category == "limit"; }
     assert(reverseLimited && std::get<int64_t>(reverseData->items.front()) == 2);
-    runtime.run("let clearableMap: Map[String, Int] = {'x': 1}\nlet clearMapAlias = clearableMap\nlet clearMapSnapshot = clearableMap.values()\nlet clearMap = clearableMap.clear\nSystem.gc()\nclearMap()\nclearMap()\nSystem.print(clearMapAlias.length(), clearMapSnapshot)\nclearableMap['next'] = 2", "map-clear.k3");
+    runtime.run("let clearableMap: Map[String, Int] = {'x': 1}\nlet clearMapAlias = clearableMap\nlet clearMapSnapshot = clearableMap.values()\nlet clearMap = clearableMap.clear\nGC.collect()\nclearMap()\nclearMap()\nSystem.print(clearMapAlias.length(), clearMapSnapshot)\nclearableMap['next'] = 2", "map-clear.k3");
     assert(output == "0 [1]\n"); output.clear();
-    runtime.run("let safeMap: Map[String, Int?] = {'value': 7, 'empty': null}\nlet get = safeMap.get\nSystem.gc()\nSystem.print(get('value'), get('empty'), get('missing'), safeMap.contains('empty'))\nlet absent: Int? = get('missing')", "map-get.k3");
+    runtime.run("let safeMap: Map[String, Int?] = {'value': 7, 'empty': null}\nlet get = safeMap.get\nGC.collect()\nSystem.print(get('value'), get('empty'), get('missing'), safeMap.contains('empty'))\nlet absent: Int? = get('missing')", "map-get.k3");
     assert(output == "7 null null true\n"); output.clear();
-    runtime.run("class SearchIdentity {}\nlet identity = SearchIdentity()\nlet identities: List[SearchIdentity] = [identity]\nSystem.print(identities.contains(identity), identities.contains(SearchIdentity()))\nlet nestedGet: Map[String, List[Int]] = {'x': [1]}\nlet retrieved = nestedGet.get('x')\nnestedGet.clear()\nSystem.gc()\nSystem.print(retrieved)", "collection-ownership.k3");
+    runtime.run("class SearchIdentity {}\nlet identity = SearchIdentity()\nlet identities: List[SearchIdentity] = [identity]\nSystem.print(identities.contains(identity), identities.contains(SearchIdentity()))\nlet nestedGet: Map[String, List[Int]] = {'x': [1]}\nlet retrieved = nestedGet.get('x')\nnestedGet.clear()\nGC.collect()\nSystem.print(retrieved)", "collection-ownership.k3");
     assert(output == "true false\n[1]\n"); output.clear();
     dk3::Config searchBudget; searchBudget.stepLimit = 30;
     dk3::Runtime limitedSearch(searchBudget);
@@ -617,16 +617,16 @@ int main() {
         bool rejected = false; try { runtime.run(code, "list-clear-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let inserted: List[Int] = [1, 3]\nlet insert = inserted.insert\nSystem.gc()\ninsert(1, 2)\ninserted.insert(-1, 8)\ninserted.insert(inserted.length(), 4)\nSystem.print(inserted)\nlet emptyInsertion: List[Int] = []\nemptyInsertion.insert(0, 1)", "list-insertion.k3");
+    runtime.run("let inserted: List[Int] = [1, 3]\nlet insert = inserted.insert\nGC.collect()\ninsert(1, 2)\ninserted.insert(-1, 8)\ninserted.insert(inserted.length(), 4)\nSystem.print(inserted)\nlet emptyInsertion: List[Int] = []\nemptyInsertion.insert(0, 1)", "list-insertion.k3");
     assert(output == "[1, 2, 8, 3, 4]\n"); output.clear();
     for (const std::string &code : {"inserted.insert(-99, 1)", "inserted.insert(99, 1)", "inserted.insert(1.0, 1)", "inserted.insert(1)", "inserted.insert(index: 1, value: 2)"}) {
         bool rejected = false; try { runtime.run(code, "insertion-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
     assert(std::get<dk3::Object *>(runtime.get("inserted"))->items.size() == 5);
-    runtime.run("let removedItems: List[Int?] = [1, null, 3]\nlet removeAt = removedItems.removeAt\nSystem.gc()\nSystem.print(removeAt(1), removeAt(-1), removedItems)\nlet removedLast: Int? = removedItems.removeAt(0)\nSystem.print(removedLast, removedItems.length())", "list-removal.k3");
+    runtime.run("let removedItems: List[Int?] = [1, null, 3]\nlet removeAt = removedItems.removeAt\nGC.collect()\nSystem.print(removeAt(1), removeAt(-1), removedItems)\nlet removedLast: Int? = removedItems.removeAt(0)\nSystem.print(removedLast, removedItems.length())", "list-removal.k3");
     assert(output == "null 3 [1]\n1 0\n"); output.clear();
-    runtime.run("let extended: List[Int] = [1]\nlet extend = extended.extend\nSystem.gc()\nextend((2, 3))\nextended.extend(extended)\nfn extensionSource() { yield 4; System.gc(); yield 5 }\nextended.extend(extensionSource())\nSystem.print(extended)\nlet letters: List[String] = []\nletters.extend('abc')\nlet byteValues: List[Int] = []\nbyteValues.extend(b'ab')\nSystem.print(letters, byteValues)", "list-extension.k3");
+    runtime.run("let extended: List[Int] = [1]\nlet extend = extended.extend\nGC.collect()\nextend((2, 3))\nextended.extend(extended)\nfn extensionSource() { yield 4; GC.collect(); yield 5 }\nextended.extend(extensionSource())\nSystem.print(extended)\nlet letters: List[String] = []\nletters.extend('abc')\nlet byteValues: List[Int] = []\nbyteValues.extend(b'ab')\nSystem.print(letters, byteValues)", "list-extension.k3");
     assert(output == "[1, 2, 3, 1, 2, 3, 4, 5]\n[a, b, c] [97, 98]\n"); output.clear();
     for (const std::string &code : {"extended.extend(1)", "extended.extend({})", "extended.extend()", "extended.extend(values: [6])"}) {
         bool rejected = false; try { runtime.run(code, "extension-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
@@ -642,55 +642,55 @@ int main() {
     try { limitedExtension.run("destination.extend(unbounded())", "extension-budget.k3"); }
     catch (const dk3::Error &error) { boundedExtension = error.category == "limit"; }
     assert(boundedExtension && std::get<dk3::Object *>(limitedExtension.get("destination"))->items.size() == 1);
-    runtime.run("fn removedRecord() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet entries: List[Entry] = []\nentries.insert(0, Entry(7))\nentries.extend((Entry(8),))\nlet removed = entries.removeAt(0)\nreturn removed.read }\nlet removedReader = removedRecord()\nSystem.gc()\nSystem.print(removedReader(), Reflection.members(inserted))", "removed-record-gc.k3");
+    runtime.run("fn removedRecord() { record Entry { value: Int; fn read() -> Int { return self.value } }\nlet entries: List[Entry] = []\nentries.insert(0, Entry(7))\nentries.extend((Entry(8),))\nlet removed = entries.removeAt(0)\nreturn removed.read }\nlet removedReader = removedRecord()\nGC.collect()\nSystem.print(removedReader(), Reflection.members(inserted))", "removed-record-gc.k3");
     assert(output == "7 [all, any, append, clear, contains, extend, filter, find, findIndex, indexOf, insert, length, map, reduce, removeAt, reverse]\n"); output.clear();
     for (const std::string &code : {"removedItems.removeAt(0)", "inserted.removeAt(-99)", "inserted.removeAt(99)", "inserted.removeAt('bad')", "inserted.removeAt()", "inserted.removeAt(index: 0)"}) {
         bool rejected = false; try { runtime.run(code, "indexed-removal-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let membership: Map[String, Int?] = {'present': null, 'number': 3}\nlet contains = membership.contains\nSystem.gc()\nSystem.print(contains('present'), contains('missing'), membership.contains('number'))", "map-membership.k3");
+    runtime.run("let membership: Map[String, Int?] = {'present': null, 'number': 3}\nlet contains = membership.contains\nGC.collect()\nSystem.print(contains('present'), contains('missing'), membership.contains('number'))", "map-membership.k3");
     assert(output == "true false true\n"); output.clear();
-    runtime.run("let removable: Map[String, Int?] = {'first': 1, 'null': null, 'last': 3}\nlet remove = removable.remove\nSystem.gc()\nSystem.print(remove('null'), remove('null'), removable.length(), removable.contains('last'))\nSystem.print(removable)\nremovable['new'] = 4", "map-removal.k3");
+    runtime.run("let removable: Map[String, Int?] = {'first': 1, 'null': null, 'last': 3}\nlet remove = removable.remove\nGC.collect()\nSystem.print(remove('null'), remove('null'), removable.length(), removable.contains('last'))\nSystem.print(removable)\nremovable['new'] = 4", "map-removal.k3");
     assert(output == "true false 2 true\n{first: 1, last: 3}\n"); output.clear();
     for (const std::string &code : {"removable.remove([])", "removable.remove()", "removable.remove(key: 'first')"}) {
         bool rejected = false; try { runtime.run(code, "removal-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
     assert(std::get<dk3::Object *>(runtime.get("removable"))->entries.size() == 3);
-    runtime.run("let snapshots: Map[String, List[Int]] = {'first': [1], 'second': [2]}\nlet snapshotKeys = snapshots.keys()\nlet snapshotValues = snapshots.values()\nlet detachedValues = snapshots.values\nSystem.gc()\nsnapshots.remove('first')\nsnapshots['third'] = [3]\nsnapshotValues[0].append(4)\nsnapshotKeys.append('independent')\nSystem.print(snapshotKeys, snapshotValues, snapshots.keys(), detachedValues())", "map-snapshots.k3");
+    runtime.run("let snapshots: Map[String, List[Int]] = {'first': [1], 'second': [2]}\nlet snapshotKeys = snapshots.keys()\nlet snapshotValues = snapshots.values()\nlet detachedValues = snapshots.values\nGC.collect()\nsnapshots.remove('first')\nsnapshots['third'] = [3]\nsnapshotValues[0].append(4)\nsnapshotKeys.append('independent')\nSystem.print(snapshotKeys, snapshotValues, snapshots.keys(), detachedValues())", "map-snapshots.k3");
     assert(output == "[first, second, independent] [[1, 4], [2]] [second, third] [[2], [3]]\n"); output.clear();
     for (const std::string &code : {"snapshots.keys(1)", "snapshots.values(key: 'first')"}) {
         bool rejected = false; try { runtime.run(code, "snapshot-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let emptySnapshotSource: Map[String, Int] = {}\nlet emptySnapshot = emptySnapshotSource.values()\nSystem.gc()", "empty-snapshot.k3");
-    runtime.run("fn escapedSnapshot() { record SnapshotEntry { value: Int }\nlet source: Map[String, SnapshotEntry] = {'x': SnapshotEntry(7)}\nlet snapshot = source.values()\nsource.remove('x')\nreturn snapshot }\nlet escapedSnapshotValues = escapedSnapshot()\nSystem.gc()\nSystem.print(escapedSnapshotValues[0].value, Reflection.members(membership))", "snapshot-nominal-gc.k3");
+    runtime.run("let emptySnapshotSource: Map[String, Int] = {}\nlet emptySnapshot = emptySnapshotSource.values()\nGC.collect()", "empty-snapshot.k3");
+    runtime.run("fn escapedSnapshot() { record SnapshotEntry { value: Int }\nlet source: Map[String, SnapshotEntry] = {'x': SnapshotEntry(7)}\nlet snapshot = source.values()\nsource.remove('x')\nreturn snapshot }\nlet escapedSnapshotValues = escapedSnapshot()\nGC.collect()\nSystem.print(escapedSnapshotValues[0].value, Reflection.members(membership))", "snapshot-nominal-gc.k3");
     assert(output == "7 [clear, compute, computeIfAbsent, computeIfPresent, contains, get, keys, length, merge, putIfAbsent, remove, values]\n"); output.clear();
     for (const std::string &code : {"membership.contains([])", "membership.contains()", "membership.contains('present', 'other')", "membership.contains(key: 'present')"}) {
         bool rejected = false; try { runtime.run(code, "membership-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("trait RecordNamed { fn name() -> String { return 'record' } }\nrecord NamedPoint implements RecordNamed, Collections.Sized { x: Int, y: Int = x; fn length() -> Int { return 2 }; fn sum() -> Int { return self.x + self.y }; fn init() -> Int { return 9 } }\nlet namedPoint = NamedPoint(3)\nlet pointSum = namedPoint.sum\nSystem.gc()\nfn recordSize(value: Collections.Sized) -> Int { return value.length() }\nSystem.print(namedPoint.name(), pointSum(), namedPoint == NamedPoint(3), recordSize(namedPoint), Collections.len(namedPoint), namedPoint.init())\nrecord MutableInside { items: List[Int] = []; fn append(value: Int) -> Null { self.items.append(value) } }\nlet mutableInside = MutableInside()\nmutableInside.append(2)\nSystem.print(mutableInside.items)", "record-methods.k3");
+    runtime.run("trait RecordNamed { fn name() -> String { return 'record' } }\nrecord NamedPoint implements RecordNamed, Collections.Sized { x: Int, y: Int = x; fn length() -> Int { return 2 }; fn sum() -> Int { return self.x + self.y }; fn init() -> Int { return 9 } }\nlet namedPoint = NamedPoint(3)\nlet pointSum = namedPoint.sum\nGC.collect()\nfn recordSize(value: Collections.Sized) -> Int { return value.length() }\nSystem.print(namedPoint.name(), pointSum(), namedPoint == NamedPoint(3), recordSize(namedPoint), Collections.len(namedPoint), namedPoint.init())\nrecord MutableInside { items: List[Int] = []; fn append(value: Int) -> Null { self.items.append(value) } }\nlet mutableInside = MutableInside()\nmutableInside.append(2)\nSystem.print(mutableInside.items)", "record-methods.k3");
     assert(output == "record 6 true 2 2 9\n[2]\n"); output.clear();
     for (const std::string &code : {"namedPoint.x = 4", "record WrongRecord implements Collections.Sized {}", "record RecordWrite { x: Int; fn write() -> Null { self.x = 1 } }\nRecordWrite(2).write()"}) {
         bool rejected = false; try { runtime.run(code, "record-method-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("trait DefaultNamed { fn name() -> String { \"\"\"Default method documentation.\"\"\"\nreturn 'default' } }\nclass Named implements DefaultNamed {}\nclass OverrideNamed implements DefaultNamed { fn name() -> String { return 'override' } }\nlet named = Named()\nlet defaultName = named.name\nSystem.gc()\nSystem.print(defaultName(), OverrideNamed().name(), Reflection.doc(defaultName))\ntrait CompositeDefault { fn read() -> Int; fn twice() -> Int { return self.read() * 2 } }\nclass DefaultReader implements CompositeDefault { fn read() -> Int { return 3 } }\nSystem.print(DefaultReader().twice())\ntrait OtherDefault { fn name() -> String { return 'other' } }\nclass ExplicitDefaults implements DefaultNamed, OtherDefault { fn name() -> String { return 'explicit' } }\nSystem.print(ExplicitDefaults().name())", "trait-defaults.k3");
+    runtime.run("trait DefaultNamed { fn name() -> String { \"\"\"Default method documentation.\"\"\"\nreturn 'default' } }\nclass Named implements DefaultNamed {}\nclass OverrideNamed implements DefaultNamed { fn name() -> String { return 'override' } }\nlet named = Named()\nlet defaultName = named.name\nGC.collect()\nSystem.print(defaultName(), OverrideNamed().name(), Reflection.doc(defaultName))\ntrait CompositeDefault { fn read() -> Int; fn twice() -> Int { return self.read() * 2 } }\nclass DefaultReader implements CompositeDefault { fn read() -> Int { return 3 } }\nSystem.print(DefaultReader().twice())\ntrait OtherDefault { fn name() -> String { return 'other' } }\nclass ExplicitDefaults implements DefaultNamed, OtherDefault { fn name() -> String { return 'explicit' } }\nSystem.print(ExplicitDefaults().name())", "trait-defaults.k3");
     assert(output == "default override Default method documentation.\n6\nexplicit\n"); output.clear();
     for (const std::string &code : {"class AmbiguousDefaults implements DefaultNamed, OtherDefault {}", "class DefaultFieldConflict implements DefaultNamed { let name: String = '' }", "trait BadDefaultYield { fn read() -> Int { yield 1 } }"}) {
         bool rejected = false; try { runtime.run(code, "default-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("var initializedCount = 0\nclass Initialized { var value: Int = 0; fn init() -> Null { System.gc(); self.value += 2; initializedCount += 1 } }\nlet initialized = Initialized(value: 3)\nSystem.print(initialized.value, initializedCount)\nclass FailedInitialization { var value: Int = 0; fn init() { defer System.print('init cleanup'); throw 'init failed' } }\ntry { FailedInitialization() } catch error { System.print(error) }", "initializers.k3");
+    runtime.run("var initializedCount = 0\nclass Initialized { var value: Int = 0; fn init() -> Null { GC.collect(); self.value += 2; initializedCount += 1 } }\nlet initialized = Initialized(value: 3)\nSystem.print(initialized.value, initializedCount)\nclass FailedInitialization { var value: Int = 0; fn init() { defer System.print('init cleanup'); throw 'init failed' } }\ntry { FailedInitialization() } catch error { System.print(error) }", "initializers.k3");
     assert(output == "5 1\ninit cleanup\ninit failed\n"); output.clear();
     for (const std::string &code : {"class BadInitYield { fn init() { yield 1 } }", "class BadInitType { fn init() -> Int { return 1 } }", "class BadInitReturn { fn init() { return 1 } }\nBadInitReturn()"}) {
         bool rejected = false; try { runtime.run(code, "initializer-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("from Collections import Sized\ntrait Measured { \"\"\"A nominal measurement.\"\"\"\nfn length() -> Int }\nclass Bag { let items: List[Int] = [] }\nimpl Measured for Bag { fn length() -> Int { return self.items.length() } }\nimpl Sized for Bag {}\nlet bag = Bag([1, 2])\nfn measure(value: Measured) -> Int { return value.length() }\nfn count(value: Sized) -> Int { return value.length() }\nSystem.gc()\nSystem.print(measure(bag), count(bag), Collections.len(bag), count([1]), count((1, 2)), count({'x': 1}), count('abc'), count(b'ab'))\nlet measured: List[Measured] = [bag]\nSystem.print(Reflection.doc(Measured), Reflection.members(Measured))", "traits.k3");
+    runtime.run("from Collections import Sized\ntrait Measured { \"\"\"A nominal measurement.\"\"\"\nfn length() -> Int }\nclass Bag { let items: List[Int] = [] }\nimpl Measured for Bag { fn length() -> Int { return self.items.length() } }\nimpl Sized for Bag {}\nlet bag = Bag([1, 2])\nfn measure(value: Measured) -> Int { return value.length() }\nfn count(value: Sized) -> Int { return value.length() }\nGC.collect()\nSystem.print(measure(bag), count(bag), Collections.len(bag), count([1]), count((1, 2)), count({'x': 1}), count('abc'), count(b'ab'))\nlet measured: List[Measured] = [bag]\nSystem.print(Reflection.doc(Measured), Reflection.members(Measured))", "traits.k3");
     assert(output == "2 2 2 1 2 1 3 2\nA nominal measurement. [length]\n"); output.clear();
-    runtime.run("class EmbeddedBag implements Sized, Measured { let items: List[Int] = []; fn length() -> Int { return self.items.length() }; fn asSized() -> Sized { return self } }\nlet embedded: Measured = EmbeddedBag([1, 2, 3])\nlet embeddedLength = embedded.length\nSystem.gc()\nSystem.print(measure(embedded), count(embedded), Collections.len(embedded), embeddedLength())\nlet embeddedItems: List[Sized] = [embedded]", "embedded-traits.k3");
+    runtime.run("class EmbeddedBag implements Sized, Measured { let items: List[Int] = []; fn length() -> Int { return self.items.length() }; fn asSized() -> Sized { return self } }\nlet embedded: Measured = EmbeddedBag([1, 2, 3])\nlet embeddedLength = embedded.length\nGC.collect()\nSystem.print(measure(embedded), count(embedded), Collections.len(embedded), embeddedLength())\nlet embeddedItems: List[Sized] = [embedded]", "embedded-traits.k3");
     assert(output == "3 3 3 3\n"); output.clear();
     runtime.run("from Collections import Sized as AlsoSized\nlet PreservedName = 9\ntrait SecondRequirement { fn other() -> Int }", "embedded-alias.k3");
     for (const std::string &code : {"class MissingEmbedded implements Sized {}", "class DuplicateEmbedded implements Sized, AlsoSized { fn length() -> Int { return 0 } }", "class UnknownEmbedded implements UnknownTrait {}", "class GeneratorEmbedded implements Sized { fn length() -> Int { yield 1 } }", "class PartialEmbedded implements Sized, SecondRequirement { fn length() -> Int { return 0 } }", "class PreservedName implements Sized { fn length() -> Int { return 1 } }", "impl Sized for EmbeddedBag {}"}) {
@@ -707,7 +707,7 @@ int main() {
         assert(rejected);
     }
     assert(runtime.inspectMembers(runtime.get("Incomplete")).empty());
-    runtime.run("impl Measured for Duck {}\nSystem.print(measure(Duck()))\nfn escapedTrait() { trait LocalTrait { fn read() -> Int }\nclass LocalValue {}\nimpl LocalTrait for LocalValue { fn read() -> Int { return 7 } }\nreturn LocalValue().read }\nlet traitCallback = escapedTrait()\nSystem.gc()\nSystem.print(traitCallback())", "trait-lifetimes.k3");
+    runtime.run("impl Measured for Duck {}\nSystem.print(measure(Duck()))\nfn escapedTrait() { trait LocalTrait { fn read() -> Int }\nclass LocalValue {}\nimpl LocalTrait for LocalValue { fn read() -> Int { return 7 } }\nreturn LocalValue().read }\nlet traitCallback = escapedTrait()\nGC.collect()\nSystem.print(traitCallback())", "trait-lifetimes.k3");
     assert(output == "1\n7\n"); output.clear();
     runtime.run("class Unmarked {}\nclass TraitHolder { var value: Measured }\nlet holder = TraitHolder(bag)\nholder.value = Duck()\nlet traitMap: Map[String, Measured] = {'bag': bag}\nvar TraitAlias = Measured\nvar pinnedTrait: TraitAlias? = bag\nTraitAlias = Sized\nclass GeneratorDuck { fn length() -> Int { yield 1 } }\ntrait Scaler { fn scale(value: Int) -> Int }\nclass BadScaler {}", "trait-contracts.k3");
     for (const std::string &code : {"impl Measured for GeneratorDuck {}", "impl Scaler for BadScaler { fn scale(other: Int) -> Int { return 1 } }"}) {
@@ -719,16 +719,16 @@ int main() {
         return "export trait Readable { fn read() -> Int }\nexport class Box implements Readable { fn read() -> Int { return 3 } }";
     };
     dk3::Runtime importedTraits(traitModules);
-    importedTraits.run("import first as first\nimport second as second\nfn accept(value: first.Readable) -> Int { return value.read() }\nlet result = accept(first.Box())\nSystem.gc()", "trait-modules.k3");
+    importedTraits.run("import first as first\nimport second as second\nfn accept(value: first.Readable) -> Int { return value.read() }\nlet result = accept(first.Box())\nGC.collect()", "trait-modules.k3");
     assert(std::get<int64_t>(importedTraits.get("result")) == 3);
-    runtime.run("class Counter { \"\"\"A mutable counter.\"\"\"\nvar value: Int = 0\nlet label: String = 'counter'\nfn add(amount: Int = 1) -> Int { \"\"\"Increment the counter.\"\"\"\nself.value += amount; return self.value }\nfn snapshot() -> Counter { return self }\nfn stream() { yield self.value; self.value += 1; yield self.value }\n}\nlet classCounter: Counter = Counter(value: 2)\nlet detached = classCounter.add\nSystem.gc()\nSystem.print(detached(amount: 3), classCounter.snapshot() == classCounter, classCounter == Counter(5))\nclassCounter.value = 8\nfor item in classCounter.stream() { System.print(item) }\nSystem.print(Reflection.doc(classCounter), Reflection.doc(detached))", "classes.k3");
+    runtime.run("class Counter { \"\"\"A mutable counter.\"\"\"\nvar value: Int = 0\nlet label: String = 'counter'\nfn add(amount: Int = 1) -> Int { \"\"\"Increment the counter.\"\"\"\nself.value += amount; return self.value }\nfn snapshot() -> Counter { return self }\nfn stream() { yield self.value; self.value += 1; yield self.value }\n}\nlet classCounter: Counter = Counter(value: 2)\nlet detached = classCounter.add\nGC.collect()\nSystem.print(detached(amount: 3), classCounter.snapshot() == classCounter, classCounter == Counter(5))\nclassCounter.value = 8\nfor item in classCounter.stream() { System.print(item) }\nSystem.print(Reflection.doc(classCounter), Reflection.doc(detached))", "classes.k3");
     assert(output == "5 true false\n8\n9\nA mutable counter. Increment the counter.\n"); output.clear();
     for (const std::string &code : {"classCounter.label = 'bad'", "classCounter.unknown = 1", "classCounter.add = 1", "Counter(1, value: 2)"}) {
         bool rejected = false; try { runtime.run(code, "class-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
     assert(std::get<int64_t>(runtime.getPath("classCounter.value")) == 9);
-    runtime.run("fn escapedMethod() { class Local { var value: Int = 1; fn add() -> Int { self.value += 1; return self.value } }\nreturn Local().add }\nlet escapedAdd = escapedMethod()\nSystem.gc()\nSystem.print(escapedAdd())", "escaped-method.k3");
+    runtime.run("fn escapedMethod() { class Local { var value: Int = 1; fn add() -> Int { self.value += 1; return self.value } }\nreturn Local().add }\nlet escapedAdd = escapedMethod()\nGC.collect()\nSystem.print(escapedAdd())", "escaped-method.k3");
     assert(output == "2\n"); output.clear();
     size_t classHeap = runtime.liveObjects();
     for (int iteration = 0; iteration < 12; iteration++)
@@ -757,7 +757,7 @@ int main() {
     runtime.run("from System import print\nprint('explicit alias')", "explicit-import.k3");
     assert(output == "explicit alias\n"); output.clear();
     runtime.registerNative("host.add", [](const auto &, const dk3::Span &) -> dk3::Value { return int64_t{9}; });
-    runtime.run("let reflected = host.add()\nSystem.print(Reflection.binding('reflected'))\nSystem.gc()", "core-api.k3");
+    runtime.run("let reflected = host.add()\nSystem.print(Reflection.binding('reflected'))\nGC.collect()", "core-api.k3");
     assert(output == "9\n"); output.clear();
     runtime.run("let xs = [1] + [2, 3]\nxs.append(4)\nSystem.print(xs)\nSystem.print(xs[::-1])\nSystem.print(xs[-100:2])\nSystem.print(9007199254740993)\nSystem.print(-7 // 3)\nSystem.print(-7 % 3)\n", "core.k3");
     assert(output == "[1, 2, 3, 4]\n[4, 3, 2, 1]\n[1, 2]\n9007199254740993\n-3\n2\n");
@@ -772,7 +772,7 @@ int main() {
     runtime.run("record Vec2 { x: Float, y: Float }\nenum Event { Move(Vec2), Quit }\nlet event = Event.Move(Vec2(1.0, 2.0))\nSystem.print(match event { Event.Move(point) => point.x, Event.Quit => null })\n", "data.k3");
     assert(output == "1\n");
     output.clear();
-    runtime.run("record Profile { name: String, labels: List[String] = [] }\nrecord Point { x: Int, y: Int = x + 1 }\nenum Lookup { Found(Profile), Missing }\nlet firstProfile = Profile(name: 'Ada')\nlet secondProfile = Profile('Grace')\nfirstProfile.labels.append('active')\nSystem.gc()\nSystem.print(Collections.len(firstProfile.labels), Collections.len(secondProfile.labels))\nlet point = Point(x: 3)\nSystem.print(point.y, point == Point(3, y: 4))\nlet lookup = Lookup.Found(firstProfile)\nSystem.print(match lookup { Lookup.Found(profile) => profile.name, Lookup.Missing => 'none' })", "record-contracts.k3");
+    runtime.run("record Profile { name: String, labels: List[String] = [] }\nrecord Point { x: Int, y: Int = x + 1 }\nenum Lookup { Found(Profile), Missing }\nlet firstProfile = Profile(name: 'Ada')\nlet secondProfile = Profile('Grace')\nfirstProfile.labels.append('active')\nGC.collect()\nSystem.print(Collections.len(firstProfile.labels), Collections.len(secondProfile.labels))\nlet point = Point(x: 3)\nSystem.print(point.y, point == Point(3, y: 4))\nlet lookup = Lookup.Found(firstProfile)\nSystem.print(match lookup { Lookup.Found(profile) => profile.name, Lookup.Missing => 'none' })", "record-contracts.k3");
     assert(output == "1 0\n4 true\nAda\n");
     for (const std::string &source : {"firstProfile.name = 'changed'", "Profile()", "Profile(name: 'A', unknown: 2)", "Lookup.Found()"}) {
         bool rejected = false;
@@ -786,7 +786,7 @@ int main() {
     runtime.run("fn cleanup() { defer System.print('closed')\nreturn 9 }\nSystem.print(cleanup())\ntry { throw 'problem' } catch error { System.print(error) } finally { System.print('finally') }\n", "errors.k3");
     assert(output == "closed\n9\nproblem\nfinally\n");
     output.clear();
-    runtime.run("fn capture() { class Box { var count: Int = 0 }\nlet box = Box()\nreturn fn() { box.count += 1\nreturn box.count } }\nlet counter = capture()\nSystem.gc()\nSystem.print(counter())\nSystem.print(counter())\n", "closures.k3");
+    runtime.run("fn capture() { class Box { var count: Int = 0 }\nlet box = Box()\nreturn fn() { box.count += 1\nreturn box.count } }\nlet counter = capture()\nGC.collect()\nSystem.print(counter())\nSystem.print(counter())\n", "closures.k3");
     assert(output == "1\n2\n");
     output.clear();
     runtime.run("fn defaults(values = []) { values.append(1)\nreturn Collections.len(values) }\nSystem.print(defaults())\nSystem.print(defaults())\n", "defaults.k3");
@@ -821,18 +821,18 @@ int main() {
     typedModules.run("import model as model\nimport other as other\nlet imported: model.Point = model.Point(3)\nfn identity(value: model.Point) -> model.Point { return value }\nSystem.print(identity(imported).x)", "qualified-types.k3");
     assert(output == "3\n");
     output.clear();
-    typedModules.run("let importedBox: model.Box = model.Box(3)\nfn sameBox(value: model.Box) -> model.Box { return value }\nSystem.gc()\nSystem.print(sameBox(importedBox).set(7))", "qualified-classes.k3");
+    typedModules.run("let importedBox: model.Box = model.Box(3)\nfn sameBox(value: model.Box) -> model.Box { return value }\nGC.collect()\nSystem.print(sameBox(importedBox).set(7))", "qualified-classes.k3");
     assert(output == "7\n");
     output.clear();
-    typedModules.run("let event: model.Event = model.Event.Move(imported)\nSystem.print(match event { model.Event.Move(point) => point.x, model.Event.Quit => 0 })\nlet optional: model.Point? = null\nvar points: List[model.Point] = [imported]\npoints.append(model.Point(4))\nSystem.gc()\nSystem.print(points[1].x)", "qualified-enums.k3");
+    typedModules.run("let event: model.Event = model.Event.Move(imported)\nSystem.print(match event { model.Event.Move(point) => point.x, model.Event.Quit => 0 })\nlet optional: model.Point? = null\nvar points: List[model.Point] = [imported]\npoints.append(model.Point(4))\nGC.collect()\nSystem.print(points[1].x)", "qualified-enums.k3");
     assert(output == "3\n4\n");
     for (const std::string &source : {"let invalid: model.Event = other.Event.Quit()"}) {
         bool rejected = false;
         try { typedModules.run(source, "invalid-qualified.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    typedModules.run("var Alias = model.Point\nvar pinned: Alias? = null\nAlias = other.Point\npinned = imported\nSystem.gc()\nlet aliasedList: List[model.Point] = points", "pinned-types.k3");
-    runtime.run("fn escapedContract() { record PrivateShape { x: Int }\nlet values: List[PrivateShape?] = [null]\nreturn values }\nlet privateValues = escapedContract()\nSystem.gc()", "escaped-contract.k3");
+    typedModules.run("var Alias = model.Point\nvar pinned: Alias? = null\nAlias = other.Point\npinned = imported\nGC.collect()\nlet aliasedList: List[model.Point] = points", "pinned-types.k3");
+    runtime.run("fn escapedContract() { record PrivateShape { x: Int }\nlet values: List[PrivateShape?] = [null]\nreturn values }\nlet privateValues = escapedContract()\nGC.collect()", "escaped-contract.k3");
     runtime.run("privateValues.append(null)", "nullable-elements.k3");
     output.clear();
     runtime.run("var order = ''\nfn bound(label: String, value: Int) { order += label\nreturn value }\nlet ordered = xs[bound('A', 0):bound('B', 2):bound('C', 1)]\nSystem.print(order)\n", "order.k3");
@@ -846,14 +846,14 @@ int main() {
         try { runtime.run(source, "invalid-map.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    runtime.run("let looseList = []\nlet looseMap = {'first': looseList, 'bad': 'wrong'}\ntry { let annotated: Map[String, List[Int]] = looseMap } catch error {}\nlooseList.append('still untyped')\nlet looseOuter = [[], 'bad']\ntry { let annotated: List[List[Int]] = looseOuter } catch error {}\nlooseOuter[0].append('not partially pinned')\nSystem.gc()", "atomic-contracts.k3");
+    runtime.run("let looseList = []\nlet looseMap = {'first': looseList, 'bad': 'wrong'}\ntry { let annotated: Map[String, List[Int]] = looseMap } catch error {}\nlooseList.append('still untyped')\nlet looseOuter = [[], 'bad']\ntry { let annotated: List[List[Int]] = looseOuter } catch error {}\nlooseOuter[0].append('not partially pinned')\nGC.collect()", "atomic-contracts.k3");
     output.clear();
-    typedModules.run("let mapOfPoints: Map[String, model.Point?] = {'origin': imported, 'empty': null}\nmapOfPoints['other'] = model.Point(8)\nSystem.gc()\nSystem.print(mapOfPoints['other'].x)", "nominal-map.k3");
+    typedModules.run("let mapOfPoints: Map[String, model.Point?] = {'origin': imported, 'empty': null}\nmapOfPoints['other'] = model.Point(8)\nGC.collect()\nSystem.print(mapOfPoints['other'].x)", "nominal-map.k3");
     assert(output == "8\n");
-    runtime.run("fn privateMap() { record Hidden {}\nlet values: Map[String, Hidden?] = {'none': null}\nreturn values }\nlet hiddenMap = privateMap()\nSystem.gc()", "map-contract-gc.k3");
+    runtime.run("fn privateMap() { record Hidden {}\nlet values: Map[String, Hidden?] = {'none': null}\nreturn values }\nlet hiddenMap = privateMap()\nGC.collect()", "map-contract-gc.k3");
     dk3::Span span{std::make_shared<dk3::Source>(dk3::Source{"host", ""}), 0, 0, 1, 1};
     size_t handle = runtime.retain(runtime.text("persistent", false, span));
-    runtime.run("System.gc()", "handles.k3");
+    runtime.run("GC.collect()", "handles.k3");
     assert(dk3::Runtime::display(runtime.retained(handle)) == "persistent");
     runtime.release(handle);
     runtime.collect();

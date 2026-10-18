@@ -31,3 +31,14 @@ replay_pid*
 *.out
 *.so
 dotk.out
+
+# Build, test and benchmark artifacts
+build/
+**/build/
+*.o
+*.d
+*.a
+*.dylib
+*.dSYM/
+benchmarks/bin/
+benchmarks/results/

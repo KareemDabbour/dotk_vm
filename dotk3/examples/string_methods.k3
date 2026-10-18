@@ -9,10 +9,10 @@ print("|".join(parts))
 
 fn labels() {
     yield "first"
-    System.gc()
+    GC.collect()
     yield "second"
 }
 let join = " / ".join
-System.gc()
+GC.collect()
 print(join(labels()))
 print(Reflection.members(text))

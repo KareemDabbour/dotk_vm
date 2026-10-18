@@ -149,7 +149,7 @@ m["c"] = 3
 
 ### Slices and Indexing
 
-DotK supports negative indexing and Python-like slice ranges on indexable types:
+DotK supports negative indexing and slice ranges on indexable types:
 
 ```js
 var xs = {10, 20, 30, 40, 50}
@@ -170,6 +170,12 @@ print(xs[:@2])               # every 2nd element: 0,2,4
 print(xs[1:@2])              # start at index 1, step 2: 1,3,5
 print(xs[:@-1])              # reverse traversal
 ```
+
+Slice endpoints use DotK's existing boundary convention: a negative endpoint
+is normalized as `length + endpoint + 1`, so `-1` denotes the end boundary.
+Endpoints are clamped to the sequence bounds. A negative step traverses the
+selected interval backwards. Zero steps and nonfinite or out-of-range slice
+components raise runtime errors.
 
 You can also build a reusable slice spec and apply it later:
 
@@ -781,6 +787,196 @@ Native module API entrypoint:
 - legacy fallback: `void init(DefineNativeFn, DefineNativeClassFn)`
 
 Reference: [src/include/native_api.h](src/include/native_api.h).
+
+Interning does not keep a string alive. Native code must retain any object-valued
+temporary across allocations using `api->pushValue(value)` and release that root
+with `api->popValue()` after publishing it into a reachable object. Keep the
+container rooted while building its fields, and initialize pointers and counts
+before an allocation can trigger GC. Do not construct an allocating field key
+and value in the same C call expression: argument evaluation order is unspecified.
+Returned values must be rooted before the caller performs another allocation.
+
+## Embedding API
+
+Runnable examples for each update are in
+[examples/updates/README.md](examples/updates/README.md). Run `make examples`
+for the C demos and `./dotk.out --test examples/updates/collections_gc.k` for
+the collection/GC examples.
+
+The public C/C++ interface is [src/include/dotk.h](src/include/dotk.h). It does
+not expose VM object layouts or require the CLI entrypoint. Build it with:
+
+```bash
+make library
+make shared-library
+make test-embedding
+make MODE=stress test-embedding
+make bench-embedding
+```
+
+Artifacts are `out/<mode>/libdotk.a` and either `libdotk.dylib` on macOS or
+`libdotk.so` on Linux. Link static hosts with the system libraries listed in
+the Makefile. Shared builds export only the public `dotk*` entrypoints.
+[tests/embedding/host.c](tests/embedding/host.c) is a complete host example and
+regression fixture, compiled as both C and C++ by `make test-embedding`.
+
+```c
+#include "dotk.h"
+#include <stdio.h>
+
+static void output(void *userdata, const char *bytes, size_t length)
+{
+		fwrite(bytes, 1, length, (FILE *)userdata);
+}
+
+int main(void)
+{
+		DotKConfig config;
+		dotkConfigInit(&config);
+		config.userdata = stdout;
+		config.write = output;
+		DotKVM *context = dotkCreate(&config);
+		if (!context)
+				return 1;
+		DotKStatus status = dotkEval(context, "print(42)", "example.k");
+		if (status != DOTK_OK)
+				fprintf(stderr, "%s\n", dotkGetDiagnostic(context)->message);
+		dotkDestroy(context);
+		return status == DOTK_OK ? 0 : 1;
+}
+```
+
+### Host Contracts
+
+- Initialize configurations with `dotkConfigInit`; size and API version are
+	checked. Null configuration selects silent default output and diagnostics.
+- Multiple live VMs have independent heaps, globals, import caches, compiler and
+	scanner state, task queues, random generators, and profiling counters. Each VM
+	is bound to its creating thread. Host API entry is currently serialized across
+	VMs; concurrent or callback-reentrant entry returns `DOTK_BUSY`, rather than
+	running VMs in parallel. Handles cannot cross VM ownership boundaries. Do not
+	mix a live host VM with the legacy global CLI API.
+- `dotkEval` owns a copy of source text and its filename. These remain valid
+	until destruction so closures and diagnostics never borrow the host's input
+	buffers. Repeated evaluation retains those copies; prefer `dotkCompile` and
+	`dotkCall` for reusable programs rather than evaluating each frame.
+- `dotkMakeNumber`, `dotkMakeString`, `dotkGetGlobal`, `dotkCompile`, and
+	`dotkCall` return persistent, GC-rooted handles. Release them with
+	`dotkRelease` before destroying their owner. Handles and borrowed string bytes
+	are invalid after release/destruction; using a stale handle is unsupported.
+	String lengths are explicit and may include embedded NUL bytes.
+- `dotkCall` supports normal callable values and positional arguments. It does
+	not provide a host keyword-argument interface yet. `dotkSetGlobal` respects
+	constant globals. Errors return structured status, message, source position,
+	and an innermost-frame trace; diagnostic buffers remain owned by the VM and
+	are replaced by the next compile/evaluate/call operation.
+- Host creation installs no signal handlers, starts no workers, ignores CLI
+	profiler environment settings, and does not print unsolicited diagnostics.
+	Output and errors use the configured callbacks; callbacks must not unwind
+	through C frames or reenter the same VM.
+- Host mode exposes pure core/collection operations, but no filesystem,
+	sockets, SQL, process-control, dynamic-native-loading, or thread entrypoints.
+	`exit()` returns a runtime error. Imports require `resolve_module`, which
+	returns borrowed NUL-terminated source that is copied immediately. Cached
+	modules are reused. Explicit host native registration is a trusted capability;
+	legacy extension ABI v2 remains available for the CLI (rebuild native modules
+	after internal header changes).
+- The default per-evaluation/call/pump bytecode budget is one million dispatches.
+	Zero disables it. The interruption callback is checked periodically. These
+	do not preempt compilation, host callbacks, or a long native function; this
+	in-process runtime is **not a hostile-code sandbox**. Use process isolation
+	for untrusted plugins.
+- The default managed-heap limit is 64 MiB; zero disables it. This covers VM
+	allocation accounting, not all process memory, compiler scratch space,
+	retained host-source copies, or the C stack. A custom reallocator must obey
+	realloc semantics and free on `new_size == 0`; allocation sizes are supplied.
+	Native raw string buffers are copied into managed storage when necessary.
+- Managed allocation failure returns `DOTK_OUT_OF_MEMORY` and poisons the VM;
+	subsequent work returns `DOTK_POISONED`. Destroy and recreate it. Teardown
+	also reclaims buffers allocated before a failed object publication. Runtime
+	or compile errors and execution limits otherwise permit subsequent calls.
+
+### Contextual Native Calls
+
+Use `dotkDefineNative(context, name, function, userdata)` to register a trusted
+callback. It receives a scoped `DotKNativeCall`, not internal `Value`/`Obj`
+layouts. Use `dotkNativeContext`, `dotkNativeArgumentCount`, and the typed
+argument getters; return through `dotkNativeReturnNumber`,
+`dotkNativeReturnString`, or `dotkNativeReturnHandle`. Strings and returned
+values remain rooted across callback allocations. `dotkNativeError` becomes a
+normal script runtime error. Ordinary host API entry from a callback remains
+disallowed; the scoped native-call helpers are the supported callback interface.
+
+`dotkLoadNativeModule` accepts an in-process initializer and supplies
+`DotKContextNativeApi`, with size/version negotiation and the owning context.
+This contextual interface is version 3, separate from the unchanged legacy
+`DotKNativeApi` version 2. The initializer may register through
+`api->define_native`; it must copy any API functions it retains, not retain the
+temporary API-table pointer. Callback userdata must outlive its VM bindings.
+The host remains responsible for loading/unloading code; the VM does not perform
+filesystem-based native loading in host mode.
+
+### Cooperative Frame Pump
+
+`dotkSchedule` accepts a script closure and its exact positional arity, returning
+a VM-owned `DotKTask`. Generator functions with explicit `yield` are the intended
+frame integration path; normal functions complete on their first resume. Async
+worker functions are not accepted. For example, a script can define:
+
+```js
+fn frameWork() {
+    yield 10
+    yield 20
+}
+```
+
+Get its handle with `dotkGetGlobal`, schedule it, then call
+`dotkPump(context, maximum_resumes, &resumed)` once per frame. Ready tasks resume
+round-robin until they yield, finish, fail, or exhaust the pump's bytecode budget.
+The return count includes a resume that detects completion/error. Inspect
+`dotkGetTaskState` and retrieve the latest yielded value using
+`dotkGetTaskValue`; completion yields null rather than a final function-return
+value. Pumping stops at the first task error, preserving the other tasks for a
+later call. Cancellation is observed between resumes; `dotkReleaseTask` removes
+the task and releases its suspended state. Task handles expire on release or VM
+destruction.
+
+Pumping starts no workers and performs no waits. `maximum_resumes` is not a
+wall-clock deadline or bytecode timeslice. Code must yield explicitly; the
+configured instruction limit bounds a non-yielding script, but cannot preempt a
+long native callback. These limits do not turn the runtime into a security
+sandbox.
+
+### Measured Runtime Work
+
+Initialize `DotKProfileStats.size` and call `dotkGetProfileStats` for per-VM
+dispatch, collection, managed-allocation lookup, host-native-call, task-resume,
+and current managed-heap counters. Counts are cumulative over the VM lifetime;
+`native_calls` counts registered host callbacks, not every built-in native.
+
+`make bench-embedding` retains 2,000 strings while comparing 5,000 evaluations
+with compile-once calls of a native string-replacement workload. Profiling found
+about 40.8 million allocation-registry probes, so the registry now uses a per-VM
+pointer hash index. On the development machine, three release runs reduced probes
+to about 20-39 thousand and evaluation time from 69-75 ms to 12-14 ms. This is a
+workload-specific result, not a general dispatch or interpreter speedup claim.
+Existing dispatch, inline caches, and optimizer passes are otherwise retained;
+future changes should follow measured bottlenecks.
+
+### Remaining Roadmap
+
+Isolated VMs, contextual native registration, cooperative pumping, compile-once
+execution, and allocation profiling/optimization are implemented. Remaining
+milestones are:
+
+- Parallel/reentrant host execution and richer task wait/send/default-argument
+	interfaces, if application requirements justify them.
+- Further profile-driven dispatch/cache/optimizer improvements where the counters
+	and representative workloads show a bottleneck.
+- Source-span diagnostics, completion, formatting, and optional strict-global
+	warnings without breaking existing programs.
+- Shared opcode metadata and incremental compiler decomposition to make language
+	additions easier to test. An AST or bytecode cache needs a separate design.
 
 ## Benchmarks
 

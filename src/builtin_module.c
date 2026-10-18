@@ -1,4 +1,5 @@
 #include "include/builtin_module.h"
+#include "include/vm.h"
 
 #include <string.h>
 
@@ -8,7 +9,6 @@ typedef struct
 {
     const char *name;
     BuiltinModuleInitFn initFn;
-    bool loaded;
 } BuiltinModuleEntry;
 
 static BuiltinModuleEntry modules[BUILTIN_MODULE_MAX];
@@ -48,7 +48,7 @@ void registerBuiltinModule(const char *name, BuiltinModuleInitFn initFn)
 
     modules[moduleCount].name = name;
     modules[moduleCount].initFn = initFn;
-    modules[moduleCount].loaded = false;
+    vm.builtinModulesLoaded[moduleCount] = false;
     moduleCount++;
 }
 
@@ -61,7 +61,7 @@ void initBuiltinModules()
     }
 
     for (int i = 0; i < moduleCount; i++)
-        modules[i].loaded = false;
+        vm.builtinModulesLoaded[i] = false;
 }
 
 bool importBuiltinModule(ObjString *requestedName)
@@ -76,10 +76,10 @@ bool importBuiltinModule(ObjString *requestedName)
     {
         if ((int)strlen(modules[i].name) == nameLen && strncmp(modules[i].name, name, nameLen) == 0)
         {
-            if (!modules[i].loaded)
+            if (!vm.builtinModulesLoaded[i])
             {
                 modules[i].initFn();
-                modules[i].loaded = true;
+                vm.builtinModulesLoaded[i] = true;
             }
             return true;
         }
@@ -92,10 +92,10 @@ bool importBuiltinModule(ObjString *requestedName)
         {
             if ((int)strlen(modules[i].name) == trimmedLen && strncmp(modules[i].name, name, trimmedLen) == 0)
             {
-                if (!modules[i].loaded)
+                if (!vm.builtinModulesLoaded[i])
                 {
                     modules[i].initFn();
-                    modules[i].loaded = true;
+                    vm.builtinModulesLoaded[i] = true;
                 }
                 return true;
             }

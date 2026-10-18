@@ -1,0 +1,26 @@
+export class Optional<T> {
+    private var value: T? = null;
+
+    fn is_some() -> Bool {
+        return self.value != null
+    }
+
+    fn is_none() -> Bool {
+        return self.value == null
+    }
+
+    fn unwrap() -> T {
+        if self.value == null { throw Error(Error.Kind.Value, "Called unwrap on a None value") }
+        return self.value!
+    }
+
+    fn unwrap_or(default: T) -> T {
+        if self.value == null { return default }
+        return self.value!
+    }
+
+    fn expect(msg: String) -> T {
+        if self.value == null { throw Error(Error.Kind.Value, msg) }
+        return self.value!
+    }
+}

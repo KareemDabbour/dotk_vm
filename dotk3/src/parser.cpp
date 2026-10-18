@@ -502,8 +502,13 @@ class Parser {
             result = node("match", token.span); result->children.push_back(expression()); consume("{"); separators();
             while (!at("}")) {
                 Ast arm = node("arm", peek().span, name().text);
-                while (take(".")) arm->text += '.' + name().text;
-                if (take("(")) { if (!at(")")) do { arm->names.push_back(name().text); } while (take(",")); consume(")"); }
+                if (take(":")) {  // type pattern: `value: Int => ...`; the whole subject is bound when the name is not `_`
+                    arm->type = typeName(&arm->typeExpr);
+                    if (arm->text != "_") arm->names.push_back(arm->text);
+                } else {
+                    while (take(".")) arm->text += '.' + name().text;
+                    if (take("(")) { if (!at(")")) do { arm->names.push_back(name().text); } while (take(",")); consume(")"); }
+                }
                 consume("=>"); arm->children.push_back(expression()); result->children.push_back(arm);
                 if (!take(",") && !at("}") && peek().kind != TokenKind::Newline) throw Error(peek().span, "Expected match arm separator");
                 separators();

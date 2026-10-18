@@ -25,7 +25,7 @@ struct ByteInstruction {
 struct ByteLocal { std::string name, type; bool mutableBinding = false; };
 struct Bytecode;
 struct ByteClosure { Ast node; std::shared_ptr<const Bytecode> code; std::vector<size_t> slots; };
-struct ByteMatchArm { std::string pattern; std::vector<std::string> bindings; Span span; std::shared_ptr<const Bytecode> code; };
+struct ByteMatchArm { std::string pattern; std::vector<std::string> bindings; Span span; std::shared_ptr<const Bytecode> code; std::string type = {}; };
 struct ByteMatch { std::vector<ByteMatchArm> arms; };
 struct Bytecode {
     std::vector<ByteInstruction> instructions;

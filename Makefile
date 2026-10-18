@@ -9,6 +9,16 @@ sources_dir = src
 out_dir = out/$(MODE)
 sources = $(wildcard $(sources_dir)/*.c)
 objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/%.o, $(sources))
+library_sources = $(filter-out $(sources_dir)/main.c,$(sources))
+library_objects = $(patsubst $(sources_dir)/%.c,$(out_dir)/library/%.o,$(library_sources))
+library_exec = $(out_dir)/libdotk.a
+ifeq ($(shell uname -s),Darwin)
+shared_library_exec = $(out_dir)/libdotk.dylib
+shared_library_flags = -dynamiclib
+else
+shared_library_exec = $(out_dir)/libdotk.so
+shared_library_flags = -shared
+endif
 
 MODE ?= release
 
@@ -23,26 +33,68 @@ LDFLAGS_PGO_GEN = -fprofile-generate
 CFLAGS_PGO_USE = -fprofile-use -fprofile-correction
 LDFLAGS_PGO_USE = -fprofile-use -fprofile-correction
 
-CFLAGS_DEBUG = -O0 -g3 -fno-omit-frame-pointer -fsanitize=address
-LDFLAGS_DEBUG = -fsanitize=address -static-libasan
+CFLAGS_DEBUG = -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined
+LDFLAGS_DEBUG = -fsanitize=address,undefined
+CFLAGS_STRESS = -O0 -g3 -fno-omit-frame-pointer -DDEBUG_STRESS_GC=1 -fsanitize=undefined -fno-sanitize-recover=all
+LDFLAGS_STRESS = -fsanitize=undefined
 CFLAGS_LEGACY = -O3
 LDFLAGS_LEGACY =
 
 ifeq ($(MODE),debug)
 	CFLAGS = $(CFLAGS_COMMON) $(CFLAGS_DEBUG)
 	LDFLAGS = $(LDFLAGS_COMMON) $(LDFLAGS_DEBUG)
+else ifeq ($(MODE),stress)
+	CFLAGS = $(CFLAGS_COMMON) $(CFLAGS_STRESS)
+	LDFLAGS = $(LDFLAGS_COMMON) $(LDFLAGS_STRESS)
 else
 	CFLAGS = $(CFLAGS_COMMON) $(CFLAGS_RELEASE)
 	LDFLAGS = $(LDFLAGS_COMMON) $(LDFLAGS_RELEASE)
 endif
 
+.PHONY: all dir release debug stress library shared-library test-embedding bench-embedding examples test test-fast test-stress FORCE
+
 all: dir $(exec)
+
+library: $(library_exec)
+
+shared-library: $(shared_library_exec)
+
+$(shared_library_exec): $(library_objects)
+	$(CC) $(shared_library_flags) $(library_objects) $(LDFLAGS) -o $@
+
+test-embedding: $(library_exec)
+	$(CC) $(CFLAGS) -UNDEBUG -std=c11 -Wall -Wextra -I src/include tests/embedding/host.c $(library_exec) $(LDFLAGS) -o $(out_dir)/embedding-host
+	$(out_dir)/embedding-host
+	$(CXX) $(CFLAGS) -UNDEBUG -x c++ -std=c++17 -Wall -Wextra -I src/include -c tests/embedding/host.c -o $(out_dir)/embedding-host-cpp.o
+	$(CXX) $(out_dir)/embedding-host-cpp.o $(library_exec) $(LDFLAGS) -o $(out_dir)/embedding-host-cpp
+	$(out_dir)/embedding-host-cpp
+
+bench-embedding: $(library_exec)
+	$(CC) $(CFLAGS) -std=c11 -I src/include benchmarks/embedding_calls.c $(library_exec) $(LDFLAGS) -o $(out_dir)/embedding-bench
+	$(out_dir)/embedding-bench
+
+examples: $(library_exec)
+	$(CC) $(CFLAGS) -std=c11 -Wall -Wextra -I src/include examples/updates/host_demo.c $(library_exec) $(LDFLAGS) -o $(out_dir)/updates-demo
+	$(out_dir)/updates-demo all
+
+$(library_exec): $(library_objects)
+	$(AR) rcs $@ $(library_objects)
+
+$(library_objects): $(out_dir)/library/%.o : $(sources_dir)/%.c Makefile
+	mkdir -p $(dir $@)
+	$(CC) -MMD -MP -fPIC -fvisibility=hidden -c $(CFLAGS) $< -o $@
 
 release:
 	$(MAKE) MODE=release all
 
 debug:
 	$(MAKE) MODE=debug all
+
+stress:
+	$(MAKE) MODE=stress all
+
+test-stress: stress
+	./$(exec) --test-all tests
 
 pgo-gen: clean dir
 	$(MAKE) MODE=release CFLAGS="$(CFLAGS_COMMON) $(CFLAGS_RELEASE) $(CFLAGS_PGO_GEN)" LDFLAGS="$(LDFLAGS_COMMON) $(LDFLAGS_RELEASE) $(LDFLAGS_PGO_GEN)" all
@@ -55,11 +107,16 @@ pgo-train: pgo-gen
 	python3 tools/bench_compare.py ./$(exec) ./$(exec) $(workloads_file) 1 > /dev/null
 	$(MAKE) pgo-use
 
-$(exec): $(objects)
-	$(CC) $^ $(LDFLAGS) -o $@
+$(exec): $(objects) FORCE
+	$(CC) $(objects) $(LDFLAGS) -o $@
 
-$(objects): $(out_dir)/%.o : $(sources_dir)/%.c
-	$(CC) -c $(CFLAGS) $< -o $@
+FORCE:
+
+$(objects): $(out_dir)/%.o : $(sources_dir)/%.c | dir
+	$(CC) -MMD -MP -c $(CFLAGS) $< -o $@
+
+-include $(objects:.o=.d)
+-include $(library_objects:.o=.d)
 
 rebuild:
 	make clean

@@ -160,7 +160,7 @@ class Compiler {
             for (size_t index = 1; index < node->children.size(); index++) {
                 const auto &arm = node->children[index]; auto compiled = compileExpression(arm->children[0], code.optimization);
                 if (!compiled) { valid = false; return; }
-                match.arms.push_back({arm->text, arm->names, arm->span, std::move(compiled)});
+                match.arms.push_back({arm->text, arm->names, arm->span, std::move(compiled), arm->type});
             }
             size_t index = code.matches.size(); code.matches.push_back(std::move(match)); emit(ByteOp::Match, node, index);
         } else if (node->kind == "assignment") {

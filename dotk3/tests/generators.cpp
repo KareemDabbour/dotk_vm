@@ -52,7 +52,7 @@ int main() {
     assert(runtime.resume(generator, item, cursor) && std::get<int64_t>(item) == 2);
     runtime.collect(); assert(!runtime.resume(generator, item, cursor)); assert(output == "final\nouter\n");
     output.clear();
-    runtime.run("fn pending() { try { yield 1\nthrow ['pending'] } catch error { throw error } finally { yield 2\nSystem.gc() } }\nlet pendingGenerator = pending()", "pending-error.k3");
+    runtime.run("fn pending() { try { yield 1\nthrow ['pending'] } catch error { throw error } finally { yield 2\nGC.collect() } }\nlet pendingGenerator = pending()", "pending-error.k3");
     generator = runtime.get("pendingGenerator"); cursor = 0;
     assert(runtime.resume(generator, item, cursor)); assert(runtime.resume(generator, item, cursor)); runtime.collect();
     failed = false;
@@ -101,7 +101,7 @@ int main() {
     generator = runtime.get("selfGenerator"); cursor = 0; assert(runtime.resume(generator, item, cursor)); failed = false;
     try { runtime.resume(generator, item, cursor); } catch (const dk3::Error &error) { failed = error.category == "state"; }
     assert(failed && output == "cleanup\n" && !runtime.resume(generator, item, cursor)); output.clear();
-    runtime.run("fn throwingClose() { defer fn() { throw ['close-error'] }()\nyield 1 }\nlet throwingResource = throwingClose()\nfor value in throwingResource { break }\ntry { Tasks.close(throwingResource) } catch error { System.gc()\nSystem.print(error[0]) }", "close-payload.k3");
+    runtime.run("fn throwingClose() { defer fn() { throw ['close-error'] }()\nyield 1 }\nlet throwingResource = throwingClose()\nfor value in throwingResource { break }\ntry { Tasks.close(throwingResource) } catch error { GC.collect()\nSystem.print(error[0]) }", "close-payload.k3");
     assert(output == "close-error\n"); output.clear();
     dk3::Config limitedConfig; limitedConfig.stepLimit = 80;
     limitedConfig.write = [&](const std::string &text) { output += text; };

@@ -18,7 +18,7 @@ try { [1][10] } catch error {
 }
 
 IO.write("IO without an implicit newline: ")
-print(f"clock={System.monotonicMillis()}")
+print(f"clock={Time.monotonicMillis()}")
 if System.args.length() > 0 {
     IO.write("Name: ")
     let name: String? = IO.readLine()

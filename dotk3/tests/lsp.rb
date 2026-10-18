@@ -2,6 +2,7 @@ require 'json'
 require 'open3'
 require 'timeout'
 require 'tmpdir'
+require 'fileutils'
 
 def send_message(writer, message)
   body = JSON.generate(message)
@@ -172,7 +173,7 @@ Timeout.timeout(15) do
     raise 'LSP executed conversion hook' unless receive_message(reader).dig('params', 'diagnostics') == []
     foundationUri = 'untitled:Foundations'
     foundationCases = [["Error.Kind.", errorKinds = ['Access', 'Application', 'Call', 'Cancelled', 'Capability', 'IO', 'Index', 'Internal', 'Json', 'Key', 'Limit', 'Match', 'Name', 'Native', 'Overflow', 'State', 'Syntax', 'Thrown', 'Type', 'Value']],
-      ["IO.", ['Files', 'Http', 'Sockets', 'Terminal', 'readLine', 'write']], ["IO.Files.", ['exists', 'readBytes', 'readText', 'size']],
+      ["IO.", ['Files', 'Http', 'Sockets', 'Terminal', 'readLine', 'write']], ["IO.Files.", ['append', 'close', 'exists', 'flush', 'isDirectory', 'list', 'mkdir', 'open', 'read', 'readBytes', 'readLine', 'readText', 'remove', 'rename', 'seek', 'size', 'tell', 'write', 'writeText']],
       ["Sockets.", ['accept', 'close', 'connect', 'listen', 'port', 'receive', 'send']],
       ["IO.Sockets.", ['accept', 'close', 'connect', 'listen', 'port', 'receive', 'send']],
       ["import Http as Web\nWeb.", ['readRequest', 'readResponse', 'writeRequest', 'writeResponse']],
@@ -232,12 +233,12 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 3 }, contentChanges: [{ text: 'Reflection.' }] } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'core', method: 'textDocument/completion', params: { textDocument: { uri: memberUri }, position: { line: 0, character: 11 } } })
-    raise 'Core namespace completion missing' unless receive_message(reader)['result'].map { |item| item['label'] }.sort == ['binding', 'bindings', 'doc', 'members', 'type']
+    raise 'Core namespace completion missing' unless receive_message(reader)['result'].map { |item| item['label'] }.sort == ['binding', 'bindings', 'doc', 'get', 'has', 'id', 'isInstance', 'members', 'type']
     filesUri = 'untitled:FilesCapability'
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: filesUri, languageId: 'dotk3', version: 1, text: "Files." } } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'filesMembers', method: 'textDocument/completion', params: { textDocument: { uri: filesUri }, position: { line: 0, character: 6 } } })
-    raise 'Files completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['exists', 'readBytes', 'readText', 'size']
+    raise 'Files completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['append', 'close', 'exists', 'flush', 'isDirectory', 'list', 'mkdir', 'open', 'read', 'readBytes', 'readLine', 'readText', 'remove', 'rename', 'seek', 'size', 'tell', 'write', 'writeText']
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: filesUri, version: 2 }, contentChanges: [{ text: 'Files.readText(1)' }] } })
     raise 'Files path diagnostic missing' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected String')
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: filesUri, version: 3 }, contentChanges: [{ text: "from Files import readText as read\nlet text: String = read('never-executed.txt')\ntext." }] } })
@@ -306,10 +307,10 @@ Timeout.timeout(15) do
       send_message(writer, { jsonrpc: '2.0', id: "semantic#{index}", method: 'textDocument/completion', params: { textDocument: { uri: memberUri }, position: { line: line, character: character } } })
       raise "Member case #{index} failed" unless receive_message(reader)['result'].map { |item| item['label'] }.sort == expected.sort
     end
-    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 9 }, contentChanges: [{ text: 'System.gc()' }] } })
+    send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 9 }, contentChanges: [{ text: 'GC.collect()' }] } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'coreHover', method: 'textDocument/hover', params: { textDocument: { uri: memberUri }, position: { line: 0, character: 7 } } })
-    raise 'Core hover missing signature' unless receive_message(reader).dig('result', 'contents', 'value').include?('gc()')
+    raise 'Core hover missing signature' unless receive_message(reader).dig('result', 'contents', 'value').include?('collect()')
     documentation = "record Documented {\n\"\"\"A custom documented record.\"\"\"\nvalue: Int\n}\nlet object = Documented(1)\nobject.value"
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 10 }, contentChanges: [{ text: documentation }] } })
     raise 'Documented record did not check' unless receive_message(reader).dig('params', 'diagnostics') == []
@@ -325,7 +326,7 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: callbackUri, languageId: 'dotk3', version: 1, text: 'Random.' } } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'randomMembers', method: 'textDocument/completion', params: { textDocument: { uri: callbackUri }, position: { line: 0, character: 7 } } })
-    raise 'Random completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['choice', 'float', 'int', 'seed', 'shuffle']
+    raise 'Random completion missing' unless receive_message(reader)['result'].map { |entry| entry['label'] } == ['choice', 'float', 'int', 'seed', 'shuffle', 'uuid']
     callbackCases = [
       "record Item { value: Int }\nlet values: List<Int> = []\nlet mapped = values.map(fn(value: Int) -> Item => Item(value))\nmapped[0].",
       "record Item { value: Int }\nlet values: List<Item> = []\nlet filtered = values.filter(fn(value: Item) -> Bool => true)\nfiltered[0].",
@@ -539,6 +540,40 @@ Timeout.timeout(10) do
     raise 'Unexpected initialize response' unless receive_message(reader)['id'] == 1
     writer.close
     raise 'Initialized server hid input closure' unless process.value.exitstatus == 1 && error.read.include?('shutdown/exit handshake')
+  end
+end
+if ARGV[1]
+  Dir.mktmpdir('dotk3-lsp-native') do |directory|
+    FileUtils.cp(ARGV[1], File.join(directory, "stats_module#{File.extname(ARGV[1])}"))
+    uri = "file://#{directory}/main.k3"
+    [[[], true], [['--no-native'], false]].each do |flags, native|
+      Timeout.timeout(10) do
+        Open3.popen3(ARGV.fetch(0), *flags) do |writer, reader, error, process|
+          send_message(writer, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+          receive_message(reader)
+          send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: uri, languageId: 'dotk3', version: 1, text: "import Stats\nlet n: Int = Stats.gcd(4, 6)" } } })
+          diagnostics = receive_message(reader).dig('params', 'diagnostics')
+          raise "Native import diagnostics wrong (native=#{native})" unless native ? diagnostics == [] : !diagnostics.empty?
+          if native
+            send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: uri, version: 2 }, contentChanges: [{ text: "import Stats\nlet n: String = Stats.gcd(4, 6)" }] } })
+            raise 'Native signature was not type-checked' unless receive_message(reader).dig('params', 'diagnostics', 0, 'message').include?('Expected String')
+            send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: uri, version: 3 }, contentChanges: [{ text: "import Stats\nStats." }] } })
+            receive_message(reader)
+            send_message(writer, { jsonrpc: '2.0', id: 'members', method: 'textDocument/completion', params: { textDocument: { uri: uri }, position: { line: 1, character: 6 } } })
+            labels = receive_message(reader)['result'].map { |item| item['label'] }
+            raise 'Native completion missing' unless labels == %w[add close create fnv1a gcd mean summary]
+            send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: uri, version: 4 }, contentChanges: [{ text: "import Stats\nStats.gcd(1, 2)" }] } })
+            receive_message(reader)
+            send_message(writer, { jsonrpc: '2.0', id: 'hover', method: 'textDocument/hover', params: { textDocument: { uri: uri }, position: { line: 1, character: 8 } } })
+            raise 'Native hover missing' unless receive_message(reader).dig('result', 'contents', 'value').include?('gcd')
+          end
+          send_message(writer, { jsonrpc: '2.0', id: 2, method: 'shutdown' })
+          receive_message(reader)
+          send_message(writer, { jsonrpc: '2.0', method: 'exit' })
+          raise 'Native import server exit failed' unless process.value.exitstatus == 0
+        end
+      end
+    end
   end
 end
 puts 'lsp: PASS'

@@ -11,7 +11,20 @@ typedef struct _Scanner
     int col;
 } Scanner;
 
-Scanner scanner;
+static Scanner cliScanner;
+
+static Scanner *scannerState(void)
+{
+    void *state = vmScannerState();
+    return state ? (Scanner *)state : &cliScanner;
+}
+
+void *createScannerState(void)
+{
+    return calloc(1, sizeof(Scanner));
+}
+
+#define scanner (*scannerState())
 
 void initScanner(const char *source)
 {

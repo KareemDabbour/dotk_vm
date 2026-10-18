@@ -588,6 +588,8 @@ var fi = Field()
 var p = Player(1,1, f"{Ansi.GREEN}C{Ansi.RESET}")
 var g = Ghost(29,1, f"{Ansi.RED}G{Ansi.RESET}")
 var g2 = Ghost(29,25, f"{Ansi.CYAN}H{Ansi.RESET}")
+var g3 = Ghost(1,25, f"{Ansi.PURPLE}I{Ansi.RESET}")
+
 
 
 with(File("test.txt"), fn(f){
@@ -598,7 +600,8 @@ with(File("test.txt"), fn(f){
 fi.registerEntity(p)
 fi.registerEntity(g)
 fi.registerEntity(g2)
-var ghosts = {g, g2}
+fi.registerEntity(g3)
+var ghosts = {g, g2, g3}
 fi.consumeAt(p.getPos())
 var totalPelletsAtStart = fi.pelletsLeft > 0 ? fi.pelletsLeft : 1
 var dx = 0

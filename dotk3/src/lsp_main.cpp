@@ -1,4 +1,6 @@
 #include "typer.hpp"
+#include "native_search.hpp"
+#include "../include/dotk3.h"
 #include "../vendor/json.hpp"
 #include <algorithm>
 #include <charconv>
@@ -7,11 +9,15 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace {
@@ -189,6 +195,51 @@ class Server {
     std::unordered_map<std::string, Document> documents;
     bool initialized = false, shutdown = false;
     size_t textBytes = 0;
+    std::map<std::string, std::optional<dk3::HostModule>> libraries;  // library path -> the module it declares
+    std::unordered_map<std::string, std::vector<dk3::HostModule>> nativeModules;  // document URI -> native modules it imports
+    // Reads a library's export table. Its entry function runs, but none of its exports do.
+    std::optional<dk3::HostModule> probe(const std::filesystem::path &library) {
+        std::string key = library.string();
+        auto cached = libraries.find(key); if (cached != libraries.end()) return cached->second;
+        std::optional<dk3::HostModule> module;
+#ifndef _WIN32
+        void *handle = dlopen(key.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        auto entry = handle ? reinterpret_cast<DK3ModuleEntry>(dlsym(handle, DK3_MODULE_ENTRY_SYMBOL)) : nullptr;
+        const DK3NativeModule *native = entry ? entry() : nullptr;
+        if (native && native->size >= sizeof(DK3NativeModule) && native->abi_version == DK3_MODULE_ABI_VERSION && native->name && (!native->count || native->exports)) {
+            dk3::HostModule declared; declared.name = native->name;
+            for (size_t index = 0; index < native->count; index++)
+                if (native->exports[index].name && native->exports[index].signature) declared.exports.emplace_back(native->exports[index].name, native->exports[index].signature);
+            module = std::move(declared);
+        }
+#endif
+        return libraries[key] = module;
+    }
+    // `import Name` without a Name.k3 may refer to a native library beside the document.
+    void findNatives(const std::string &uri, const dk3::Ast &node, std::set<std::string> &seen, std::vector<dk3::HostModule> &found) {
+        if (!node) return;
+        if (node->kind == "import" || node->kind == "from_import") {
+            const std::string &name = node->text;
+            auto parent = filePath(uri);
+            if (parent && !name.empty() && name.find_first_of("./\\") == std::string::npos && seen.insert(name).second) {
+                if (auto source = moduleSource(uri, name)) {
+                    try { findNatives(uri, dk3::parse(source), seen, found); } catch (const dk3::Error &) {}
+                } else {
+                    for (const auto &library : nativeLibraryCandidates(parent->parent_path(), name)) {
+                        if (!std::filesystem::is_regular_file(library)) continue;
+                        auto module = probe(library);
+                        if (module && module->name == name) found.push_back(*module);
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto &child : node->children) findNatives(uri, child, seen, found);
+    }
+    const std::vector<dk3::HostModule> &hostsFor(const std::string &uri) {
+        static const std::vector<dk3::HostModule> none;
+        auto found = nativeModules.find(uri); return found == nativeModules.end() ? none : found->second;
+    }
     // Source for an imported module: an open document wins over the file on disk.
     std::shared_ptr<const dk3::Source> moduleSource(const std::string &documentUri, const std::string &module) {
         auto parent = filePath(documentUri); if (!parent) return nullptr;
@@ -207,8 +258,9 @@ class Server {
         Json errors = Json::array(); document.tree.reset(); document.tokens.clear();
         try {
             document.tokens = dk3::lex(document.source); document.tree = dk3::parse(document.source);
+            if (nativeEnabled) { std::set<std::string> seen; std::vector<dk3::HostModule> found; findNatives(uri, document.tree, seen, found); nativeModules[uri] = std::move(found); }
             auto loader = [&](const std::string &name) { return moduleSource(uri, name); };
-            for (const auto &found : dk3::typeCheck(document.tree, loader)) {
+            for (const auto &found : dk3::typeCheck(document.tree, loader, nullptr, hostsFor(uri))) {
                 if (found.span.source && found.span.source != document.source) continue;
                 errors.push_back({{"range", range(document.source, found.span.offset, found.span.offset + found.span.length)},
                     {"severity", found.warning ? 2 : 1}, {"source", "dotk3"}, {"code", found.warning ? "warning" : "type"}, {"message", found.message}});
@@ -232,6 +284,7 @@ class Server {
         auto inserted = documents.insert_or_assign(uri, std::move(document)); diagnostics(uri, inserted.first->second);
     }
 public:
+    bool nativeEnabled = true;  // --no-native: never load libraries next to a document
     bool exited = false;
     int exitCode = 1;
     void dispatch(const Json &message) {
@@ -270,6 +323,7 @@ public:
         if (method == "textDocument/didClose") {
             std::string uri = params.at("textDocument").at("uri").get<std::string>(); auto found = documents.find(uri);
             if (found != documents.end()) { textBytes -= found->second.source->text.size(); documents.erase(found); }
+            nativeModules.erase(uri);
             send({{"jsonrpc", "2.0"}, {"method", "textDocument/publishDiagnostics"}, {"params", {{"uri", uri}, {"diagnostics", Json::array()}}}}); return;
         }
         if (method == "textDocument/didSave") {
@@ -290,11 +344,11 @@ public:
             size_t offset = bytePosition(found->second.source, params.at("position"));
             dk3::ModuleLoader loader = [&](const std::string &name) { return moduleSource(uri, name); };
             if (method == "textDocument/hover") {
-                std::string detail = dk3::hoverText(found->second.source, offset, loader);
+                std::string detail = dk3::hoverText(found->second.source, offset, loader, hostsFor(uri));
                 result(id, detail.empty() ? Json(nullptr) : Json{{"contents", {{"kind", "markdown"}, {"value", "```dotk3\n" + detail + "\n```"}}}});
             } else {
                 Json completions = Json::array();
-                for (const auto &member : dk3::completeMembers(found->second.source, offset, loader)) {
+                for (const auto &member : dk3::completeMembers(found->second.source, offset, loader, hostsFor(uri))) {
                     Json item = {{"label", member.label}, {"kind", member.kind}, {"detail", member.detail}, {"insertText", member.label}};
                     if (!member.documentation.empty()) item["documentation"] = member.documentation;
                     completions.push_back(std::move(item));
@@ -307,11 +361,17 @@ public:
     }
 };
 }
-int main() {
+extern "C" void dk3_module_init(DK3NativeModule *module) {  // plugins call this from their entry function
+    if (!module) return;
+    *module = {}; module->size = sizeof(*module); module->abi_version = DK3_MODULE_ABI_VERSION;
+}
+int main(int argc, char **argv) {
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY); _setmode(_fileno(stdout), _O_BINARY);
 #endif
     Server server;
+    // Editors append their own flags (for example --stdio), so unknown arguments are ignored.
+    for (int index = 1; index < argc; index++) if (std::string(argv[index]) == "--no-native") server.nativeEnabled = false;
     try {
         while (!server.exited) {
             auto body = readMessage(); if (!body) break;

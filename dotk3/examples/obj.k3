@@ -1,0 +1,247 @@
+import Files
+
+# Camera looks along +z at yaw 0; y is up. Angles are radians, fov is the horizontal field of view in degrees.
+export class Camera {
+    var x: Float = 0.0
+    var y: Float = 0.0
+    var z: Float = -5.0
+    var yaw: Float = 0.0
+    var pitch: Float = 0.0
+    var fov: Float = 70.0
+
+    # Moves on the ground plane relative to where the camera is facing; `lift` moves straight up.
+    fn move(forward: Float, strafe: Float, lift: Float) -> Null {
+        self.x += Math.sin(self.yaw) * forward + Math.cos(self.yaw) * strafe
+        self.z += Math.cos(self.yaw) * forward - Math.sin(self.yaw) * strafe
+        self.y += lift
+    }
+
+    fn turn(deltaYaw: Float, deltaPitch: Float) -> Null {
+        self.yaw += deltaYaw
+        self.pitch += deltaPitch
+        if self.pitch > 1.5 { self.pitch = 1.5 }
+        if self.pitch < -1.5 { self.pitch = -1.5 }
+    }
+
+    fn zoom(deltaFov: Float) -> Null {
+        self.fov += deltaFov
+        if self.fov < 20.0 { self.fov = 20.0 }
+        if self.fov > 120.0 { self.fov = 120.0 }
+    }
+}
+
+let RAMP: String = " .:-=+*#%@"
+
+fn lowest(a: Float, b: Float, c: Float) -> Float {
+    var result = a
+    if b < result { result = b }
+    if c < result { result = c }
+    return result
+}
+
+fn highest(a: Float, b: Float, c: Float) -> Float {
+    var result = a
+    if b > result { result = b }
+    if c > result { result = c }
+    return result
+}
+
+export class Obj3d {
+    private var vertices: List<Float> = []
+    private var faces: List<Int> = []
+    private var center: List<Float> = [0.0, 0.0, 0.0]
+    private var radius: Float = 1.0
+
+    # Reads `v x y z` and `f a b c ...` lines. Face entries may be `v`, `v/t` or `v/t/n`; polygons are fanned into triangles.
+    fn parse(text: String) -> Null {
+        for rawLine in text.split("\n") {
+            let line = rawLine.split("\r")[0]
+            let parts = line.split(" ").filter(fn(part: String) -> Bool { return part != "" })
+            if parts.length() == 0 { continue }
+            if parts[0] == "v" and parts.length() >= 4 {
+                self.vertices.append(Text.parseFloat(parts[1]))
+                self.vertices.append(Text.parseFloat(parts[2]))
+                self.vertices.append(Text.parseFloat(parts[3]))
+            } else if parts[0] == "f" and parts.length() >= 4 {
+                let count = self.vertices.length() // 3
+                let corners = parts[1:].map(fn(part: String) -> Int {
+                    let index = Text.parseInt(part.split("/")[0])
+                    if index < 0 { return count + index }
+                    return index - 1
+                })
+                for corner in Collections.range(1, corners.length() - 1) {
+                    self.faces.append(corners[0])
+                    self.faces.append(corners[corner])
+                    self.faces.append(corners[corner + 1])
+                }
+            }
+        }
+        self.measure()
+    }
+
+    fn fromFile(path: String) -> Null {
+        self.parse(Files.readText(path))
+    }
+
+    fn vertexCount() -> Int { return self.vertices.length() // 3 }
+
+    fn triangleCount() -> Int { return self.faces.length() // 3 }
+
+    fn toString() -> String {
+        return f"Vertices: {self.vertexCount()}: {self.vertices[:10]}, Faces: {self.triangleCount()}: {self.faces[:10]}"
+    }
+
+    # Places the camera in front of the model so all of it is visible.
+    fn frame(camera: Camera) -> Null {
+        if self.vertexCount() == 0 { return null }
+        camera.x = self.center[0]
+        camera.y = self.center[1]
+        camera.z = self.center[2] - self.radius / Math.tan(Math.toRadians(camera.fov / 2)) * 1.1
+        camera.yaw = 0.0
+        camera.pitch = 0.0
+    }
+
+    # Finds the bounding-box center and half-diagonal used to frame and spin the model.
+    private fn measure() -> Null {
+        if self.vertexCount() == 0 { return null }
+        var low = [self.vertices[0], self.vertices[1], self.vertices[2]]
+        var high = [self.vertices[0], self.vertices[1], self.vertices[2]]
+        for index in Collections.range(self.vertexCount()) {
+            for axis in Collections.range(3) {
+                let value = self.vertices[index * 3 + axis]
+                if value < low[axis] { low[axis] = value }
+                if value > high[axis] { high[axis] = value }
+            }
+        }
+        self.radius = Math.hypot(Math.hypot(high[0] - low[0], high[1] - low[1]), high[2] - low[2]) / 2
+        self.center = [(low[0] + high[0]) / 2, (low[1] + high[1]) / 2, (low[2] + high[2]) / 2]
+    }
+
+    # Draws filled, depth-buffered triangles shaded by how directly they face the camera.
+    # `spin` turns the model about its vertical axis through its center, in radians.
+    fn render(camera: Camera, width: Int, height: Int, spin: Float = 0.0) -> String {
+        let sinSpin = Math.sin(spin)
+        let cosSpin = Math.cos(spin)
+        let forwardX = Math.sin(camera.yaw) * Math.cos(camera.pitch)
+        let forwardY = Math.sin(camera.pitch)
+        let forwardZ = Math.cos(camera.yaw) * Math.cos(camera.pitch)
+        let rightX = Math.cos(camera.yaw)
+        let rightZ = -Math.sin(camera.yaw)
+        let upX = forwardY * rightZ
+        let upY = forwardZ * rightX - forwardX * rightZ
+        let upZ = -forwardY * rightX
+        let focal = (width / 2.0) / Math.tan(Math.toRadians(camera.fov / 2))
+        let near = 0.05
+
+        let count = self.vertexCount()
+        var screenX: List<Float> = []
+        var screenY: List<Float> = []
+        var depth: List<Float> = []
+        var viewX: List<Float> = []
+        var viewY: List<Float> = []
+        for index in Collections.range(count) {
+            let offsetX = self.vertices[index * 3] - self.center[0]
+            let offsetZ = self.vertices[index * 3 + 2] - self.center[2]
+            let dx = self.center[0] + offsetX * cosSpin + offsetZ * sinSpin - camera.x
+            let dy = self.vertices[index * 3 + 1] - camera.y
+            let dz = self.center[2] - offsetX * sinSpin + offsetZ * cosSpin - camera.z
+            let cx = dx * rightX + dz * rightZ
+            let cy = dx * upX + dy * upY + dz * upZ
+            let cz = dx * forwardX + dy * forwardY + dz * forwardZ
+            depth.append(cz)
+            viewX.append(cx)
+            viewY.append(cy)
+            if cz > near {
+                screenX.append(width / 2.0 + cx / cz * focal)
+                screenY.append(height / 2.0 - cy / cz * focal * 0.5)
+            } else {
+                screenX.append(0.0)
+                screenY.append(0.0)
+            }
+        }
+
+        var buffer: List<Float> = []
+        var shade: List<Int> = []
+        for cell in Collections.range(width * height) {
+            buffer.append(1000000.0)
+            shade.append(0)
+        }
+
+        let triangles = self.triangleCount()
+        for triangle in Collections.range(triangles) {
+            let a = self.faces[triangle * 3]
+            let b = self.faces[triangle * 3 + 1]
+            let c = self.faces[triangle * 3 + 2]
+            if a < 0 or b < 0 or c < 0 or a >= count or b >= count or c >= count { continue }
+            if depth[a] <= near or depth[b] <= near or depth[c] <= near { continue }
+            let ax = screenX[a]
+            let ay = screenY[a]
+            let bx = screenX[b]
+            let by = screenY[b]
+            let cx = screenX[c]
+            let cy = screenY[c]
+            let area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if Math.floor(highest(ax, bx, cx)) < 0 or Math.floor(lowest(ax, bx, cx)) >= width { continue }
+            if Math.floor(highest(ay, by, cy)) < 0 or Math.floor(lowest(ay, by, cy)) >= height { continue }
+            if area > -0.000001 and area < 0.000001 { continue }
+
+            # Facing ratio between the surface normal and the ray to the triangle (a headlight).
+            let ux = viewX[b] - viewX[a]
+            let uy = viewY[b] - viewY[a]
+            let uz = depth[b] - depth[a]
+            let vx = viewX[c] - viewX[a]
+            let vy = viewY[c] - viewY[a]
+            let vz = depth[c] - depth[a]
+            let nx = uy * vz - uz * vy
+            let ny = uz * vx - ux * vz
+            let nz = ux * vy - uy * vx
+            let rayX = viewX[a] + viewX[b] + viewX[c]
+            let rayY = viewY[a] + viewY[b] + viewY[c]
+            let rayZ = depth[a] + depth[b] + depth[c]
+            let along = nx * rayX + ny * rayY + nz * rayZ
+            let lengths = Math.sqrt(nx * nx + ny * ny + nz * nz) * Math.sqrt(rayX * rayX + rayY * rayY + rayZ * rayZ)
+            var facing = 0.0
+            if lengths > 0.0 { facing = Math.sqrt(along * along) / lengths }
+            let level = 1 + Math.floor(facing * 8.99)
+
+            var firstColumn = Math.floor(lowest(ax, bx, cx))
+            var lastColumn = Math.ceil(highest(ax, bx, cx))
+            var firstRow = Math.floor(lowest(ay, by, cy))
+            var lastRow = Math.ceil(highest(ay, by, cy))
+            if firstColumn < 0 { firstColumn = 0 }
+            if firstRow < 0 { firstRow = 0 }
+            if lastColumn > width - 1 { lastColumn = width - 1 }
+            if lastRow > height - 1 { lastRow = height - 1 }
+
+            var row = firstRow
+            while row <= lastRow {
+                let py = row + 0.5
+                var column = firstColumn
+                while column <= lastColumn {
+                    let px = column + 0.5
+                    let wa = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area
+                    let wb = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area
+                    let wc = 1.0 - wa - wb
+                    if wa >= 0.0 and wb >= 0.0 and wc >= 0.0 {
+                        let z = wa * depth[a] + wb * depth[b] + wc * depth[c]
+                        let cell = row * width + column
+                        if z < buffer[cell] {
+                            buffer[cell] = z
+                            shade[cell] = level
+                        }
+                    }
+                    column += 1
+                }
+                row += 1
+            }
+        }
+
+        var lines: List<String> = []
+        for y in Collections.range(height) {
+            var characters: List<String> = []
+            for x in Collections.range(width) { characters.append(RAMP[shade[y * width + x]]) }
+            lines.append("".join(characters))
+        }
+        return "\n".join(lines)
+    }
+}

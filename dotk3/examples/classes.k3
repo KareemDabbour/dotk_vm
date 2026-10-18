@@ -27,7 +27,7 @@ record Snapshot {
     label: String, value: Int }
 let counter = Counter(label: "jobs", value: 2)
 let increment: fn(Int) -> Int = counter.add
-System.gc()
+GC.collect()
 print(increment(3))
 counter.value = 7
 for value in counter.values() { print(value) }

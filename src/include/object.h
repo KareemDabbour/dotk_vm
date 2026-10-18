@@ -198,6 +198,7 @@ typedef struct ObjNative
     int paramCount;
     int minArity;
     NativeParamDef *params;
+    void *hostBinding;
 } ObjNative;
 
 typedef struct ObjForeign

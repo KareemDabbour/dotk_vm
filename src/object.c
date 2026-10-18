@@ -73,18 +73,21 @@ ObjList *newList()
 
 ObjList *newListWithCapacity(int capacity)
 {
-    ObjList *list = ALLOCATE_OBJ(ObjList, OBJ_LIST);
+    ObjList *list = newList();
+    push(OBJ_VAL(list));
     list->items = ALLOCATE(Value, capacity);
     list->capacity = capacity;
-    list->count = 0;
+    pop();
     return list;
 }
 
 ObjTuple *newTupleWithCount(int count)
 {
     ObjTuple *tuple = ALLOCATE_OBJ(ObjTuple, OBJ_TUPLE);
-    tuple->count = count;
-    tuple->capacity = count;
+    tuple->count = 0;
+    tuple->capacity = 0;
+    tuple->items = NULL;
+    push(OBJ_VAL(tuple));
     if (count > 0)
     {
         tuple->items = ALLOCATE(Value, count);
@@ -95,6 +98,9 @@ ObjTuple *newTupleWithCount(int count)
     {
         tuple->items = NULL;
     }
+    tuple->count = count;
+    tuple->capacity = count;
+    pop();
     return tuple;
 }
 
@@ -112,9 +118,13 @@ void appendToList(ObjList *list, Value value)
     // Grow the array if necessary
     if (list->capacity < list->count + 1)
     {
+        push(OBJ_VAL(list));
+        push(value);
         int oldCapacity = list->capacity;
         list->capacity = GROW_CAPACITY(oldCapacity);
         list->items = GROW_ARRAY(Value, list->items, oldCapacity, list->capacity);
+        pop();
+        pop();
     }
     list->items[list->count] = value;
     list->count++;
@@ -147,6 +157,7 @@ inline bool isValidListIndex(ObjList *list, int index) { return !(index < -list-
 
 ObjClass *newClass(ObjString *name)
 {
+    push(OBJ_VAL(name));
     ObjClass *clazz = ALLOCATE_OBJ(ObjClass, OBJ_CLASS);
     /* Root the newly created class while initializing to protect it
        from GC that may run during allocations in initTable/tableAddAll. */
@@ -176,11 +187,13 @@ ObjClass *newClass(ObjString *name)
 
     tableSet(&clazz->methods, vm.clazzStr, OBJ_VAL(clazz));
     pop();
+    pop();
     return clazz;
 }
 
 ObjClosure *newClosure(ObjFunction *function)
 {
+    push(OBJ_VAL(function));
     ObjUpvalue **upvalues = ALLOCATE(ObjUpvalue *, function->upValueCount);
     for (int i = 0; i < function->upValueCount; i++)
         upvalues[i] = NULL;
@@ -190,14 +203,19 @@ ObjClosure *newClosure(ObjFunction *function)
     closure->upvalues = upvalues;
     closure->upvalueCount = function->upValueCount;
     closure->moduleNamespace = NULL;
+    pop();
     return closure;
 }
 
 ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount)
 {
+    push(OBJ_VAL(closure));
+    for (int argument = 0; argument < argCount; argument++)
+        push(args[argument]);
     ObjGenerator *generator = ALLOCATE_OBJ(ObjGenerator, OBJ_GENERATOR);
     generator->closure = closure;
-    generator->argCount = argCount;
+    generator->argCount = 0;
+    generator->args = NULL;
     generator->started = false;
     generator->finished = false;
     generator->stack = NULL;
@@ -206,6 +224,7 @@ ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount)
     generator->frames = NULL;
     generator->frameCount = 0;
     generator->frameCapacity = 0;
+    push(OBJ_VAL(generator));
 
     if (argCount > 0)
     {
@@ -218,6 +237,11 @@ ObjGenerator *newGenerator(ObjClosure *closure, Value *args, int argCount)
         generator->args = NULL;
     }
 
+    generator->argCount = argCount;
+    pop();
+    for (int argument = 0; argument < argCount; argument++)
+        pop();
+    pop();
     return generator;
 }
 
@@ -255,10 +279,14 @@ ObjForeign *newForeignObj(ForeignType type, void *ptr, bool ownsPtr)
 
 ObjInstance *newInstance(ObjClass *klass)
 {
+    push(OBJ_VAL(klass));
     ObjInstance *instance = ALLOCATE_OBJ(ObjInstance, OBJ_INSTANCE);
     instance->klass = klass;
     initTable(&instance->fields);
+    push(OBJ_VAL(instance));
     tableSet(&instance->fields, copyString("clazz", 5), OBJ_VAL(instance->klass));
+    pop();
+    pop();
     return instance;
 }
 
@@ -270,15 +298,16 @@ ObjNative *newNative(NativeFn function)
     native->paramCount = 0;
     native->minArity = 0;
     native->params = NULL;
+    native->hostBinding = NULL;
     return native;
 }
 
 ObjNative *newNativeWithParams(NativeFn function, NativeParamDef *params, int paramCount)
 {
-    ObjNative *native = ALLOCATE_OBJ(ObjNative, OBJ_NATIVE);
-    native->function = function;
-    native->name = NULL;
-    native->paramCount = paramCount;
+    for (int parameter = 0; parameter < paramCount; parameter++)
+        push(params[parameter].hasDefault ? params[parameter].defaultVal : NIL_VAL);
+    ObjNative *native = newNative(function);
+    push(OBJ_VAL(native));
     native->params = ALLOCATE(NativeParamDef, paramCount);
     int minArity = 0;
     for (int i = 0; i < paramCount; i++)
@@ -288,6 +317,10 @@ ObjNative *newNativeWithParams(NativeFn function, NativeParamDef *params, int pa
             minArity = i + 1;
     }
     native->minArity = minArity;
+    native->paramCount = paramCount;
+    pop();
+    for (int parameter = 0; parameter < paramCount; parameter++)
+        pop();
     return native;
 }
 
@@ -316,6 +349,8 @@ static uint32_t hashString(const char *key, int len)
 
 ObjString *takeString(char *chars, int len)
 {
+    if (vm.embedded)
+        chars = vmHostOwnStringBuffer(chars, (size_t)len + 1);
     uint32_t hash = hashString(chars, len);
     ObjString *interned = tableFindStr(&vm.strings, chars, len, hash);
     if (interned != NULL)

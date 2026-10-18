@@ -1,0 +1,75 @@
+# dotk3 --files-root . examples/obj_viewer.k3 examples/models/cow.obj [width height]
+# W/S move forward/back, A/D strafe, Q/E down/up, J/L or Left/Right turn, I/K or Up/Down look, +/- change the field of view,
+# Space starts/stops the model's rotation, X quits.
+from obj import Obj3d, Camera
+
+var path = "examples/models/cow.obj"
+var width = 100
+var height = 36
+if System.args.length() > 0 { path = System.args[0] }
+if System.args.length() > 2 {
+    width = Text.parseInt(System.args[1])
+    height = Text.parseInt(System.args[2])
+}
+
+let model = Obj3d()
+model.fromFile(path)
+let camera = Camera()
+model.frame(camera)
+System.print(f"Loaded {path}: {model.vertexCount()} vertices, {model.triangleCount()} triangles")
+Time.sleep(500)
+
+IO.Terminal.open()
+defer IO.Terminal.close()
+IO.write("\x1b[2J\x1b[?25l")
+defer IO.write("\x1b[?25h\n")
+
+let step = 0.15 * (model.vertexCount() / 1000.0 + 1.0)
+var running = true
+var spinning = true
+var angle = 0.0
+var last = Time.monotonicMillis()
+while running {
+    var key: Int? = IO.Terminal.readKey(0)
+    var handled = 0
+    while key != null and handled < 16 {
+        let code: Int = key
+        if code == 27 {
+            let second: Int? = IO.Terminal.readKey(5)
+            let third: Int? = IO.Terminal.readKey(5)
+            if second == 91 and third != null {
+                if third == 65 { camera.turn(0.0, 0.08) }
+                if third == 66 { camera.turn(0.0, -0.08) }
+                if third == 67 { camera.turn(0.08, 0.0) }
+                if third == 68 { camera.turn(-0.08, 0.0) }
+            }
+        }
+        if code == 119 { camera.move(step, 0.0, 0.0) }
+        if code == 115 { camera.move(-step, 0.0, 0.0) }
+        if code == 97 { camera.move(0.0, -step, 0.0) }
+        if code == 100 { camera.move(0.0, step, 0.0) }
+        if code == 113 { camera.move(0.0, 0.0, -step) }
+        if code == 101 { camera.move(0.0, 0.0, step) }
+        if code == 106 { camera.turn(-0.08, 0.0) }
+        if code == 108 { camera.turn(0.08, 0.0) }
+        if code == 105 { camera.turn(0.0, 0.08) }
+        if code == 107 { camera.turn(0.0, -0.08) }
+        if code == 43 or code == 61 { camera.zoom(-5.0) }
+        if code == 45 { camera.zoom(5.0) }
+        if code == 32 { spinning = not spinning }
+        if code == 120 or code == 3 { running = false }
+        handled += 1
+        key = IO.Terminal.readKey(0)
+    }
+    let now = Time.monotonicMillis()
+    var milliseconds = now - last
+    last = now
+    if spinning {
+        if milliseconds > 100 { milliseconds = 100 }
+        angle += 0.9 * milliseconds / 1000.0
+    }
+    let frame = model.render(camera, width, height, angle)
+    var state = "paused"
+    if spinning { state = "spinning" }
+    IO.write("\x1b[H" + frame + f"\n{milliseconds} ms  fov {Math.round(camera.fov)}  position {Math.round(camera.x)}, {Math.round(camera.y)}, {Math.round(camera.z)}  {state}, space toggles  (X quits)   \n")
+}

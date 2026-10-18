@@ -12,7 +12,7 @@ let keys = entries.keys()
 let values = entries.values()
 print(entries.remove("empty"), entries.remove("empty"))
 entries["new"] = Entry(4)
-System.gc()
+GC.collect()
 print(keys, values)
 print(entries.keys(), entries.values())
 for key in entries.keys() { print(key, entries[key]) }

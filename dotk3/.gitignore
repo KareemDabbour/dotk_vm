@@ -5,3 +5,6 @@ node_modules/
 *.a
 *.dylib
 *.so
+# Native libraries built for the examples
+examples/native/*.dylib
+examples/native/*.so

@@ -1753,6 +1753,7 @@ void Runtime::collectionSafePoint() {
     if (collectionRequested || heap.size() >= nextCollection) { collectionRequested = false; collect(); }
 }
 void Runtime::collect() {
+    collections++;
     ProfileClock profileBegin; size_t profileBefore = heap.size();
     if (config.profiler) { config.profiler->checkpoint(true); profileBegin = config.profiler->now(); config.profiler->enter("<GC>", hostSpan(), currentTask ? currentTask->debugTaskId : 0); }
     mark(global); for (Value root : roots) mark(root); for (const auto &handle : handles) if (handle) mark(*handle);

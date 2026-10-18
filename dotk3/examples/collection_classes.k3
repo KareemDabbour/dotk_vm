@@ -29,7 +29,7 @@ class Tags extends Unique<String> {
 let inventory = Inventory("Ada", ["compass", "lantern"])
 let typedInventory: List<String> = inventory
 let add = inventory.append
-System.gc()
+GC.collect()
 add("rope")
 print(inventory.owner, inventory.added, typedInventory)
 

@@ -6,6 +6,7 @@
 #include "include/chunk.h"
 #include "include/memory.h"
 #include "include/optimizer.h"
+#include "include/vm.h"
 
 static inline void fillNop(uint8_t *code, int start, int endExclusive)
 {
@@ -331,6 +332,8 @@ static InlineReturnKind gInlineRetKind = INLINE_RET_NONE;
 
 static bool inlineStatsEnabled(void)
 {
+    if (vm.embedded)
+        return false;
     static int cached = -1;
     if (cached == -1)
     {
@@ -1803,7 +1806,7 @@ static bool compactNops(Chunk *chunk)
             nextKept[i] = nextKept[i + 1];
     }
 
-    uint8_t *newCode = (uint8_t *)malloc((size_t)newSize * sizeof(uint8_t));
+    uint8_t *newCode = ALLOCATE(uint8_t, newSize);
     if (newCode == NULL)
     {
         free(keepByte);
@@ -1866,7 +1869,8 @@ static bool compactNops(Chunk *chunk)
 
     if (chunk->hasDebugPositions && chunk->posCount > 0)
     {
-        PositionEntry *newPos = (PositionEntry *)malloc((size_t)chunk->posCount * sizeof(PositionEntry));
+        int newPosCapacity = chunk->posCount;
+        PositionEntry *newPos = ALLOCATE(PositionEntry, newPosCapacity);
         if (newPos != NULL)
         {
             int newPosCount = 0;
@@ -1892,7 +1896,7 @@ static bool compactNops(Chunk *chunk)
             FREE_ARRAY(PositionEntry, chunk->positions, chunk->posCapacity);
             chunk->positions = newPos;
             chunk->posCount = newPosCount;
-            chunk->posCapacity = chunk->posCount;
+            chunk->posCapacity = newPosCapacity;
         }
     }
 

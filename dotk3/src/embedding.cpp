@@ -1,6 +1,7 @@
 #include "runtime.hpp"
 #include "typer.hpp"
 #include "../include/dotk3.h"
+#include "plugin_host.hpp"
 #include <mutex>
 #include <cmath>
 #include <thread>
@@ -31,6 +32,8 @@ struct DK3VM {
     std::string diagnostic;
     std::mutex lock;
     bool poisoned = false;
+    bool borrowed = false;  // the runtime belongs to the CLI, not to this handle
+    ~DK3VM() { if (borrowed) runtime.release(); }
 };
 struct DK3Call {
     DK3VM *owner;
@@ -128,6 +131,16 @@ std::function<dk3::Value(const std::vector<dk3::Argument> &, const dk3::Span &)>
         return call.result;
     };
 }
+DK3Status installModule(DK3VM *vm, const DK3NativeModule *module) {
+    std::vector<dk3::NativeExport> exports;
+    for (size_t index = 0; index < module->count; index++) {
+        const auto &entry = module->exports[index];
+        if (!entry.name || !entry.function || !entry.signature) return DK3_INVALID;
+        exports.push_back({entry.name, entry.documentation ? entry.documentation : "", nativeFunction(vm, entry.function, entry.userdata, true)});
+    }
+    vm->runtime->registerModule(module->name, module->documentation ? module->documentation : "", exports);
+    return DK3_OK;
+}
 DK3Status sequence(DK3VM *vm, size_t count, const DK3Value *const *items, DK3Value **result, dk3::Kind kind) {
     if (!result || (count && !items)) return DK3_INVALID; *result = nullptr;
     return protect(vm, [&] {
@@ -157,18 +170,25 @@ DK3Status dk3_register_module(DK3VM *vm, const DK3NativeModule *module) {
     if (!module || module->size < sizeof(DK3NativeModule) || module->abi_version != DK3_MODULE_ABI_VERSION ||
         !module->name || (module->count && !module->exports)) return DK3_INVALID;
     return protect(vm, [&] {
-        std::vector<dk3::NativeExport> exports;
-        for (size_t index = 0; index < module->count; index++) {
-            const auto &entry = module->exports[index];
-            if (!entry.name || !entry.function || !entry.signature) return DK3_INVALID;
-            exports.push_back({entry.name, entry.documentation ? entry.documentation : "", nativeFunction(vm, entry.function, entry.userdata, true)});
-        }
-        vm->runtime->registerModule(module->name, module->documentation ? module->documentation : "", exports);
+        DK3Status installed = installModule(vm, module);
+        if (installed != DK3_OK) return installed;
         std::vector<std::pair<std::string, std::string>> signatures; std::string problem;
         for (size_t index = 0; index < module->count; index++) signatures.emplace_back(module->exports[index].name, module->exports[index].signature);
-        if (!vm->session->declareModule(module->name, signatures, problem)) { vm->diagnostic = "Invalid native signature: " + problem; return DK3_INVALID; }
+        if (vm->session && !vm->session->declareModule(module->name, signatures, problem)) { vm->diagnostic = "Invalid native signature: " + problem; return DK3_INVALID; }
         return DK3_OK;
     });
+}
+DK3VM *dk3_attach_runtime(dk3::Runtime *runtime) {
+    try {
+        auto instance = std::make_unique<DK3VM>();
+        instance->runtime.reset(runtime); instance->borrowed = true;
+        return instance.release();
+    } catch (...) { return nullptr; }
+}
+DK3Status dk3_install_native_module(DK3VM *vm, const DK3NativeModule *module) {
+    if (!module || module->size < sizeof(DK3NativeModule) || module->abi_version != DK3_MODULE_ABI_VERSION ||
+        !module->name || (module->count && !module->exports)) return DK3_INVALID;
+    return protect(vm, [&] { return installModule(vm, module); });
 }
 void dk3_resource_init(DK3Resource *resource) {
     if (!resource) return;

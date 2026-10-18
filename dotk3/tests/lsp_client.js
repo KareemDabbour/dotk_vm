@@ -114,7 +114,7 @@ const timer = setTimeout(() => { processServer.kill(); }, 15000);
   await connection.sendNotification('textDocument/didOpen', { textDocument: { uri: randomUri, languageId: 'dotk3', version: 1, text: 'Random.' } });
   await randomUpdated;
   const randomCompletion = await connection.sendRequest('textDocument/completion', { textDocument: { uri: randomUri }, position: { line: 0, character: 7 } });
-  assert.deepStrictEqual(randomCompletion.map(item => item.label), ['choice', 'float', 'int', 'seed', 'shuffle']);
+  assert.deepStrictEqual(randomCompletion.map(item => item.label), ['choice', 'float', 'int', 'seed', 'shuffle', 'uuid']);
   const callbackUpdated = new Promise(resolve => connection.onNotification('textDocument/publishDiagnostics', resolve));
   const callbackSource = 'record Item { value: Int }\nlet values: List[Int] = []\nlet mapped = values.map(fn(value: Int) -> Item => Item(value))\nmapped[0].';
   await connection.sendNotification('textDocument/didChange', { textDocument: { uri: randomUri, version: 2 }, contentChanges: [{ text: callbackSource }] });
@@ -144,7 +144,7 @@ const timer = setTimeout(() => { processServer.kill(); }, 15000);
   });
   await filesUpdated;
   const filesCompletion = await connection.sendRequest('textDocument/completion', { textDocument: { uri: 'file:///client.k3' }, position: { line: 0, character: 6 } });
-  assert.deepStrictEqual(filesCompletion.map(item => item.label), ['exists', 'readBytes', 'readText', 'size']);
+  assert.deepStrictEqual(filesCompletion.map(item => item.label), ['append', 'close', 'exists', 'flush', 'isDirectory', 'list', 'mkdir', 'open', 'read', 'readBytes', 'readLine', 'readText', 'remove', 'rename', 'seek', 'size', 'tell', 'write', 'writeText']);
   const filesValid = new Promise(resolve => connection.onNotification('textDocument/publishDiagnostics', resolve));
   await connection.sendNotification('textDocument/didChange', {
     textDocument: { uri: 'file:///client.k3', version: 15 },

@@ -4,7 +4,7 @@ from Json import parse, stringify
 let document = parse("""{"name":"Ada","count":9007199254740993,"tags":["active",null]}""") as Map<String, Object?>
 let tags = document["tags"] as List<Object?>
 tags.append("verified")
-System.gc()
+GC.collect()
 print(document["name"], document["count"])
 let encoded: String = stringify(document)
 print(encoded)

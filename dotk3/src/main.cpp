@@ -3,6 +3,9 @@
 #include "terminal.hpp"
 #include "socket_cli.hpp"
 #include "http_cli.hpp"
+#include "file_cli.hpp"
+#include "plugin_cli.hpp"
+#include "native_search.hpp"
 #include <charconv>
 #include <cstdlib>
 
@@ -75,6 +78,9 @@ static const char *usage =
     "       dotk3 --ast FILE.k3\n"
     "       dotk3 --debug FILE.k3 [args...]\n"
     "       dotk3 --files-root DIR [usual CLI arguments]\n"
+    "       dotk3 --files-root DIR --files-write [usual CLI arguments] (allow write/append/mkdir/remove/rename below DIR)\n"
+    "       dotk3 --env [usual CLI arguments] (expose environment variables to System.env)\n"
+    "       dotk3 --native LIB [--native LIB...] [usual CLI arguments] (load native modules; see examples/native)\n"
     "       dotk3 --net [usual CLI arguments]\n"
     "       dotk3 --steps N [usual CLI arguments] (0 disables step limit)\n"
     "       dotk3 --engine bytecode [usual CLI arguments]\n"
@@ -111,6 +117,7 @@ static bool debuggerStopped(const std::exception &error, const dk3::Debugger &de
 }
 using SessionHandle = std::shared_ptr<std::shared_ptr<dk3::TypeSession>>;
 static bool noCheck = false;  // --no-check: diagnostics become warnings and the program runs without type annotations
+static NativePlugins nativePlugins;
 
 static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory) {
     return [directory](const std::string &name) {
@@ -142,6 +149,31 @@ static bool printDiagnostics(const std::vector<dk3::Diagnostic> &diagnostics, bo
     return clean;
 }
 
+// `import Name` loads a native library named Name.<ext>, libName.<ext> or name_module.<ext> beside the script
+// when no Name.k3 exists. Imported .k3 modules are searched too so their native imports are found.
+static void loadImportedNatives(const dk3::Ast &node, const std::filesystem::path &directory, std::set<std::string> &seen) {
+    if (!node) return;
+    if (node->kind == "import" || node->kind == "from_import") {
+        const std::string &name = node->text;
+        bool plain = !name.empty() && name.find_first_of("./\\") == std::string::npos;
+        if (plain && seen.insert(name).second) {
+            std::filesystem::path source = directory / (name + ".k3");
+            if (std::filesystem::is_regular_file(source)) {
+                try { loadImportedNatives(dk3::parse(std::make_shared<dk3::Source>(dk3::Source{source.string(), readFile(source)})), directory, seen); }
+                catch (const std::exception &) {}  // reported when the module is checked
+            } else {
+                for (const auto &library : nativeLibraryCandidates(directory, name)) {
+                    if (!std::filesystem::is_regular_file(library)) continue;
+                    if (nativePlugins.load(library.string()) != name)
+                        throw std::runtime_error("'" + library.string() + "' does not provide a module named " + name);
+                    break;
+                }
+            }
+        }
+    }
+    for (const auto &child : node->children) loadImportedNatives(child, directory, seen);
+}
+
 // Type-checks one REPL submission; with --no-check problems are only reported.
 static bool checkSubmission(const std::shared_ptr<dk3::TypeSession> &session, const dk3::Ast &program) {
     auto diagnostics = session->check(program);
@@ -150,7 +182,9 @@ static bool checkSubmission(const std::shared_ptr<dk3::TypeSession> &session, co
 }
 
 static bool staticCheck(const dk3::Ast &program, const std::filesystem::path &directory) {
-    return printDiagnostics(dk3::typeCheck(program, moduleLoader(directory)), true);
+    dk3::TypeSession session(moduleLoader(directory));
+    nativePlugins.declare(session);
+    return printDiagnostics(session.check(program, false), true);
 }
 
 static int checkPaths(const std::vector<std::filesystem::path> &inputs) {
@@ -263,6 +297,7 @@ static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &conf
                 try { runtime->cancelAll(); } catch (const std::exception &error) { report(error); }
                 runtime = std::make_unique<dk3::Runtime>(config);
                 *session = std::make_shared<dk3::TypeSession>(moduleLoader(directory));
+                nativePlugins.attach(*runtime); nativePlugins.declare(**session);
             } else std::cerr << "dotk3: Unknown shell command; use :help\n";
             continue;
         }
@@ -291,6 +326,8 @@ int main(int argc, char **argv) {
     bool terminal = terminalInput();
     int start = 1; std::optional<std::filesystem::path> filesRoot;
     bool networkEnabled = false;
+    bool filesWrite = false, environmentEnabled = false;
+    std::vector<std::string> nativePaths;
     uint64_t stepLimit = 0;
     unsigned optimizationLevel = 2;
     dk3::ProfileOptions profileOptions;
@@ -327,6 +364,12 @@ int main(int argc, char **argv) {
             if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) { std::cerr << "dotk3: Invalid step limit\n"; return 64; }
             start += 2;
         }
+        else if (std::string(argv[start]) == "--files-write") { filesWrite = true; start++; }
+        else if (std::string(argv[start]) == "--env") { environmentEnabled = true; start++; }
+        else if (std::string(argv[start]) == "--native") {
+            if (start + 1 >= argc || !*argv[start + 1]) { std::cerr << usage; return 64; }
+            nativePaths.push_back(argv[start + 1]); start += 2;
+        }
         else if (std::string(argv[start]) == "--files-root") {
             if (start + 1 >= argc || !*argv[start + 1]) { std::cerr << usage; return 64; }
             filesRoot = std::filesystem::path(argv[start + 1]); start += 2;
@@ -362,6 +405,7 @@ int main(int argc, char **argv) {
 #endif
     int exitCode = 0;
     try {
+        for (const auto &path : nativePaths) nativePlugins.load(path);
         if (checkOnly) {
             std::vector<std::filesystem::path> inputs;
             for (int argument = start + 1; argument < argc; argument++) inputs.emplace_back(argv[argument]);
@@ -398,6 +442,11 @@ int main(int argc, char **argv) {
         };
         config.monotonicMillis = [] { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); };
         config.delay = [](uint64_t milliseconds) { std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds)); };
+        config.wallMillis = [] { return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()); };
+        if (environmentEnabled) config.environment = [](const std::string &name) -> std::optional<std::string> {
+            const char *value = std::getenv(name.c_str()); if (!value) return {}; return std::string(value);
+        };
+        if (filesWrite && !filesRoot) throw std::runtime_error("--files-write requires --files-root");
     #ifndef _WIN32
         if (terminal && !fromStdin && !debug && !astOnly) {
             auto session = std::make_shared<TerminalSession>();
@@ -415,6 +464,7 @@ int main(int argc, char **argv) {
                 if (!std::filesystem::is_regular_file(path)) throw std::runtime_error("Files path is not a regular file");
                 return std::filesystem::file_size(path);
             };
+            config.fileSystem = sandboxedFileSystem([root](const std::string &name) { return filePath(root, name); }, filesWrite);
         }
         if (debug) config.debug = [&](const dk3::DebugSnapshot &snapshot) {
             if (!debugger.pause(snapshot)) return;
@@ -445,18 +495,20 @@ int main(int argc, char **argv) {
                 printAst(dk3::parse(source)); return 0;
             }
             dk3::Ast checked = dk3::parse(source);
+            if (!evaluate && !fromStdin) { std::set<std::string> seen; loadImportedNatives(checked, directory, seen); }
+            nativePlugins.declare(**session);
             if (noCheck) {
                 auto diagnostics = (*session)->check(checked, false);
                 for (auto &diagnostic : diagnostics) diagnostic.warning = true;
                 printDiagnostics(diagnostics, true);
-                runtime = std::make_unique<dk3::Runtime>(config);
+                runtime = std::make_unique<dk3::Runtime>(config); nativePlugins.attach(*runtime);
                 runtime->run(text, filename);
             } else {
                 if (!printDiagnostics((*session)->check(checked, false), false)) return 65;
-                runtime = std::make_unique<dk3::Runtime>(config);
+                runtime = std::make_unique<dk3::Runtime>(config); nativePlugins.attach(*runtime);
                 runtime->run(checked);
             }
-        } else runtime = std::make_unique<dk3::Runtime>(config);
+        } else { nativePlugins.declare(**session); runtime = std::make_unique<dk3::Runtime>(config); nativePlugins.attach(*runtime); }
         if (repl || interactiveAfter) exitCode = shell(runtime, config, terminal, session, directory);
     } catch (const dk3::Error &error) {
         if (!debuggerStopped(error, debugger)) { report(error); exitCode = 65; }
@@ -470,6 +522,7 @@ int main(int argc, char **argv) {
         catch (const std::exception &error) { report(error); if (!exitCode) exitCode = 70; }
     }
     if (debug && !exitCode) std::cout << (debugger.quitting() ? "debug: stopped\n" : "debug: finished\n");
+    nativePlugins.detach();
 #ifndef _WIN32
     if (sockets) sockets->close();
 #endif

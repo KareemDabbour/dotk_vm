@@ -95,10 +95,10 @@ from IO import write
 from Math import toInt, toFloat, sin, cos
 from System import print
 
-var s = ".,-~:;=!*#$@"
-fn wrap(s, col) => f"{col}{s}{Ansi.RESET}"
+var s:String = ".,-~:;=!*#$@"
+fn wrap(s:String, col:String) -> String => f"{col}{s}{Ansi.RESET}"
 
-let STRS = [      wrap(".", Ansi.BLACK),
+let STRS: List<String> = [      wrap(".", Ansi.BLACK),
       wrap(",", Ansi.BLACK),
       wrap("-", Ansi.RED),
       wrap("~", Ansi.RED),
@@ -111,8 +111,8 @@ let STRS = [      wrap(".", Ansi.BLACK),
       wrap("$", Ansi.CYAN),
       wrap("@", Ansi.WHITE)]
 
-var screenWidth = 20
-var screenHeight = 20
+let screenWidth = 100
+let screenHeight = 100
 var theta_spacing = 0.07
 var phi_spacing = 0.02
 
@@ -123,26 +123,19 @@ var A = 0.0
 var B = 0.0
 var K1 = screenHeight*K2*3/(8*(R1+R2))
 
-fn pow(x, n) -> Int {
-  var result = 1
-  for (var i = 0; i < n; i += 1){
-    result *= x
-  }
-  return result
-}
 
-fn round(x: Float, n: Int) -> Float => toInt(x * pow(10, n) + 0.5) / pow(10, n)
-fn createBuff(width: Int, height: Int) -> List {
-  return Collections.range(height).map(fn(x)=>Collections.range(width).map(fn(y)=>null))
+fn round(x: Float, n: Int) -> Float => toInt(x * (10 ** n) + 0.5) / (10 ** n)
+fn createBuff<T>(width: Int, height: Int, defaultVal: T) -> List<List<T>> {
+  return Collections.range(height).map(fn(x)=>Collections.range(width).map(fn(y)=> defaultVal))
 }
-fn resetBuff(buff: List, val) -> List {
-  return buff.map(fn(row)=>row.map(fn(_)=>val))
+fn resetBuff<T>(buff: List<List<T>>, val: T) -> List<List<T>> {
+  return buff.map(fn(row: List<T>)=>row.map(fn(x:T)=>val))
 }
-fn run(){
+# fn run(){
 
 
-var output: List[List[String?]] = createBuff(screenWidth, screenHeight)
-var zbuffer: List[List[Float?]] = createBuff(screenWidth, screenHeight)
+var output: List<List<String>> = createBuff<String>(screenWidth, screenHeight, " ")
+var zbuffer: List<List<Float>> = createBuff<Float>(screenWidth, screenHeight, 0.0)
 var cosA = cos(A)
 var sinA = sin(A)
 var cosB = cos(B)
@@ -162,13 +155,13 @@ var xp = 0
 var yp = 0
 var L = 0.0
 
-for(var i = 0;i <10;i++){  
+for(;;){  
   cosA = cos(A)
   sinA = sin(A)
   cosB = cos(B)
   sinB = sin(B)
-  output = resetBuff(output, " ")
-  zbuffer = resetBuff(zbuffer, 0.0)
+  output = resetBuff<String>(output, " ")
+  zbuffer = resetBuff<Float>(zbuffer, 0.0)
 
 # print(output, zbuffer)
 # print(zbuffer.length())
@@ -187,8 +180,8 @@ for(var i = 0;i <10;i++){
       y = circlex * (sinB * cosphi - sinA * cosB * sinphi) + circley * cosA * cosB
       z = K2 + cosA * circlex * sinphi + circley * sinA
       ooz = 1 / z
-      xp = Math.floor(10 + K1* ooz * x)
-      yp = Math.floor(10 - K1* ooz * y)
+      xp = Math.floor(screenWidth / 2 + K1* ooz * x)
+      yp = Math.floor(screenHeight / 2 - K1* ooz * y)
       L = cosphi * costheta * sinB - cosA * costheta * sinphi - sinA * sintheta + cosB * (cosA * sintheta - costheta * sinA * sinphi)
     #   print(phi, theta, L, ooz, xp, yp) 
       if (L > 0){
@@ -220,6 +213,6 @@ for(var i = 0;i <10;i++){
   B += 0.02
 }
 
-}
+# }
 
-run()
+# run()

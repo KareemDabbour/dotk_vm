@@ -119,6 +119,18 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         case ByteOp::DeclareType: case ByteOp::Import: executeDeclaration(node, environment); break;
         case ByteOp::Throw: throwValue(frame.stack.back(), location); break;
         case ByteOp::Match: {
+            const auto &typedMatch = code.matches[instruction.operand];
+            if (std::any_of(typedMatch.arms.begin(), typedMatch.arms.end(), [](const auto &arm) { return !arm.type.empty(); })) {
+                Value subject = frame.stack.back(); bool matched = false;
+                for (const auto &arm : typedMatch.arms) {
+                    if (!arm.type.empty() && !valueMatches(subject, resolveContract(arm.type, environment, arm.span), arm.span)) continue;
+                    Object *scope = allocate(Kind::Environment, arm.span); scope->parent = environment; roots.push_back(scope);
+                    for (const auto &bound : arm.bindings) define(scope, bound, subject, false, "", arm.span);
+                    Value result = executeBytecode(*arm.code, scope, {}, arm.span); frame.stack.back() = result; roots.pop_back(); matched = true; break;
+                }
+                if (!matched) throw Error(location, "No matching arm", "match");
+                break;
+            }
             Object *value = byteObject(frame.stack.back(), location);
             if (value->kind != Kind::Variant) throw Error(location, "match expects an enum value", "type");
             const auto &match = code.matches[instruction.operand]; std::set<Object *> covered; bool wildcard = false; std::vector<Object *> constructors;
@@ -357,6 +369,11 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
         }
         case ByteOp::MatchTest: {
             Value subject = frame.stack.back();
+            if (!node->type.empty()) {
+                if (!valueMatches(subject, resolveContract(node->type, environment, location), location)) cursor = instruction.operand;
+                break;
+            }
+            if (node->text == "_") break;
             if (!std::holds_alternative<Object *>(subject) || std::get<Object *>(subject)->kind != Kind::Variant) throw Error(location, "match expects an enum value", "type");
             const std::string &pattern = node->text;
             if (pattern != "_") {
@@ -368,7 +385,9 @@ Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, co
             break;
         }
         case ByteOp::MatchBind: {
-            Object *subject = std::get<Object *>(frame.stack.back()); size_t first = static_cast<size_t>(instruction.integer);
+            size_t first = static_cast<size_t>(instruction.integer);
+            if (!node->type.empty()) { frame.locals[first] = frame.stack.back(); frame.initialized[first] = true; break; }
+            Object *subject = std::get<Object *>(frame.stack.back());
             for (size_t index = 0; index < instruction.operand && index < subject->items.size(); index++) { frame.locals[first + index] = subject->items[index]; frame.initialized[first + index] = true; }
             break;
         }

@@ -1,0 +1,15 @@
+# Run with `make example-plugin`. `import Stats` loads stats_module.dylib (.so on Linux) from this directory.
+import Stats
+
+System.print(Stats.gcd(84, 36), Stats.fnv1a("DotK 3"))
+System.print(Stats.mean([1.0, 2.0, 4.5]))
+
+let stats = Stats.create()
+for sample in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] { Stats.add(stats, sample) }
+let result = Stats.summary(stats)
+System.print(result["count"], result["mean"], result["stddev"], result["min"], result["max"])
+Stats.close(stats)
+Stats.close(stats)
+
+try { Stats.mean([]) } catch error { System.print(error.kind, error.message) }
+try { Stats.add(stats, 1.0) } catch error { System.print(error.kind) }

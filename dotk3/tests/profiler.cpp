@@ -37,7 +37,7 @@ int main() {
         dk3::Config config; config.optimizationLevel = level;
         config.profiler = std::make_shared<dk3::Profiler>(options, [&] { clock.cpu += 10; clock.wall += 20; return clock; });
         dk3::Runtime runtime(config);
-        runtime.run("fn twice(value: Int) -> Int { return value * 2 }; let result = twice(21); System.gc()", "profile-runtime.k3");
+        runtime.run("fn twice(value: Int) -> Int { return value * 2 }; let result = twice(21); GC.collect()", "profile-runtime.k3");
         assert(std::get<int64_t>(runtime.get("result")) == 42 && config.profiler->bytecodeCalls == 1 && config.profiler->lexicalCalls == 0 && config.profiler->gcCollections > 0);
         assert(config.profiler->optimizationLevel == level && config.profiler->opcodes.count("Call"));
     }
@@ -64,7 +64,7 @@ int main() {
         assert(config.profiler->opcodes.at("ResolveMethod") >= 10800 && config.profiler->opcodes.at("InvokeMethod") >= 10800);
         auto bindings = config.profiler->allocationKinds["BoundMethod"].objects;
         auto natives = config.profiler->allocationKinds["Native"].objects;
-        runtime.run("let detachedLength = values.length; let detachedContains = word.contains; System.gc(); let detachedResult = detachedLength() + bytes.length()", "detached-allocations.k3");
+        runtime.run("let detachedLength = values.length; let detachedContains = word.contains; GC.collect(); let detachedResult = detachedLength() + bytes.length()", "detached-allocations.k3");
         assert(config.profiler->allocationKinds["BoundMethod"].objects == bindings + 2 && config.profiler->allocationKinds["Native"].objects == natives);
         assert(std::get<int64_t>(runtime.get("detachedResult")) == 5);
     }

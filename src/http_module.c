@@ -231,21 +231,23 @@ static Value buildHttpResponseObject(const char *url,
     ObjInstance *result = newInstance(vm.baseObj);
     push(OBJ_VAL(result));
 
-    tableSet(&result->fields, copyString("url", 3), OBJ_VAL(copyString(url, (int)strlen(url))));
+    push(OBJ_VAL(copyString(url, (int)strlen(url))));
+    tableSet(&result->fields, copyString("url", 3), peek(0));
+    pop();
     tableSet(&result->fields, copyString("status", 6), NUM_VAL((double)status));
     tableSet(&result->fields, copyString("ok", 2), BOOL_VAL(status >= 200 && status < 300));
 
-    tableSet(&result->fields,
-             copyString("statusText", 10),
-             OBJ_VAL(copyString(statusText, statusTextLen)));
+    push(OBJ_VAL(copyString(statusText, statusTextLen)));
+    tableSet(&result->fields, copyString("statusText", 10), peek(0));
+    pop();
 
-    tableSet(&result->fields,
-             copyString("headers", 7),
-             OBJ_VAL(copyString(headers, headersLen)));
+    push(OBJ_VAL(copyString(headers, headersLen)));
+    tableSet(&result->fields, copyString("headers", 7), peek(0));
+    pop();
 
-    tableSet(&result->fields,
-             copyString("body", 4),
-             OBJ_VAL(copyString(body, bodyLen)));
+    push(OBJ_VAL(copyString(body, bodyLen)));
+    tableSet(&result->fields, copyString("body", 4), peek(0));
+    pop();
 
     return pop();
 }

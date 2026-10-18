@@ -26,6 +26,6 @@ if System.args.length() == 0 {
             if key == 113 or key == 3 { session.running = false }
         }
         Tasks.pump(1)
-        System.delay(10)
+        Time.sleep(10)
     }
 }

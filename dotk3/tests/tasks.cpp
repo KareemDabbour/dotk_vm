@@ -7,16 +7,16 @@ int main() {
     dk3::Config config;
     config.write = [&](const std::string &text) { output += text; };
     dk3::Runtime runtime(config);
-    runtime.run("fn worker() { defer System.print('cleanup')\nyield null\nyield 2 }\nlet job = Tasks.spawn(worker())\nSystem.print(job.status)\nSystem.print(Tasks.pump(1))\nSystem.print(job.status)\nSystem.gc()\nTasks.cancel(job)\nSystem.print(job.status)\nTasks.cancel(job)\nSystem.print(Tasks.pump(1))", "task-lifecycle.k3");
+    runtime.run("fn worker() { defer System.print('cleanup')\nyield null\nyield 2 }\nlet job = Tasks.spawn(worker())\nSystem.print(job.status)\nSystem.print(Tasks.pump(1))\nSystem.print(job.status)\nGC.collect()\nTasks.cancel(job)\nSystem.print(job.status)\nTasks.cancel(job)\nSystem.print(Tasks.pump(1))", "task-lifecycle.k3");
     assert(output == "ready\n1\nready\ncleanup\ncancelled\n0\n");
     output.clear();
-    runtime.run("fn child(label) { defer System.print(label)\nwhile true { yield null } }\nfn parentWork() { defer System.print('parent')\nTasks.spawn(child('first'))\nTasks.spawn(child('second'))\nwhile true { yield null } }\nlet family = Tasks.spawn(parentWork())\nTasks.pump(3)\nSystem.gc()\nTasks.cancel(family)\nSystem.print(family.status)", "task-family.k3");
+    runtime.run("fn child(label) { defer System.print(label)\nwhile true { yield null } }\nfn parentWork() { defer System.print('parent')\nTasks.spawn(child('first'))\nTasks.spawn(child('second'))\nwhile true { yield null } }\nlet family = Tasks.spawn(parentWork())\nTasks.pump(3)\nGC.collect()\nTasks.cancel(family)\nSystem.print(family.status)", "task-family.k3");
     assert(output == "second\nfirst\nparent\ncancelled\n"); output.clear();
     runtime.run("fn completes() { defer System.print('parent')\nTasks.spawn(child('child'))\nyield null }\nlet completion = Tasks.spawn(completes())\nTasks.pump(3)\nSystem.print(completion.status)", "task-completion.k3");
     assert(output == "child\nparent\ndone\n"); output.clear();
     runtime.run("fn explicitReturn() { defer System.print('parent')\nTasks.spawn(child('child'))\nyield null\nreturn }\nlet returning = Tasks.spawn(explicitReturn())\nTasks.pump(3)\nSystem.print(returning.done)", "task-return.k3");
     assert(output == "child\nparent\ntrue\n"); output.clear();
-    runtime.run("fn badChild() { defer System.print('child')\nyield null\nthrow ['failure'] }\nfn failingParent() { defer System.print('parent')\nTasks.spawn(badChild())\nwhile true { yield null } }\nlet failing = Tasks.spawn(failingParent())\nTasks.pump(2)\ntry { Tasks.pump(2) } catch error { System.gc()\nSystem.print(error[0]) }\nSystem.print(failing.status)\nSystem.print(failing.error[0])", "task-failure.k3");
+    runtime.run("fn badChild() { defer System.print('child')\nyield null\nthrow ['failure'] }\nfn failingParent() { defer System.print('parent')\nTasks.spawn(badChild())\nwhile true { yield null } }\nlet failing = Tasks.spawn(failingParent())\nTasks.pump(2)\ntry { Tasks.pump(2) } catch error { GC.collect()\nSystem.print(error[0]) }\nSystem.print(failing.status)\nSystem.print(failing.error[0])", "task-failure.k3");
     assert(output == "child\nparent\nfailure\nfailed\nfailure\n"); output.clear();
     runtime.run("fn selfWork() { defer System.print('self cleanup')\nyield null\nTasks.cancel(selfTask)\nSystem.print('unexpected')\nyield 2 }\nlet selfTask = Tasks.spawn(selfWork())\nTasks.pump(2)\nSystem.print(selfTask.status)", "self-cancel.k3");
     assert(output == "self cleanup\ncancelled\n"); output.clear();
@@ -28,7 +28,7 @@ int main() {
     assert(output == "state\nstate\nstate\ncancelled\n"); output.clear();
     runtime.run("fn forbiddenPump() { yield null\nTasks.pump(1) }\nlet recursive = Tasks.spawn(forbiddenPump())\nTasks.pump(1)\ntry { Tasks.pump(1) } catch error { System.print(error.kind) }\nSystem.print(recursive.status)", "task-reentry.k3");
     assert(output == "state\nfailed\n"); output.clear();
-    runtime.run("fn badCleanup() { defer System.print('child outer')\ndefer fn() { throw ['cleanup failure'] }()\nyield null }\nfn cleanupParent() { defer System.print('parent')\nTasks.spawn(badCleanup())\nwhile true { yield null } }\nlet cleanupFamily = Tasks.spawn(cleanupParent())\nTasks.pump(2)\ntry { Tasks.cancel(cleanupFamily) } catch error { System.gc()\nSystem.print(error[0]) }\nSystem.print(cleanupFamily.status)\nTasks.cancel(cleanupFamily)", "task-cleanup-error.k3");
+    runtime.run("fn badCleanup() { defer System.print('child outer')\ndefer fn() { throw ['cleanup failure'] }()\nyield null }\nfn cleanupParent() { defer System.print('parent')\nTasks.spawn(badCleanup())\nwhile true { yield null } }\nlet cleanupFamily = Tasks.spawn(cleanupParent())\nTasks.pump(2)\ntry { Tasks.cancel(cleanupFamily) } catch error { GC.collect()\nSystem.print(error[0]) }\nSystem.print(cleanupFamily.status)\nTasks.cancel(cleanupFamily)", "task-cleanup-error.k3");
     assert(output == "child outer\nparent\ncleanup failure\nfailed\n"); output.clear();
     runtime.run("fn transient() { defer System.print('transient cleanup')\nyield null }\nTasks.spawn(transient())", "rooted-task.k3");
     runtime.collect(); assert(runtime.pump(2) == 2);

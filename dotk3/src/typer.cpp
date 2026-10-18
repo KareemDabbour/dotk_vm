@@ -1709,9 +1709,43 @@ private:
 
     static std::string dottedToNested(std::string name) { std::replace(name.begin(), name.end(), '.', '_'); return name; }
 
+    // `match value { n: Int => ..., s: String? => ..., _ => ... }`: each arm tests the run-time type and narrows the bound name.
+    Ty typeMatch(const Ast &node, Ty subject, Ty expected) {
+        Ty remaining = subject, result = nullptr; bool wildcard = false;
+        for (size_t index = 1; index < node->children.size(); index++) {
+            const Ast &arm = node->children[index];
+            pushScope();
+            if (arm->type.empty() && arm->text != "_") error(arm->span, "Type patterns cannot be mixed with enum variant patterns");
+            else if (arm->type.empty()) {
+                if (wildcard) error(arm->span, "Unreachable match arm after '_'");
+                wildcard = true;
+            } else {
+                Ty target = resolveType(arm->typeExpr);
+                if (target->tag == TypeTag::Named && !target->args.empty()) for (Ty argument : target->args)
+                    if (argument->tag != TypeTag::Wildcard || argument->wildcard != WildcardBound::None) { error(arm->span, "Type arguments are erased at run time; match against " + target->info->name + "<?> instead"); break; }
+                if (wildcard) error(arm->span, "Unreachable match arm after '_'");
+                else if (target->tag != TypeTag::Error) {
+                    if (!ty.isSubtype(target, subject) && !ty.isSubtype(subject, target) && ty.stripNull(subject)->tag != TypeTag::Object)
+                        error(arm->span, show(subject) + " can never be " + show(target));
+                    else if (remaining == ty.never()) error(arm->span, "Unreachable match arm; " + show(target) + " is already covered");
+                    if (!arm->names.empty()) declareValue(arm->names[0], narrowTo(subject, target), false, arm->span);
+                    remaining = excludeType(remaining, target);
+                }
+            }
+            Ty value = expr(arm->children[0], expected);
+            popScope();
+            if (expected) assignable(value, expected, arm->children[0]->span);
+            result = result ? ty.join(result, value) : value;
+        }
+        if (!wildcard && remaining != ty.never()) error(node->span, "match is not exhaustive; " + show(remaining) + " is not covered (add a '_' arm)");
+        return expected && result && ty.isSubtype(result, expected) ? expected : (result ? result : ty.never());
+    }
+
     Ty matchExpression(const Ast &node, Ty expected) {
         Ty subject = expr(node->children[0]);
         if (subject->tag == TypeTag::Error) { for (size_t index = 1; index < node->children.size(); index++) expr(node->children[index]->children[0]); return subject; }
+        bool typed = false; for (size_t index = 1; index < node->children.size(); index++) if (!node->children[index]->type.empty()) typed = true;
+        if (typed) return typeMatch(node, subject, expected);
         if (subject->tag != TypeTag::Named || subject->info->kind != ClassKind::Enum) { error(node->span, "match requires an enum value, got " + show(subject)); return ty.error(); }
         ClassInfo *info = subject->info; std::map<Ty, Ty> replacements;
         for (size_t index = 0; index < info->params.size() && index < subject->args.size(); index++) replacements[info->params[index]] = subject->args[index];
@@ -1743,8 +1777,18 @@ private:
 
 }
 
-std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader, std::map<std::string, Ast> *modules) {
-    Typer typer; typer.setLoader(loader); typer.check(program);
+namespace {
+void declareHosts(Typer &typer, const std::vector<HostModule> &hosts) {
+    for (const auto &host : hosts) {
+        std::string stub = "class " + host.name + " {\n", problem;
+        for (const auto &entry : host.exports) stub += "static fn " + entry.first + entry.second + "\n";
+        typer.declareHost(stub + "}\n", problem);  // an invalid signature only hides that module
+    }
+}
+}
+
+std::vector<Diagnostic> typeCheck(const Ast &program, const ModuleLoader &loader, std::map<std::string, Ast> *modules, const std::vector<HostModule> &hosts) {
+    Typer typer; typer.setLoader(loader); declareHosts(typer, hosts); typer.check(program);
     if (modules) *modules = typer.loadedPrograms();
     return typer.diagnostics;
 }
@@ -1792,7 +1836,7 @@ Ast memberAt(const Ast &node, size_t position) {
 }
 }
 
-std::vector<CompletionItem> completeMembers(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader) {
+std::vector<CompletionItem> completeMembers(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader, const std::vector<HostModule> &hosts) {
     offset = std::min(offset, source->text.size()); size_t start = offset;
     while (start && (std::isalnum(static_cast<unsigned char>(source->text[start - 1])) || source->text[start - 1] == '_')) start--;
     if (!start || source->text[start - 1] != '.') return {};
@@ -1800,12 +1844,12 @@ std::vector<CompletionItem> completeMembers(const std::shared_ptr<const Source> 
     Ast parsed;
     try { parsed = parse(std::make_shared<Source>(Source{source->file, edited})); } catch (const Error &) { return {}; }
     Ast access = memberAt(parsed, start); if (!access) return {};
-    Typer typer; typer.setLoader(loader);
+    Typer typer; typer.setLoader(loader); declareHosts(typer, hosts);
     try { typer.check(parsed); } catch (const Error &) { return {}; }
     return typer.completionsFor(access->children[0], parsed, start);
 }
 
-std::string hoverText(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader) {
+std::string hoverText(const std::shared_ptr<const Source> &source, size_t offset, const ModuleLoader &loader, const std::vector<HostModule> &hosts) {
     Ast parsed; std::vector<Token> tokens;
     try { parsed = parse(source); tokens = lex(source); } catch (const Error &) { return {}; }
     size_t index = 0; bool found = false;
@@ -1813,7 +1857,7 @@ std::string hoverText(const std::shared_ptr<const Source> &source, size_t offset
         if (tokens[index].kind == TokenKind::Name && offset >= tokens[index].span.offset && offset <= tokens[index].span.offset + tokens[index].span.length) { found = true; break; }
     if (!found) return {};
     const Token &token = tokens[index];
-    Typer typer; typer.setLoader(loader);
+    Typer typer; typer.setLoader(loader); declareHosts(typer, hosts);
     try { typer.check(parsed); } catch (const Error &) { return {}; }
     if (index && tokens[index - 1].text == ".") {
         Ast access = memberAt(parsed, token.span.offset);

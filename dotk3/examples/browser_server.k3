@@ -43,13 +43,13 @@ fn serve(port: Int, limit: Int) -> Null {
     defer Sockets.close(server)
     IO.write(f"UI listening http://127.0.0.1:{Sockets.port(server)}\n")
     var handled = 0
-    var previous = System.monotonicMillis()
+    var previous = Time.monotonicMillis()
     while limit == 0 or handled < limit {
         let client = Sockets.accept(server, 5)
         if client != null { reply(client, game, assets); handled += 1 }
-        let now = System.monotonicMillis()
+        let now = Time.monotonicMillis()
         if now - previous >= 130 { game.tick(); previous = now }
-        System.gc()
+        GC.collect()
     }
 }
 

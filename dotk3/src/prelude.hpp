@@ -101,9 +101,43 @@ class Error {
 class System {
     static let args: Tuple<String>
     static fn print(*values: Object?) -> Null
-    static fn gc() -> Null
+    static fn platform() -> String
+    static fn env(name: String) -> String?
+}
+class Time {
+    static fn unixMillis() -> Int
     static fn monotonicMillis() -> Int
-    static fn delay(milliseconds: Int) -> Null
+    static fn sleep(milliseconds: Int) -> Null
+    static fn make(year: Int, month: Int, day: Int, hour: Int = 0, minute: Int = 0, second: Int = 0, millisecond: Int = 0) -> Int
+    static fn parts(millis: Int) -> Map<String, Int>
+    static fn format(millis: Int, pattern: String = '%Y-%m-%dT%H:%M:%SZ') -> String
+    static fn parse(text: String) -> Int
+}
+class Path {
+    static fn join(first: String, *more: String) -> String
+    static fn normalize(path: String) -> String
+    static fn name(path: String) -> String
+    static fn stem(path: String) -> String
+    static fn extension(path: String) -> String
+    static fn parent(path: String) -> String
+    static fn isAbsolute(path: String) -> Bool
+    static fn parts(path: String) -> List<String>
+}
+class Encoding {
+    static fn toHex(data: String | Bytes) -> String
+    static fn fromHex(text: String) -> Bytes
+    static fn toBase64(data: String | Bytes) -> String
+    static fn fromBase64(text: String) -> Bytes
+    static fn urlEncode(data: String | Bytes) -> String
+    static fn urlDecode(text: String) -> String
+}
+class Hash {
+    static fn sha256(data: String | Bytes) -> String
+    static fn crc32(data: String | Bytes) -> Int
+}
+class GC {
+    static fn collect() -> Null
+    static fn stats() -> Map<String, Int>
 }
 class Math {
     static let PI: Float
@@ -137,11 +171,22 @@ class Math {
 class Collections {
     static fn range(first: Int, second: Int? = null, step: Int = 1) -> List<Int>
     static fn len(value: Collections.Sized) -> Int
+    static fn sorted<T>(items: Iterable<T>, compare: (fn(T, T) -> Int)? = null) -> List<T>
+    static fn reversed<T>(items: Iterable<T>) -> List<T>
+    static fn min<T>(items: Iterable<T>) -> T
+    static fn max<T>(items: Iterable<T>) -> T
+    static fn enumerate<T>(items: Iterable<T>, start: Int = 0) -> List<Tuple<Object?>>
+    static fn zip<A, B>(first: Iterable<A>, second: Iterable<B>) -> List<Tuple<Object?>>
 }
 class Text {
     static fn str(value: Object?) -> String
     static fn encode(value: String) -> Bytes
     static fn decode(value: Bytes) -> String
+    static fn parseInt(text: String, radix: Int = 10) -> Int
+    static fn tryParseInt(text: String, radix: Int = 10) -> Int?
+    static fn parseFloat(text: String) -> Float
+    static fn tryParseFloat(text: String) -> Float?
+    static fn parseBool(text: String) -> Bool
 }
 class Random {
     static fn seed(value: Int) -> Null
@@ -149,6 +194,7 @@ class Random {
     static fn int(first: Int, second: Int? = null) -> Int
     static fn choice<T>(items: List<T>) -> T
     static fn shuffle<T>(items: List<T>) -> Null
+    static fn uuid() -> String
 }
 class Json {
     static fn parse(source: String) -> Object?
@@ -160,6 +206,10 @@ class Reflection {
     static fn binding(name: String) -> Object?
     static fn bindings() -> List<String>
     static fn doc(value: Object?) -> String
+    static fn has(value: Object?, name: String) -> Bool
+    static fn get(value: Object?, name: String) -> Object?
+    static fn isInstance(value: Object?, type: Type) -> Bool
+    static fn id(value: Object) -> Int
 }
 class Tasks {
     static fn spawn<T>(generator: Generator<T>) -> Task<T>
@@ -176,6 +226,21 @@ class Files {
     static fn readBytes(path: String) -> Bytes
     static fn exists(path: String) -> Bool
     static fn size(path: String) -> Int
+    static fn open(path: String, mode: String = 'r') -> Resource
+    static fn read(file: Resource, maximum: Int) -> Bytes
+    static fn readLine(file: Resource) -> String?
+    static fn write(file: Resource, data: String | Bytes) -> Int
+    static fn seek(file: Resource, offset: Int, origin: String = 'start') -> Int
+    static fn tell(file: Resource) -> Int
+    static fn flush(file: Resource) -> Null
+    static fn close(file: Resource) -> Null
+    static fn writeText(path: String, data: String | Bytes) -> Null
+    static fn append(path: String, data: String | Bytes) -> Null
+    static fn list(path: String) -> List<String>
+    static fn isDirectory(path: String) -> Bool
+    static fn mkdir(path: String) -> Null
+    static fn remove(path: String) -> Null
+    static fn rename(source: String, target: String) -> Null
 }
 class Terminal {
     static fn open() -> Null

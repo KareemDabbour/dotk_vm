@@ -122,7 +122,7 @@ across loop transfers, including suspended generators.
 Compiled calls use reusable frame-owned slots/operand stacks and direct return/jump
 instructions rather than per-call heap environments and normal-return exceptions.
 GC traces frame values/contracts. Allocation pressure now requests collection at
-safe statement/instruction boundaries; explicit System.gc remains available, but
+safe statement/instruction boundaries; `GC.collect()` still requests one explicitly, but
 long-running allocation loops no longer require hand-inserted checkpoints. Object
 limits still apply and external/native payloads remain trusted. Allocation itself
 does not collect unrooted host temporaries.
@@ -178,7 +178,7 @@ System.print(add(second: 3, first: 1))
 
 Not every value is a heap object: Int/Float/Bool remain unboxed variant values.
 Object is the common logical non-null annotation and open class root, exported
-bare and as System.Object. User classes and collection classes inherit the root;
+bare and as Object. User classes and collection classes inherit the root;
 primitives/records/resources may satisfy Object without boxing or losing their
 existing equality semantics. `Object?` accepts null and is the top type; there is
 no `Any`. Qualified/imported Object aliases have the same contract.
@@ -208,7 +208,7 @@ and cancellation retain their existing uncatchable behavior.
 IO.write(String|Bytes) writes without an implicit newline through the host output
 callback. IO.readLine() returns String? (null at EOF) through an explicit host
 callback with a 64-KiB default input bound. IO.Files aliases the same readonly Files
-capability, not a new grant. System.monotonicMillis() and System.delay(Int) are
+capability, not a new grant. Time.monotonicMillis() and Time.sleep(Int) are
 callback-based timing services, denied in embedding defaults; delay is bounded by
 the host (default maximum 1000 ms). The CLI supplies line input, monotonic clock,
 bounded delay and flushing output adapters. Source loaded from stdin consumes that
@@ -539,18 +539,25 @@ explicit readonly namespaces, and old flat aliases are intentionally removed:
 
 | Namespace | Members |
 | --- | --- |
-| `System` | `print`, `gc`, `args`, `Object`, `Error`, `monotonicMillis`, `delay` |
+| `System` | `print`, `args`, `platform`, `env` |
+| `GC` | `collect`, `stats` |
+| `Time` | `unixMillis`, `monotonicMillis`, `sleep`, `make`, `parts`, `format`, `parse` |
+| `Path` | `join`, `normalize`, `name`, `stem`, `extension`, `parent`, `isAbsolute`, `parts` |
+| `Encoding` | `toHex`, `fromHex`, `toBase64`, `fromBase64`, `urlEncode`, `urlDecode` |
+| `Hash` | `sha256`, `crc32` |
 | `IO` | `write`, `readLine`, `Files`, `Terminal` |
 | `Reflection` | `type`, `members`, `binding`, `bindings`, `doc` |
 | `Collections` | `len`, `range`, `List`, `Map`, `Tuple`, `Set`, `Sized` |
-| `Text` | `str`, `encode`, `decode` |
+| `Text` | `str`, `encode`, `decode`, `parseInt`, `tryParseInt`, `parseFloat`, `tryParseFloat`, `parseBool` |
 | `Math` | `toInt`, `toFloat`, `PI`, `TAU`, `E`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `toRadians`, `toDegrees`, `sqrt`, `exp`, `log`, `log2`, `log10`, `pow`, `hypot`, `floor`, `ceil`, `round` |
 | `Tasks` | `spawn`, `pump`, `cancel`, `close` |
 | `Files` | `readText`, `readBytes`, `exists`, `size` |
 | `Json` | `parse`, `stringify` |
-| `Random` | `seed`, `float`, `int`, `choice`, `shuffle` |
+| `Random` | `seed`, `float`, `int`, `choice`, `shuffle`, `uuid` |
 
-Use `System.gc()`, `Reflection.members(point)`, and `System.print(value)`.
+`Object` and `Error` are plain globals, not `System` members.
+
+Use `GC.collect()`, `Reflection.members(point)`, and `System.print(value)`.
 `Reflection.binding("point.x")` reads a session binding/dotted field path without
 calling functions; `Reflection.bindings()` lists the current script/session's
 bindings, not caller-local stack frames. Modules and their members are not
@@ -631,7 +638,7 @@ fn destination(event: Event) -> Vec2? {
 }
 
 try {
-    throw System.Error("application", "Could not complete the operation")
+    throw Error("application", "Could not complete the operation")
 } catch error {
     System.print(error.kind, error.message)
 } finally {
@@ -655,6 +662,25 @@ preserves typed fields/payload bindings, and reports missing variants in matches
 whose enum type is known locally. Duplicate/unreachable arms and immutable field
 writes are diagnosed. Dynamic and module-derived values remain runtime-checked.
 See [examples/records_enums.k3](examples/records_enums.k3).
+
+`match` also tests run-time types with `name: Type` arms. The name is bound to the
+subject, narrowed to that type; `_` ignores it, and `_ =>` is the catch-all. Types
+are checked in order, and the checker rejects arms that can never match and
+matches that do not cover every type of a union (use `_`, or an `Object` arm for
+an `Object?` subject). Generic arguments are erased at run time, so write
+`List<?>` rather than `List<Int>`. Enum variant arms and type arms cannot be mixed.
+
+```dotk3
+fn describe(value: Object?) -> String {
+    return match value {
+        n: Int => f"int {n + 1}",
+        s: String => f"string of {s.length()}",
+        items: List<?> => f"list of {items.length()}",
+        _: Null => "nothing",
+        _ => "something else"
+    }
+}
+```
 
 Module-qualified annotations now work at runtime, including ordinary function
 parameters/returns and nullable/list/tuple element contracts:
@@ -897,6 +923,20 @@ preemptible. Grapheme indexing, normalization, regex/default-whitespace splittin
 and automatic conversion remain pending. See
 [examples/string_methods.k3](examples/string_methods.k3).
 
+## ASCII OBJ Viewer
+
+[examples/obj.k3](examples/obj.k3) parses Wavefront `.obj` files (`v` and `f` lines, with `v/t/n`
+entries, negative indices and polygon fans) and renders them as shaded, depth-buffered
+ASCII from a field-of-view camera. [examples/obj_viewer.k3](examples/obj_viewer.k3) adds
+the controls and needs a terminal:
+
+```bash
+dotk3 --files-root . examples/obj_viewer.k3 examples/models/cow.obj 80 30
+```
+
+W/S move, A/D strafe, Q/E go down/up, J/L or the arrow keys turn, I/K look up/down,
+`+`/`-` change the field of view, Space starts or stops the model's rotation, and X quits.
+
 ## Read-Only Files
 
 Files is an always-discoverable readonly namespace, but actual access is disabled
@@ -932,8 +972,51 @@ invalidating existing results. Details are in
 This is not a hostile-code sandbox: filesystem checks/open have a TOCTOU race,
 native I/O may block and is not preempted by script budgets, and existing script/
 module loading policies are unchanged. Read limits bound result bytes, not total
-process memory. Writes, directory enumeration, streaming/open handles and async
-I/O are not implemented. See [examples/files.k3](examples/files.k3).
+process memory. Async I/O is not implemented. See [examples/files.k3](examples/files.k3).
+
+### File Handles and Writes
+
+`--files-root DIR` also enables handle-based reads and directory queries; adding
+`--files-write` allows changes below the same root. Without it every mutating
+operation fails with `io`; with no root at all they fail with `capability`.
+
+```dotk3
+let file = Files.open("log.txt", "w")   # modes: r, w, a, r+, w+, a+
+Files.write(file, "first\nsecond\n")
+Files.close(file)                      # idempotent; unclosed files close when collected
+
+let input = Files.open("log.txt")
+System.print(Files.readLine(input))    # String? (null at EOF; \n and \r\n removed)
+System.print(Files.read(input, 4))     # Bytes (empty at EOF)
+Files.seek(input, 0)                   # origin: "start" (default), "current", "end"
+System.print(Files.tell(input))        # Int position
+```
+
+Whole-file helpers: `writeText(path, data)`, `append(path, data)`. Directory
+operations: `list(path) -> List<String>` (sorted), `isDirectory`, `mkdir` (creates
+parents), `remove` (files or empty directories) and `rename` (refuses to overwrite).
+A handle is a `Resource`; using a closed one is a `state` error. The same sandbox
+rules as `readText` apply to every path. C++ hosts supply `Config::fileSystem`.
+
+```bash
+dotk3 --files-root . --files-write script.k3
+```
+
+## System, GC, Reflection and Collections
+
+- `System.platform() -> String` (`macos`, `linux`, `windows`) and
+  `System.env(name) -> String?`. Environment access needs `--env` (otherwise
+  `capability`).
+- `GC.collect()` requests a collection at the next safe point; `GC.stats() ->
+  Map<String, Int>` reports `objects`, `collections`, `nextCollection`, `objectLimit`
+  and `steps`.
+- `Reflection.has(value, name)`, `Reflection.get(value, name)`,
+  `Reflection.isInstance(value, type)` (classes, records, traits, enums, built-in
+  collections) and `Reflection.id(value)` join `type/members/binding/doc`.
+- `Collections.sorted(items, compare = null)`, `reversed`, `min`, `max`, `enumerate(items,
+  start = 0)` and `zip(a, b)` accept any iterable. Numbers and Strings order
+  naturally; `compare(a, b)` returns a negative Int for "a first". Sorting is stable.
+  `enumerate`/`zip` return a `List` of `Tuple` pairs.
 
 ## JSON Interchange
 
@@ -1278,7 +1361,52 @@ before publication. After an object-limit failure, collect abandoned staged obje
 before retrying. Imports/aliases and Reflection.doc/members work without a source
 resolver. Names/docs are copied; callback code and userdata must outlive the VM.
 Module callbacks are positional-only; `dk3_define_native` takes a signature too.
-This is a versioned registration ABI, not a dynamic loader or full editor manifest.
+This is a versioned registration ABI, not a full editor manifest.
+
+### Writing a Native Module in C
+
+[examples/native/stats_module.c](examples/native/stats_module.c) is a complete
+module (Int/String/List arguments, a Map result, a resource with a dispose
+callback, and errors). A plugin only includes `dotk3.h` and exports one function:
+
+```c
+const DK3NativeModule *dk3_module_entry(void);   /* returns name + DK3NativeExport table */
+```
+
+Each export is a name, a declaration tail the type checker uses
+(`"(a: Int, b: Int) -> Int"`), a `DK3Native` callback and optional docs. Inside a
+callback read arguments with `dk3_native_int/float/string/...`, return with
+`dk3_native_return_*`, and fail with `dk3_native_error` (a catchable `Error` of
+kind `native`). Release every `DK3Value` obtained from `dk3_native_argument`,
+`dk3_native_sequence_get`, `dk3_native_make_*` etc. with `dk3_native_release`.
+
+```bash
+make example-plugin     # builds the library, copies it beside examples/native/stats_demo.k3, runs the demo
+```
+
+Scripts load a plugin with a plain `import Stats` (or `from Stats import gcd`): when
+no `Stats.k3` exists, the directory of the running script is searched for
+`Stats.<ext>`, `libStats.<ext>` or `stats_module.<ext>` (`.dylib` on macOS, `.so` on
+Linux), and the module name it exports must match the import. Imported `.k3` files
+may import native modules the same way. Automatic discovery applies to script files
+only; `-e`, stdin, the REPL and `--check` need `dotk3 --native PATH` (repeatable,
+any location), which also makes the signatures visible to the checker and REPL.
+
+The language server finds libraries the same way for open files: it calls the
+library's `dk3_module_entry` to read the export table (no export runs), so
+diagnostics, hover and completion know `Stats`. That executes the library's load
+code; start `dotk3-lsp --no-native` to disable it. Rebuilt libraries are picked up
+after restarting the server.
+
+The library does not link DotK 3; the `dotk3` executable provides the `dk3_*`
+symbols. Build your own with `cc -fPIC -shared -I include mod.c -o mod.dylib
+-undefined dynamic_lookup` on macOS or `cc -fPIC -shared -I include mod.c -o mod.so`
+on Linux. Resources are disposed when the CLI exits or the REPL is reset. Loading
+runs native code with the full privileges of the process, so a library sitting
+next to a script is trusted exactly like the script itself.
+
+To embed DotK 3 in a C program instead, call `dk3_register_module` as in
+[examples/structured_host.c](examples/structured_host.c).
 
 ## Coverage and Next Work
 
@@ -1318,7 +1446,7 @@ class Counter {
 }
 let counter = Counter(value: 2)
 let increment: fn(Int) -> Int = counter.add
-System.gc()
+GC.collect()
 System.print(increment(3))
 ```
 

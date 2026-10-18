@@ -59,16 +59,30 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
         {
             collectGarbage();
         }
+        if (vm.embedded && vm.bytesAllocated > vm.maxHeapSize)
+        {
+            if (!vm.gcDisabled)
+                collectGarbage();
+            if (vm.bytesAllocated > vm.maxHeapSize)
+                vmHostAllocationFailure();
+        }
     }
 
     if (newSize == 0)
     {
-        free(pointer);
+        if (vm.embedded)
+            vmHostReallocate(pointer, oldSize, 0);
+        else
+            free(pointer);
         return NULL;
     }
-    void *result = realloc(pointer, newSize);
+    void *result = vm.embedded ? vmHostReallocate(pointer, oldSize, newSize) : realloc(pointer, newSize);
     if (result == NULL)
+    {
+        if (vm.embedded)
+            vmHostAllocationFailure();
         exit(1);
+    }
     return result;
 }
 
@@ -89,7 +103,11 @@ void markObj(Obj *object)
         vm.grayStack = (Obj **)realloc(vm.grayStack, sizeof(Obj *) * vm.grayCapacity);
 
         if (vm.grayStack == NULL)
+        {
+            if (vm.embedded)
+                vmHostAllocationFailure();
             exit(1);
+        }
     }
     vm.grayStack[vm.grayCount++] = object;
 }
@@ -107,6 +125,8 @@ static void markArray(ValueArray *array)
         markValue(array->values[i]);
     }
 }
+
+static void markThreadRoots(DotKThread *thread);
 
 static void blackenObject(Obj *object)
 {
@@ -181,6 +201,7 @@ static void blackenObject(Obj *object)
     {
         ObjBoundBuiltin *bound = (ObjBoundBuiltin *)object;
         markValue(bound->receiver);
+        markObj((Obj *)bound->native);
         break;
     }
     case OBJ_SLICE:
@@ -245,17 +266,9 @@ static void blackenObject(Obj *object)
         if (foreign->type == TYPE_THREAD && foreign->ptr)
         {
             DotKThread *t = (DotKThread *)foreign->ptr;
-            markObj((Obj *)t->closure);
-            markValue(t->result);
-            if (t->errorMsg)
-                markObj((Obj *)t->errorMsg);
+            markThreadRoots(t);
             for (int i = 0; i < t->argCount; i++)
                 markValue(t->args[i]);
-            int stackUsed = (int)(t->stackTop - t->stack);
-            for (int i = 0; i < stackUsed; i++)
-                markValue(t->stack[i]);
-            for (int i = 0; i < t->frameCount; i++)
-                markObj((Obj *)t->frames[i].closure);
         }
         break;
     }
@@ -521,7 +534,6 @@ static void markRoots()
 
     markTable(&vm.globals);
     markTable(&vm.constGlobals);
-    markTable(&vm.strings);
     markTable(&vm.imports);
     markTable(&vm.importFuncs);
     markObj((Obj *)vm.currentModuleExports);
@@ -557,9 +569,23 @@ static void markRoots()
     markObj((Obj *)vm.stringIteratorClass);
     markObj((Obj *)vm.mapIteratorClass);
     markObj((Obj *)vm.lastError);
+    markObj((Obj *)vm.lastErrorTrace);
+    markObj((Obj *)vm.clazzStr);
+    markObj((Obj *)vm.fileClass);
+    markObj((Obj *)vm.sqlClass);
     markObj((Obj *)vm.errorClass);
     markObj((Obj *)vm.threadClass);
     markObj((Obj *)vm.baseObj);
+    vmMarkTransientRoots();
+    if (vm.embedded)
+        vmHostMarkRoots();
+    for (int entry = 0; entry < vm.profilerEntryCount; entry++)
+        markObj((Obj *)vm.profilerEntries[entry].function);
+    for (int entry = 0; entry < vm.callGraphEntryCount; entry++)
+    {
+        markObj((Obj *)vm.callGraphEntries[entry].caller);
+        markObj((Obj *)vm.callGraphEntries[entry].callee);
+    }
 }
 
 void traceReferences()
@@ -599,12 +625,14 @@ static void sweep()
 
 void collectGarbage()
 {
+    if (vm.embedded)
+        vmHostRecordCollection();
 #ifdef DEBUG_LOG_GC
     printf("-- gc begin\n");
     size_t before = vm.bytesAllocated;
 #endif
     /* Optional runtime GC debug output when DOTK_DEBUG_GC is set. */
-    if (gcDebugEnabled())
+    if (!vm.embedded && gcDebugEnabled())
     {
         size_t objCount = 0;
         size_t cnt_string = 0, cnt_function = 0, cnt_closure = 0, cnt_list = 0, cnt_map = 0, cnt_namespace = 0, cnt_class = 0, cnt_instance = 0, cnt_upvalue = 0, cnt_foreign = 0, cnt_native = 0, cnt_bound_method = 0, cnt_bound_builtin = 0, cnt_slice = 0, cnt_other = 0;
@@ -690,7 +718,7 @@ void collectGarbage()
             before - vm.bytesAllocated, before, vm.bytesAllocated,
             vm.nextGC);
 #endif
-    if (gcDebugEnabled())
+    if (!vm.embedded && gcDebugEnabled())
     {
         size_t objCount2 = 0;
         size_t cnt_string2 = 0, cnt_function2 = 0, cnt_closure2 = 0, cnt_list2 = 0, cnt_map2 = 0, cnt_namespace2 = 0, cnt_class2 = 0, cnt_instance2 = 0, cnt_upvalue2 = 0, cnt_foreign2 = 0, cnt_native2 = 0, cnt_bound_method2 = 0, cnt_bound_builtin2 = 0, cnt_slice2 = 0, cnt_other2 = 0;

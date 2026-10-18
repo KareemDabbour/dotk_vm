@@ -69,6 +69,10 @@ typedef struct {
     const DK3NativeExport *exports;
 } DK3NativeModule;
 
+/* A shared library loaded with `dotk3 --native LIB` exports this symbol; see examples/native/. */
+#define DK3_MODULE_ENTRY_SYMBOL "dk3_module_entry"
+typedef const DK3NativeModule *(*DK3ModuleEntry)(void);
+
 void dk3_module_init(DK3NativeModule *module);
 DK3Status dk3_register_module(DK3VM *vm, const DK3NativeModule *module);
 void dk3_resource_init(DK3Resource *resource);

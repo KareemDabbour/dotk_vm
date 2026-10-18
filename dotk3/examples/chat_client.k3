@@ -49,7 +49,7 @@ fn chat(host: String, port: Int) -> Null {
             draft += byte
             IO.write(byte)
         }
-        System.gc()
+        GC.collect()
     }
     IO.write("\nDisconnected\n")
 }

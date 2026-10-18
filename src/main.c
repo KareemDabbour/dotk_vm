@@ -16,7 +16,6 @@
 #include <unistd.h>
 
 struct stat statbuf;
-pthread_mutex_t GVL;
 
 typedef struct
 {

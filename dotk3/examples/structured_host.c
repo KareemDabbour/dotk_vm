@@ -69,14 +69,14 @@ int main(void) {
     if (!vm) return 1;
     DK3Status result = dk3_define_native(vm, "host.records", "() -> List<Map<String, Int>>", records, NULL);
     if (result == DK3_OK)
-        result = dk3_eval(vm, "let rows: List<Map<String, Int>> = host.records()\nSystem.gc()\nrows[0]['value'] += 10\nSystem.print(Json.stringify(rows))", "structured-host.k3");
+        result = dk3_eval(vm, "let rows: List<Map<String, Int>> = host.records()\nGC.collect()\nrows[0]['value'] += 10\nSystem.print(Json.stringify(rows))", "structured-host.k3");
     DK3NativeExport exports[] = {{"create", "() -> Resource", create_counter, NULL, "Create a host-owned Counter."},
         {"next", "(counter: Resource) -> Int", next_counter, NULL, "Increment a live Counter."}, {"close", "(counter: Resource) -> Null", close_counter, NULL, "Close an opaque resource explicitly."}};
     DK3NativeModule module; dk3_module_init(&module);
     module.name = "Counters"; module.documentation = "A native resource adapter."; module.count = 3; module.exports = exports;
     if (result == DK3_OK) result = dk3_register_module(vm, &module);
     if (result == DK3_OK)
-        result = dk3_eval(vm, "from Counters import create, next, close\nlet counter: Resource = create()\nSystem.gc()\nSystem.print(counter.type_name, next(counter), next(counter), counter.closed)\nclose(counter)\nclose(counter)\nSystem.print(counter.closed)\ntry { next(counter) } catch error { System.print(error.kind) }", "native-resource.k3");
+        result = dk3_eval(vm, "from Counters import create, next, close\nlet counter: Resource = create()\nGC.collect()\nSystem.print(counter.type_name, next(counter), next(counter), counter.closed)\nclose(counter)\nclose(counter)\nSystem.print(counter.closed)\ntry { next(counter) } catch error { System.print(error.kind) }", "native-resource.k3");
     if (result != DK3_OK) fprintf(stderr, "%s\n", dk3_diagnostic(vm));
     DK3Status destroyed = dk3_destroy(vm);
     if (destroyed != DK3_OK) return 1;

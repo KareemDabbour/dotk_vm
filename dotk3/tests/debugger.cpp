@@ -58,7 +58,7 @@ int main() {
         for (const auto &variable : event.frames[0].locals) if (variable.name == "self" && variable.type == "Reader") traitFrame = true;
     assert(traitFrame && dk3::Runtime::display(runtime.get("readResult")) == "5");
     events.clear();
-    runtime.run("fn sequence() {\nlet label = 'retained'\nyield label\nSystem.gc()\nyield label\n}\nlet iterator = sequence()", "generators.k3");
+    runtime.run("fn sequence() {\nlet label = 'retained'\nyield label\nGC.collect()\nyield label\n}\nlet iterator = sequence()", "generators.k3");
     dk3::Value iterator = runtime.get("iterator"), item; size_t cursor = 0;
     assert(runtime.resume(iterator, item, cursor)); runtime.collect(); assert(runtime.resume(iterator, item, cursor));
     assert(dk3::Runtime::display(item) == "retained");
@@ -81,13 +81,13 @@ int main() {
     }
     assert(conditions == 3 && inner && outer);
     events.clear();
-    runtime.run("fn closure() { let captured = ['kept']\nreturn fn() { System.gc()\nreturn captured } }\nlet saved = closure()\nSystem.gc()\nlet capturedResult = saved()", "closure.k3");
+    runtime.run("fn closure() { let captured = ['kept']\nreturn fn() { GC.collect()\nreturn captured } }\nlet saved = closure()\nGC.collect()\nlet capturedResult = saved()", "closure.k3");
     bool captured = false;
     for (const auto &event : events) if (event.kind == "return")
         for (const auto &variable : event.frames[0].locals) if (variable.name == "captured" && variable.value == "[\"kept\"]") captured = true;
     assert(captured);
     events.clear();
-    runtime.run("fn worker(label) { defer System.print(label)\ntry { yield label\nthrow 'handled' } catch error { yield error } finally { System.gc()\nSystem.print('final') } }\nlet firstTask = Tasks.spawn(worker('a'))\nlet secondTask = Tasks.spawn(worker('b'))\nTasks.pump(6)", "task-debug.k3");
+    runtime.run("fn worker(label) { defer System.print(label)\ntry { yield label\nthrow 'handled' } catch error { yield error } finally { GC.collect()\nSystem.print('final') } }\nlet firstTask = Tasks.spawn(worker('a'))\nlet secondTask = Tasks.spawn(worker('b'))\nTasks.pump(6)", "task-debug.k3");
     std::set<uint64_t> taskIds;
     for (const auto &event : events) if (event.kind == "yield") { assert(event.frames[0].task); taskIds.insert(event.frames[0].task); }
     assert(taskIds.size() == 2);

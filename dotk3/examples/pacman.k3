@@ -5,7 +5,7 @@ fn play() -> Null {
     var running = true
     var escape = 0
     var dirty = true
-    var previous = System.monotonicMillis()
+    var previous = Time.monotonicMillis()
     IO.Terminal.open()
     defer IO.Terminal.close()
     IO.write("\x1b[2J\x1b[?25l")
@@ -33,9 +33,9 @@ fn play() -> Null {
             else if key == 110 { game.action("next") }
             else if key == 32 { game.action("start") }
         }
-        let now = System.monotonicMillis()
+        let now = Time.monotonicMillis()
         if now - previous >= 130 { game.tick(); previous = now; dirty = true }
-        # System.gc()
+        # GC.collect()
     }
 }
 

@@ -1,0 +1,147 @@
+# A JavaScript-style Promise. Callbacks run when Promise.run() drains the queue.
+# catch/finally are reserved words, so they are otherwise/ensure; then() maps a value, andThen() flattens a Promise.
+
+export enum PromiseState {
+    Pending,
+    Fulfilled,
+    Rejected
+}
+
+type Resolve<T> = fn(T) -> Null
+type Reject = fn(Object?) -> Null
+type Executor<T> = fn(Resolve<T>, Reject) -> Null
+
+# Jobs run from Promise.run(), not as Tasks: a Task spawned inside another Task is its child and is cancelled with it.
+let microtasks: List<fn() -> Null> = []
+
+export class Promise<T> {
+    private var state: PromiseState = PromiseState.Pending
+    private var value: T? = null
+    private var reason: Object? = null
+    private var waiting: List<fn() -> Null> = []
+
+    constructor(executor: Executor<T>) -> Null {
+        try {
+            executor(self.fulfill, self.fail)
+        } catch error {
+            self.fail(error)
+        }
+    }
+
+    private fn settle(next: PromiseState) -> Null {
+        self.state = next
+        let jobs = self.waiting
+        self.waiting = []
+        for job in jobs { microtasks.append(job) }
+    }
+
+    private fn fulfill(result: T) -> Null {
+        if self.state != PromiseState.Pending { return null }
+        self.value = result
+        self.settle(PromiseState.Fulfilled)
+    }
+
+    private fn fail(error: Object?) -> Null {
+        if self.state != PromiseState.Pending { return null }
+        self.reason = error
+        self.settle(PromiseState.Rejected)
+    }
+
+    private fn subscribe(job: fn() -> Null) -> Null {
+        if self.state == PromiseState.Pending { self.waiting.append(job) }
+        else { microtasks.append(job) }
+    }
+
+    fn status() -> PromiseState { return self.state }
+
+    fn isPending() -> Bool { return self.state == PromiseState.Pending }
+
+    fn then<U>(onFulfilled: fn(T) -> U, onRejected: (fn(Object?) -> U)? = null) -> Promise<U> {
+        return Promise<U>(fn(resolve: Resolve<U>, reject: Reject) -> Null {
+            self.subscribe(fn() -> Null {
+                try {
+                    if self.state == PromiseState.Fulfilled { resolve(onFulfilled(self.value!)) }
+                    else if onRejected != null { resolve(onRejected(self.reason)) }
+                    else { reject(self.reason) }
+                } catch error {
+                    reject(error)
+                }
+            })
+        })
+    }
+
+    fn otherwise(onRejected: fn(Object?) -> T) -> Promise<T> {
+        return self.then(fn(value: T) -> T { return value }, onRejected)
+    }
+
+    fn ensure(action: fn() -> Null) -> Promise<T> {
+        return Promise<T>(fn(resolve: Resolve<T>, reject: Reject) -> Null {
+            self.subscribe(fn() -> Null {
+                try {
+                    action()
+                    if self.state == PromiseState.Fulfilled { resolve(self.value!) } else { reject(self.reason) }
+                } catch error {
+                    reject(error)
+                }
+            })
+        })
+    }
+
+    fn andThen<U>(next: fn(T) -> Promise<U>) -> Promise<U> {
+        return Promise<U>(fn(resolve: Resolve<U>, reject: Reject) -> Null {
+            self.subscribe(fn() -> Null {
+                if self.state == PromiseState.Rejected { reject(self.reason); return null }
+                try {
+                    next(self.value!).then(fn(inner: U) -> Null { resolve(inner); return null }, fn(error: Object?) -> Null { reject(error); return null })
+                } catch error {
+                    reject(error)
+                }
+            })
+        })
+    }
+
+    static fn resolved<U>(value: U) -> Promise<U> {
+        return Promise<U>(fn(resolve: Resolve<U>, reject: Reject) -> Null { resolve(value) })
+    }
+
+    static fn rejected<U>(error: Object?) -> Promise<U> {
+        return Promise<U>(fn(resolve: Resolve<U>, reject: Reject) -> Null { reject(error) })
+    }
+
+    static fn all<U>(promises: List<Promise<U>>) -> Promise<List<U>> {
+        return Promise<List<U>>(fn(resolve: Resolve<List<U>>, reject: Reject) -> Null {
+            let results: List<U?> = []
+            var remaining = promises.length()
+            if remaining == 0 { resolve([]); return null }
+            for promise in promises { results.append(null) }
+            let counter = [remaining]
+            for index in Collections.range(promises.length()) {
+                promises[index].then(fn(value: U) -> Null {
+                    results[index] = value
+                    counter[0] -= 1
+                    if counter[0] == 0 { resolve(results.map(fn(item: U?) -> U { return item! })) }
+                    return null
+                }, fn(error: Object?) -> Null { reject(error); return null })
+            }
+        })
+    }
+
+    static fn race<U>(promises: List<Promise<U>>) -> Promise<U> {
+        return Promise<U>(fn(resolve: Resolve<U>, reject: Reject) -> Null {
+            for promise in promises {
+                promise.then(fn(value: U) -> Null { resolve(value); return null }, fn(error: Object?) -> Null { reject(error); return null })
+            }
+        })
+    }
+
+    # Runs queued callbacks (including ones queued meanwhile) until none are left; returns how many ran.
+    static fn run() -> Int {
+        var count = 0
+        while microtasks.length() > 0 {
+            let job = microtasks.removeAt(0)
+            job()
+            count += 1
+        }
+        return count
+    }
+}

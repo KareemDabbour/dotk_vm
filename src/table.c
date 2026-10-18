@@ -58,9 +58,10 @@ bool tableGet(Table *table, ObjString *key, Value *value)
 
 static void adjustCapacity(Table *table, int capacity)
 {
+    bool wasDisabled = vm.gcDisabled;
     vm.gcDisabled = true;
     Entry *entries = ALLOCATE(Entry, capacity);
-    vm.gcDisabled = false;
+    vm.gcDisabled = wasDisabled;
     for (int i = 0; i < capacity; i++)
     {
         entries[i].key = NULL;
@@ -145,6 +146,7 @@ ObjString *tableFindStr(Table *table, const char *chars, int len, uint32_t hash)
 
 void tableRemoveWhite(Table *table)
 {
+    int liveCount = 0;
     for (int i = 0; i < table->capacity; i++)
     {
         Entry *entry = &table->entries[i];
@@ -152,6 +154,15 @@ void tableRemoveWhite(Table *table)
         {
             tableDelete(table, entry->key);
         }
+        else if (entry->key != NULL)
+            liveCount++;
+    }
+    if (table->count > liveCount * 2 && table->count > 8)
+    {
+        int capacity = 8;
+        while (liveCount + 1 > capacity * TABLE_MAX_LOAD)
+            capacity = GROW_CAPACITY(capacity);
+        adjustCapacity(table, capacity);
     }
 }
 

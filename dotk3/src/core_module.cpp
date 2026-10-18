@@ -21,7 +21,7 @@ void Runtime::installCore() {
     global = allocate(Kind::Environment, coreSpan()); global->parent = prelude;
     objectType = allocate(Kind::ClassType, coreSpan()); objectType->text = "Object"; objectType->parent = prelude;
     objectType->code = std::make_shared<Node>(); objectType->code->kind = "class"; objectType->code->text = "Object"; objectType->code->span = coreSpan();
-    define(prelude, "Object", objectType, false, "", coreSpan()); define(coreNamespace("System"), "Object", objectType, false, "", coreSpan());
+    define(prelude, "Object", objectType, false, "", coreSpan());
     errorType = allocate(Kind::RecordType, coreSpan()); errorType->text = "Error"; errorType->parent = prelude;
     errorType->code = std::make_shared<Node>(); errorType->code->kind = "record"; errorType->code->span = coreSpan();
     errorKindType = allocate(Kind::EnumType, coreSpan()); errorKindType->text = "Error.Kind"; errorKindType->parent = prelude;
@@ -42,7 +42,6 @@ void Runtime::installCore() {
         {"file", "String", defaultLiteral("", TokenKind::String), false},
         {"line", "Int", defaultLiteral("0", TokenKind::Integer), false},
         {"column", "Int", defaultLiteral("0", TokenKind::Integer), false}};
-    define(coreNamespace("System"), "Error", errorType, false, "", coreSpan());
     sizedTrait = allocate(Kind::TraitType, coreSpan()); roots.push_back(sizedTrait);
     sizedTrait->text = "Sized"; sizedTrait->code = sizedDeclaration(); sizedTrait->parent = prelude;
     define(coreNamespace("Collections"), "Sized", sizedTrait, false, "", coreSpan());
@@ -50,6 +49,9 @@ void Runtime::installCore() {
     for (const auto &argument : config.arguments) arguments->items.push_back(text(argument, false, coreSpan()));
     define(coreNamespace("System"), "args", arguments, false, "Tuple", coreSpan());
     installNetwork();
+    installFiles();
+    installLibrary();
+    installStdlib();
     registerNative("System.print", [this](const auto &arguments, const Span &span) -> Value {
         auto values = positional(arguments, span);
         std::string output;
@@ -136,22 +138,6 @@ void Runtime::installCore() {
             if (line->size() > config.maxInputBytes) throw Error(span, "Input line exceeds host limit", "limit");
             return text(*line, false, span);
         } catch (const Error &) { throw; } catch (const std::bad_alloc &) { throw; } catch (const std::exception &error) { throw Error(span, error.what(), "io"); }
-    });
-    registerNative("System.monotonicMillis", [this](const auto &arguments, const Span &span) -> Value {
-        if (!arguments.empty()) throw Error(span, "monotonicMillis expects no arguments", "call");
-        if (!config.monotonicMillis) throw Error(span, "Clock is not enabled by the host", "capability");
-        try {
-            uint64_t value = config.monotonicMillis(); if (value > static_cast<uint64_t>(INT64_MAX)) throw Error(span, "Clock exceeds Int range", "overflow");
-            return static_cast<int64_t>(value);
-        } catch (const Error &) { throw; } catch (const std::bad_alloc &) { throw; } catch (const std::exception &error) { throw Error(span, error.what(), "io"); }
-    });
-    registerNative("System.delay", [this](const auto &arguments, const Span &span) -> Value {
-        auto values = positional(arguments, span); if (values.size() != 1) throw Error(span, "delay expects one Int duration", "call");
-        int64_t duration = integer(values[0], span);
-        if (duration < 0 || static_cast<uint64_t>(duration) > config.maxDelayMillis) throw Error(span, "Delay exceeds host duration limit", "value");
-        if (!config.delay) throw Error(span, "Delay is not enabled by the host", "capability");
-        try { config.delay(static_cast<uint64_t>(duration)); return {}; }
-        catch (const Error &) { throw; } catch (const std::bad_alloc &) { throw; } catch (const std::exception &error) { throw Error(span, error.what(), "io"); }
     });
     define(coreNamespace("IO"), "Files", coreNamespace("Files"), false, "", coreSpan());
     registerNative("Terminal.open", [this](const auto &arguments, const Span &span) -> Value {
@@ -352,10 +338,6 @@ void Runtime::installCore() {
         auto values = positional(arguments, span);
         if (values.size() != 1 || typeOf(values[0]) != "Bytes") throw Error(span, "decode expects Bytes", "type");
         return text(object(values[0], span)->text, false, span);
-    });
-    registerNative("System.gc", [this](const auto &arguments, const Span &span) -> Value {
-        if (!arguments.empty()) throw Error(span, "gc expects no arguments", "call");
-        collectionRequested = true; return {};
     });
     registerNative("Tasks.close", [this](const auto &arguments, const Span &span) -> Value {
         auto values = positional(arguments, span);

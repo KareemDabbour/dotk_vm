@@ -56,8 +56,8 @@ fn serve(port: Int, limit: Int) -> Null {
             }
         }
         peers = peers.filter(fn(peer: Peer) -> Bool => not peer.connection.closed)
-        System.gc()
-        System.delay(10)
+        GC.collect()
+        Time.sleep(10)
     }
     broadcast(peers, "Server closing")
     for peer in peers { Sockets.close(peer.connection) }
