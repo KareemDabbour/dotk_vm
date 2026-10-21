@@ -41,7 +41,7 @@ int main() {
     accepts("let a = 1\nlet b: Int = a + 2\nlet c: Float = a\nlet d = 1.5 * a\nlet e: Float = d\nlet f = 'x' + 1\nlet g: String = f");
     rejects("let a: Int = 'x'", "Expected Int, got String");
     accepts("fn grid(w: Int, h: Int) -> List<List<String?>> { return Collections.range(h).map(fn(y) => Collections.range(w).map(fn(x) => null)) }");
-    accepts("fn make<T>(w: Int) -> List<T?> { return Collections.range(w).map(fn(i) => null) }\nfn fill<T>(b: List<T?>, v: T) -> List<T?> { return b.map(fn(x: T?) => v) }");
+    accepts("fn make<T>(w: Int) -> List<T?> { return Collections.range(w).map(fn(i: Int) -> T? => null) }\nfn fill<T>(b: List<T?>, v: T) -> List<T?> { return b.map(fn(x: T?) => v) }");
     accepts("fn reset(b: List<List<String?>>) -> List<List<String?>> { return b.map(fn(row: List<String?>) => row.map(fn(x: String?) => 'a')) }");
     accepts("class P { let a: Int; var b: String; constructor(x: Int) -> Null { self.a = x; if x > 0 { self.b = 'p' } else { self.b = 'n' } } }");
     accepts("class P { let a: Int; constructor(f: Bool) -> Null { if f { throw Error(Error.Kind.Value, 'x') }\nself.a = 1 } }");
@@ -184,7 +184,7 @@ int main() {
     accepts("fn f(o: Object, e: Error) -> Null { }");
 
     // Core library.
-    accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: List<Int> = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");
+    accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: Range = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");
     rejects("for x in 5 { }", "is not iterable");
     rejects("let a: String = Math.sin(1.0)", "Expected String, got Float");
 

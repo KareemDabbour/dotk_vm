@@ -1,3 +1,5 @@
+from Collections import range
+
 class Ghost {
     let spawn: Int
     var position: Int
@@ -67,7 +69,7 @@ export class PacMan {
         self.board[self.spawn] = " "
         for position in [29,54,813,838] { self.board[position] = "o" }
         self.pellets = self.board.filter(fn(tile: String) -> Bool => tile == "." or tile == "o").length()
-        self.neighbors = Collections.range(self.board.length()).map(fn(position: Int) -> List<Int> {
+        self.neighbors = List(range(self.board.length())).map(fn(position: Int) -> List<Int> {
             let adjacent: List<Int> = []
             if self.board[position] != "#" {
                 for direction in [[0,-1],[0,1],[-1,0],[1,0]] {
@@ -108,7 +110,7 @@ export class PacMan {
     }
 
     fn distances(start: Int) -> List<Int> {
-        let distance = Collections.range(self.board.length()).map(fn(position: Int) -> Int => -1)
+        let distance = List(range(self.board.length())).map(fn(position: Int) -> Int => -1)
         if start < 0 or start >= self.board.length() or self.board[start] == "#" { return distance }
         let queue: List<Int> = [start]
         var head = 0
@@ -165,7 +167,7 @@ export class PacMan {
         if self.pellets == 0 { self.status = "won"; return }
         if self.ticks % 2 != 0 { return }
         let distance = self.distances(self.player)
-        for index in Collections.range(self.ghosts.length()) {
+        for index in range(self.ghosts.length()) {
             let ghost = self.ghosts[index]
             if ghost.cooldown > 0 { ghost.cooldown -= 1 }
             else {

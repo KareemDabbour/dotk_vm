@@ -1,0 +1,204 @@
+from System import print
+from Random import seed as randSeed
+from Time import monotonicMillis
+from IO import write
+
+let d = [-1, 0, 1]
+
+class GameOfLife {
+    """Conway's Game of Life implementation."""
+    var rows: Int
+    var cols: Int
+    var board: List<List<Bool>>
+    var nextBoard: List<List<Bool>>
+    var generation: Int = 0
+
+    fn init(rows: Int, cols: Int) {
+        self.rows = rows
+        self.cols = cols
+        self.generation = 0
+        self.board = []
+        self.nextBoard = []
+        
+        var row = 0
+        while row < rows {
+            var newRow: List<Bool> = []
+            var nextRow: List<Bool> = []
+            var col = 0
+            while col < cols {
+                newRow.append(Random.int(0, 2) == 1)
+                nextRow.append(false)
+                col += 1
+            }
+            self.board.append(newRow)
+            self.nextBoard.append(nextRow)
+            row += 1
+        }
+    }
+
+    fn countNeighbors(row: Int, col: Int) -> Int {
+        var count: Int = 0
+        var i = -1
+        while i <= 1 {
+            var j = -1
+            while j <= 1 {
+                if i == 0 and j == 0 {
+                    j += 1
+                    continue
+                }
+                
+                var newRow = row + i
+                var newCol = col + j
+                
+                if newRow < 0 { newRow += self.rows }
+                if newRow >= self.rows { newRow -= self.rows }
+                if newCol < 0 { newCol += self.cols }
+                if newCol >= self.cols { newCol -= self.cols }
+                
+                if self.board[newRow][newCol] {
+                    count += 1
+                }
+                j += 1
+            }
+            i += 1
+        }
+        
+        return count
+    }
+
+    fn update() {
+        var row = 0
+        while row < self.rows {
+            var col = 0
+            while col < self.cols {
+                var neighbors = self.countNeighbors(row, col)
+                var cell = self.board[row][col]
+                var alive: Bool = false
+                
+                if cell {
+                    alive = neighbors == 2 or neighbors == 3
+                } else {
+                    alive = neighbors == 3
+                }
+                
+                self.nextBoard[row][col] = alive
+                col += 1
+            }
+            row += 1
+        }
+        
+        var temp = self.board
+        self.board = self.nextBoard
+        self.nextBoard = temp
+        self.generation += 1
+    }
+
+    fn render() -> String {
+        var lines: List<String> = []
+        
+        lines.append("\x1b[H")
+        lines.append(f"Generation: {self.generation}\n")
+        
+        var topBorder = "┌"
+        var col = 0
+        while col < self.cols {
+            topBorder += "─"
+            col += 1
+        }
+        topBorder += "┐\n"
+        lines.append(topBorder)
+        
+        var row = 0
+        while row < self.rows {
+            var rowStr = "│"
+            var col2 = 0
+            while col2 < self.cols {
+                if self.board[row][col2] {
+                    rowStr += "█"
+                } else {
+                    rowStr += " "
+                }
+                col2 += 1
+            }
+            rowStr += "│\n"
+            lines.append(rowStr)
+            row += 1
+        }
+        
+        var botBorder = "└"
+        var col3 = 0
+        while col3 < self.cols {
+            botBorder += "─"
+            col3 += 1
+        }
+        botBorder += "┘\n"
+        lines.append(botBorder)
+        lines.append("Controls: SPACE=pause/resume, R=reset, Q=quit\n")
+        
+        var result = ""
+        var i = 0
+        while i < lines.length() {
+            result += lines[i]
+            i += 1
+        }
+        return result
+    }
+
+    fn reset() {
+        self.generation = 0
+        var row = 0
+        while row < self.rows {
+            var col = 0
+            while col < self.cols {
+                self.board[row][col] = Random.int(0, 2) == 1
+                self.nextBoard[row][col] = false
+                col += 1
+            }
+            row += 1
+        }
+    }
+}
+
+fn play() -> Null {
+    randSeed(monotonicMillis())
+    
+    var game = GameOfLife(30, 80)
+    var paused = false
+    var running = true
+    var lastUpdateTime = monotonicMillis()
+    var lastRenderTime = monotonicMillis()
+    var updateInterval: Int = 50
+    var renderInterval: Int = 16
+    
+    Terminal.open()
+    defer Terminal.close()
+    
+    write("\x1b[?25l\x1b[2J")
+    defer write("\x1b[0m\x1b[?25h\n")
+    
+    while running {
+        let now = monotonicMillis()
+        
+        if now - lastRenderTime >= renderInterval {
+            write(game.render() + "\x1b[J")
+            lastRenderTime = now
+        }
+        
+        let key = Terminal.readKey(4)
+        
+        if key != null {
+            if key == 113 { running = false }
+            else if key == 114 { game.reset(); lastUpdateTime = monotonicMillis() }
+            else if key == 32 { paused = not paused }
+        }
+        
+        if not paused and now - lastUpdateTime >= updateInterval {
+            game.update()
+            lastUpdateTime = now
+        }
+    }
+}
+
+
+play()
+

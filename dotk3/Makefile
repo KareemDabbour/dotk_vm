@@ -14,7 +14,7 @@ PLUGIN_LDFLAGS =
 PLUGIN_EXPORT = -rdynamic -ldl
 endif
 NETWORK_OBJECTS = $(BUILD)/files_module.o $(BUILD)/library_module.o $(BUILD)/stdlib_module.o $(BUILD)/network_module.o $(BUILD)/requests_module.o $(BUILD)/picohttpparser.o $(BUILD)/bytecode.o $(BUILD)/runtime_bytecode.o $(BUILD)/profiler.o $(BUILD)/native_methods.o
-NETWORK_OBJECTS += $(BUILD)/native_list_methods.o $(BUILD)/native_map_methods.o $(BUILD)/native_set_methods.o $(BUILD)/native_text_methods.o
+NETWORK_OBJECTS += $(BUILD)/native_list_methods.o $(BUILD)/native_map_methods.o $(BUILD)/native_set_methods.o $(BUILD)/native_text_methods.o $(BUILD)/native_primitive_methods.o
 ifeq ($(OS),Windows_NT)
 CLI_LIBS =
 endif
@@ -28,7 +28,7 @@ endif
 .PHONY: all library lsp example-native example-plugin test test-lexer test-parser test-runtime test-profiler test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
 all: $(BUILD)/dotk3 $(BUILD)/dotk3-lsp
 
-$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/embedding.o $(BUILD)/main.o
+$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/embedding.o $(BUILD)/aot.o $(BUILD)/main.o
 	$(CXX) $^ $(LDFLAGS) $(PLUGIN_EXPORT) $(CLI_LIBS) -o $@
 
 $(BUILD)/dotk3-lsp: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/lsp_main.o

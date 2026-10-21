@@ -17,20 +17,19 @@ model.fromFile(path)
 let camera = Camera()
 model.frame(camera)
 System.print(f"Loaded {path}: {model.vertexCount()} vertices, {model.triangleCount()} triangles")
-Time.sleep(500)
+# Time.sleep(500)
 
 IO.Terminal.open()
 defer IO.Terminal.close()
 IO.write("\x1b[2J\x1b[?25l")
 defer IO.write("\x1b[?25h\n")
-
 let step = 0.15 * (model.vertexCount() / 1000.0 + 1.0)
 var running = true
 var spinning = true
 var angle = 0.0
 var last = Time.monotonicMillis()
-while running {
-    var key: Int? = IO.Terminal.readKey(0)
+fn frame() {
+var key: Int? = IO.Terminal.readKey(0)
     var handled = 0
     while key != null and handled < 16 {
         let code: Int = key
@@ -72,4 +71,11 @@ while running {
     var state = "paused"
     if spinning { state = "spinning" }
     IO.write("\x1b[H" + frame + f"\n{milliseconds} ms  fov {Math.round(camera.fov)}  position {Math.round(camera.x)}, {Math.round(camera.y)}, {Math.round(camera.z)}  {state}, space toggles  (X quits)   \n")
+
+}
+
+
+while running {
+    frame()
+        # break;
 }

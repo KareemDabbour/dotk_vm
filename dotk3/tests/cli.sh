@@ -15,7 +15,7 @@ case "$output" in
 esac
 output=$("$binary" -e 'System.print(Reflection.type(Collections.range(2)))')
 case "$output" in
-    List) ;;
+    Range) ;;
     *) printf '%s\n' 'Core services are not namespaced' >&2; exit 1 ;;
 esac
 work=$(mktemp -d)

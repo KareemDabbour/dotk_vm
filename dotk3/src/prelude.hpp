@@ -5,6 +5,30 @@
 namespace dk3 {
 inline const char *preludeSource() {
     return R"STUB(
+class Int {
+    fn abs() -> Int
+    fn clamp(min: Int, max: Int) -> Int
+    fn coerceAtLeast(min: Int) -> Int
+    fn coerceAtMost(max: Int) -> Int
+    fn toFloat() -> Float
+    fn toString(radix: Int = 10) -> String
+}
+class Float {
+    fn abs() -> Float
+    fn clamp(min: Float, max: Float) -> Float
+    fn coerceAtLeast(min: Float) -> Float
+    fn coerceAtMost(max: Float) -> Float
+    fn toInt() -> Int
+    fn floor() -> Int
+    fn ceil() -> Int
+    fn round() -> Int
+    fn isNaN() -> Bool
+    fn isInfinite() -> Bool
+    fn toString() -> String
+}
+class Bool {
+    fn toString() -> String
+}
 class String implements Collections_Sized, Iterable<String> {
     fn length() -> Int
     fn contains(needle: String) -> Bool
@@ -74,7 +98,41 @@ class Tuple<T> implements Collections_Sized, Iterable<T> {
     fn init(values: Iterable<T> = []) -> Null
     fn length() -> Int
 }
+class Range implements Iterable<Int> {
+    fn map<U>(callback: fn(Int) -> U) -> List<U>
+    fn filter(predicate: fn(Int) -> Bool) -> List<Int>
+    fn reduce<A>(callback: fn(A, Int) -> A, initial: A) -> A
+    fn any(predicate: fn(Int) -> Bool) -> Bool
+    fn all(predicate: fn(Int) -> Bool) -> Bool
+    fn contains(value: Int) -> Bool
+    fn toList() -> List<Int>
+}
 class Generator<T> implements Iterable<T> {
+    fn map<U>(callback: fn(T) -> U) -> Generator<U>
+    fn filter(predicate: fn(T) -> Bool) -> Generator<T>
+    fn flatMap<U>(callback: fn(T) -> Iterable<U>) -> Generator<U>
+    fn take(count: Int) -> Generator<T>
+    fn skip(count: Int) -> Generator<T>
+    fn takeWhile(predicate: fn(T) -> Bool) -> Generator<T>
+    fn dropWhile(predicate: fn(T) -> Bool) -> Generator<T>
+    fn toList() -> List<T>
+    fn toSet() -> Set<T>
+    fn forEach(callback: fn(T) -> Null) -> Null
+    fn count() -> Int
+    fn first() -> T?
+    fn reduce<A>(callback: fn(A, T) -> A, initial: A) -> A
+    fn any(predicate: fn(T) -> Bool) -> Bool
+    fn all(predicate: fn(T) -> Bool) -> Bool
+    fn toMap<K, V>(keyMapper: fn(T) -> K, valueMapper: fn(T) -> V) -> Map<K, V>
+}
+class Collectors {
+    static fn toList<T>(items: Iterable<T>) -> List<T>
+    static fn toSet<T>(items: Iterable<T>) -> Set<T>
+    static fn count<T>(items: Iterable<T>) -> Int
+    static fn joining(items: Iterable<String>, separator: String = '') -> String
+    static fn toMap<T, K, V>(items: Iterable<T>, keyMapper: fn(T) -> K, valueMapper: fn(T) -> V) -> Map<K, V>
+    static fn groupBy<T, K>(items: Iterable<T>, classifier: fn(T) -> K) -> Map<K, List<T>>
+    static fn partitionBy<T>(items: Iterable<T>, predicate: fn(T) -> Bool) -> Map<Bool, List<T>>
 }
 class Type {
 }
@@ -169,7 +227,8 @@ class Math {
     static fn round(value: Float) -> Int
 }
 class Collections {
-    static fn range(first: Int, second: Int? = null, step: Int = 1) -> List<Int>
+    static fn range(first: Int, second: Int? = null, step: Int = 1) -> Range
+    static fn stream<T>(items: Iterable<T>) -> Generator<T>
     static fn len(value: Collections.Sized) -> Int
     static fn sorted<T>(items: Iterable<T>, compare: (fn(T, T) -> Int)? = null) -> List<T>
     static fn reversed<T>(items: Iterable<T>) -> List<T>

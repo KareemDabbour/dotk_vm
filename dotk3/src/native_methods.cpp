@@ -33,9 +33,31 @@ Value Runtime::callNativeMethod(Object *receiver, const NativeMethod &method, co
     for (const auto &argument : arguments) if (!argument.name.empty()) throw Error(span, "This native expects positional arguments", "call");
     return method.body(*this, receiver, arguments, span);
 }
+void Runtime::registerPrimitiveMethod(const std::string &typeName, NativePrimitiveMethod method) {
+    requireRunning();
+    if (!method.body || method.name.empty() || method.minimumArguments > method.maximumArguments)
+        throw Error({}, "Invalid primitive method registration", "native");
+    auto &methods = primitiveMethods[typeName];
+    if (methods.count(method.name)) throw Error({}, "Duplicate primitive method '" + typeName + "." + method.name + "'", "native");
+    methods.emplace(method.name, std::move(method));
+}
+void Runtime::registerKindMethod(Kind kind, NativeKindMethod method) {
+    requireRunning();
+    if (!method.body || method.name.empty() || method.minimumArguments > method.maximumArguments)
+        throw Error({}, "Invalid kind method registration", "native");
+    auto &methods = kindMethods[kind];
+    if (methods.count(method.name)) throw Error({}, "Duplicate kind method '" + method.name + "'", "native");
+    methods.emplace(method.name, std::move(method));
+}
+Value Runtime::callPrimitiveMethod(Value receiver, const NativePrimitiveMethod &method, const std::vector<Argument> &arguments, const Span &span) {
+    if (arguments.size() < method.minimumArguments || arguments.size() > method.maximumArguments)
+        throw Error(span, "Wrong number of " + method.name + " arguments", "call");
+    return method.body(*this, receiver, arguments, span);
+}
 void Runtime::installNativeMethods() {
     ListMethods::install(*this); MapMethods::install(*this); SetMethods::install(*this); TextMethods::install(*this);
     NativeMethods::collection(*this, Kind::Tuple);
+    PrimitiveMethods::install(*this);
 }
 void NativeMethods::collection(Runtime &runtime, Kind kind) {
     runtime.registerNativeMethod({kind, "length", "Int", 0, 0, length});
