@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iomanip>
 #include <limits>
+#include <new>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -196,20 +197,30 @@ namespace dk3
             profile.emplace(config.profiler.get(), "Initialize", "vm");
         installCore();
         installNativeMethods();
+        builtinObjects = heap.size();
     }
 
     Object *Runtime::allocate(Kind kind, const Span &span)
     {
         requireRunning();
-        if (heap.size() >= config.objectLimit)
+        if (liveObjects() >= config.objectLimit)
             throw Error(span, "Object limit exceeded", "limit");
-        auto value = std::make_unique<Object>();
+        std::unique_ptr<Object> value;
+        if (spare.empty())
+            value.reset(new Object); // default-init: skips zero-filling the whole object
+        else
+        {
+            value = std::move(spare.back());
+            spare.pop_back();
+        }
         value->kind = kind;
         Object *result = value.get();
         auto type = collectionTypes.find(kind);
         if (type != collectionTypes.end())
             result->origin = type->second;
         heap.push_back(std::move(value));
+        if (heap.size() >= nextCollection)
+            collectionRequested = true;
         if (config.profiler)
         {
             static const char *names[] = {"Environment", "String", "Bytes", "List", "Tuple", "Map", "Function", "Native", "RecordType", "Record", "ClassType", "Instance", "BoundMethod", "TraitType", "EnumType", "Constructor", "Variant", "Module", "Generator", "Task", "Resource", "Super", "Set", "Range"};
@@ -219,7 +230,7 @@ namespace dk3
     }
     Value Runtime::text(std::string bytes, bool binary, const Span &span)
     {
-        if (!binary)
+        if (!binary && !asciiText(bytes))
             utf8Offsets(bytes, span);
         Object *result = allocate(binary ? Kind::Bytes : Kind::String, span);
         result->text = std::move(bytes);
@@ -227,13 +238,13 @@ namespace dk3
             config.profiler->payload(binary ? "Bytes" : "String", span, result->text.size());
         return result;
     }
-    void Runtime::tick(const Span &span)
+    void Runtime::tickSlow(const Span &span)
     {
         if (config.profiler)
             config.profiler->checkpoint();
         tickExecution(span);
     }
-    void Runtime::tickExecution(const Span &span)
+    void Runtime::tickChecked(const Span &span)
     {
         if (cleanupDepth)
         {
@@ -418,7 +429,15 @@ namespace dk3
         : runtime(owner), start(owner.debugFrames.size())
     {
         static const std::string anonymous = "<anonymous>";
-        owner.debugFrames.push_back({++owner.nextDebugFrame, owner.currentTask ? owner.currentTask->debugTaskId : 0, {}, {}, function.text.empty() ? &anonymous : &function.text, &function.span, environment, nullptr, prefix});
+        owner.debugFrames.emplace_back();
+        ExecutionFrame &frame = owner.debugFrames.back();
+        frame.id = ++owner.nextDebugFrame;
+        frame.task = owner.currentTask ? owner.currentTask->debugTaskId : 0;
+        frame.name = function.text.empty() ? &anonymous : &function.text;
+        frame.location = &function.span;
+        frame.environment = environment;
+        frame.generator = nullptr;
+        frame.prefix = prefix;
         if (owner.config.profiler)
             owner.config.profiler->enter(owner.debugFrames.back().frameName(), function.span, owner.currentTask ? owner.currentTask->debugTaskId : 0);
     }
@@ -460,6 +479,46 @@ namespace dk3
         catch (...)
         {
         }
+    }
+    void Runtime::captureNativeFailure(std::exception_ptr failure, size_t unwound) noexcept
+    {
+        // Failed direct native calls go innermost-first in front of the interpreter's frames; the entry function's
+        // frame is positioned at its failing call, which native code does not record in debugFrames.
+        auto capture = [&](auto &error)
+        {
+            if (!error.trace.empty() || nativeUnwind.size() <= unwound)
+                return;
+            Span position = error.span;
+            for (size_t index = unwound; index < nativeUnwind.size(); index++)
+            {
+                error.trace.push_back({nativeUnwind[index].first, position});
+                position = nativeUnwind[index].second;
+            }
+            for (auto frame = debugFrames.rbegin(); frame != debugFrames.rend(); ++frame)
+                error.trace.push_back({frame->frameName(), frame == debugFrames.rbegin() ? position : frame->where()});
+        };
+        try
+        {
+            try
+            {
+                std::rethrow_exception(failure);
+            }
+            catch (Error &error)
+            {
+                capture(error);
+            }
+            catch (Thrown &thrown)
+            {
+                capture(thrown);
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+        }
+        nativeUnwind.resize(unwound);
     }
     void Runtime::requireRunning() const
     {
@@ -575,13 +634,22 @@ namespace dk3
                 std::ostringstream result;
                 result << "b\"";
                 for (unsigned char byte : instance->text)
-                    result << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(byte);
+                {
+                    if (byte == '"' || byte == '\\')
+                        result << '\\' << byte;
+                    else if (byte >= 0x20 && byte < 0x7F)
+                        result << byte;
+                    else
+                        result << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(byte);
+                }
                 return result.str() + '"';
             }
             if (!active.insert(instance).second)
                 return "<cycle>";
             std::string result;
-            if (instance->kind == Kind::Range)
+            if (instance->kind == Kind::Variant && instance->items.empty())
+                result = instance->origin->text + '.' + instance->text;
+            else if (instance->kind == Kind::Range)
             {
                 int64_t start = std::get<int64_t>(instance->items[0]);
                 int64_t stop = std::get<int64_t>(instance->items[1]);
@@ -918,8 +986,8 @@ namespace dk3
             throw Error(span, "Duplicate declaration '" + name + "'", "name");
         bool isNewGlobal = (environment == global) && !environment->bindings.count(name);
         environment->bindings[name] = {value, mutableBinding, type};
-        // New global bindings can shadow cached prelude bindings — bump epoch so caches refresh.
-        if (isNewGlobal)
+        // New global bindings can shadow cached prelude bindings, and type members feed member inline caches.
+        if (isNewGlobal || environment->kind == Kind::ClassType || environment->kind == Kind::RecordType || environment->kind == Kind::TraitType)
             bindingEpoch++;
     }
     Value Runtime::native(const std::string &name, std::function<Value(const std::vector<Argument> &, const Span &)> function)
@@ -1082,6 +1150,48 @@ namespace dk3
             throw Error(span, "toString must return String", "type");
         return object(result, span)->text;
     }
+    bool Runtime::mayOverload(const Value &receiver)
+    {
+        if (!std::holds_alternative<Object *>(receiver))
+            return false;
+        Object *type = std::get<Object *>(receiver)->origin;
+        if (!type || (type->kind != Kind::ClassType && type->kind != Kind::RecordType))
+            return false;
+        if (type->hookEpoch != bindingEpoch)
+        {
+            type->operatorHooks = false;
+            for (const auto &hook : operatorHooks())
+                if (classBinding(type, hook.name))
+                {
+                    type->operatorHooks = true;
+                    break;
+                }
+            type->hookEpoch = bindingEpoch;
+        }
+        return type->operatorHooks;
+    }
+    Value Runtime::callPositional(Value callable, const Value *arguments, size_t count, const Span &span)
+    {
+        if (std::holds_alternative<Object *>(callable) && !config.debug && !config.profiler)
+        {
+            Object *function = std::get<Object *>(callable);
+            if (function->kind == Kind::Function)
+            {
+                if (!function->bytecodeAttempted)
+                {
+                    function->bytecode = compileBytecode(function->code, config.optimizationLevel, false, true);
+                    function->bytecodeAttempted = true;
+                }
+                if (function->bytecode && !function->bytecode->hasSelf)
+                    return callFunctionFast(function, arguments, count, span);
+            }
+        }
+        std::vector<Argument> values;
+        values.reserve(count);
+        for (size_t index = 0; index < count; index++)
+            values.push_back({std::string(), arguments[index]});
+        return call(callable, values, span);
+    }
     bool Runtime::overloaded(const std::string &operation, Value receiver, const std::vector<Argument> &arguments, const Span &span, Value &result)
     {
         const auto *hook = operatorHook(operation);
@@ -1099,10 +1209,8 @@ namespace dk3
         roots.push_back(receiver);
         result = call(member(receiver, hook->name, span), arguments, span);
         roots.push_back(result);
-        if (hook->predicate)
-            boolean(result, span);
-        if (operation == "setitem" && !std::holds_alternative<std::monostate>(result))
-            throw Error(span, "__setitem__ must return Null", "type");
+        if ((operation == "setitem" || operation == "setslice") && !std::holds_alternative<std::monostate>(result))
+            throw Error(span, std::string(hook->name) + " must return Null", "type");
         return true;
     }
     Value Runtime::binary(const std::string &operation, Value left, Value right, const Span &span)
@@ -1112,7 +1220,7 @@ namespace dk3
         if (operation == "!=")
             return !equal(left, right);
         Value custom;
-        if (std::holds_alternative<Object *>(left) && overloaded(operation, left, {{"", right}}, span, custom))
+        if (mayOverload(left) && overloaded(operation, left, {{"", right}}, span, custom))
             return custom;
         if (operation == "+" && std::holds_alternative<Object *>(left) && std::holds_alternative<Object *>(right))
         {
@@ -1133,6 +1241,14 @@ namespace dk3
             { return std::holds_alternative<Object *>(value) && std::get<Object *>(value)->kind == Kind::String; };
             if (isText(left) || isText(right))
                 return text(stringify(left, span) + stringify(right, span), false, span);
+        }
+        if (mayOverload(right))
+        {
+            // 2 * a runs a.__rmul__(2); 0 < a runs a.__gt__(0).
+            static const std::unordered_map<std::string, std::string> mirrored{{"<", ">"}, {">", "<"}, {"<=", ">="}, {">=", "<="}};
+            auto mirror = mirrored.find(operation);
+            if (overloaded(mirror != mirrored.end() ? mirror->second : "r" + operation, right, {{"", left}}, span, custom))
+                return custom;
         }
         if (std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right))
         {
@@ -1193,7 +1309,21 @@ namespace dk3
                 return first <= second;
             if (operation == ">=")
                 return first >= second;
+            if (operation == "&")
+                return first & second;
+            if (operation == "|")
+                return first | second;
+            if (operation == "^")
+                return first ^ second;
+            if (operation == "<<" || operation == ">>")
+            {
+                if (second < 0)
+                    throw Error(span, "Negative shift count", "value");
+                return shiftInt(first, second, operation == "<<");
+            }
         }
+        if (operation == "&" || operation == "|" || operation == "^" || operation == "<<" || operation == ">>")
+            throw Error(span, "Operator '" + operation + "' requires Int operands", "type");
         double first = floating(left, span), second = floating(right, span);
         if (operation == "+")
             return first + second;
@@ -1244,25 +1374,28 @@ namespace dk3
     Value Runtime::index(Value value, Value key, const Span &span)
     {
         Value custom;
-        if (overloaded("getitem", value, {{"", key}}, span, custom))
+        if (mayOverload(value) && overloaded("getitem", value, {{"", key}}, span, custom))
             return custom;
         Object *instance = object(value, span);
         if (instance->kind == Kind::Map)
         {
             if (!primitiveKey(key))
                 throw Error(span, "Map keys must be primitive values", "type");
-            for (const auto &entry : instance->entries)
-                if (equal(entry.first, key))
-                    return entry.second;
+            size_t position = entryPosition(instance, key);
+            if (position < instance->entries.size())
+                return instance->entries[position].second;
             throw Error(span, "Missing map key", "key");
         }
         int64_t position = integer(key, span);
-        size_t size = instance->kind == Kind::String ? utf8Offsets(instance->text, span).size() - 1 : instance->kind == Kind::Bytes ? instance->text.size()
-                                                                                                                                    : instance->items.size();
+        bool ascii = instance->kind == Kind::String && asciiText(instance->text);
+        size_t size = instance->kind == Kind::String ? (ascii ? instance->text.size() : utf8Offsets(instance->text, span).size() - 1) : instance->kind == Kind::Bytes ? instance->text.size()
+                                                                                                                                                                      : instance->items.size();
         if (position < 0)
             position += static_cast<int64_t>(size);
         if (position < 0 || static_cast<uint64_t>(position) >= size)
             throw Error(span, "Index out of range", "index");
+        if (ascii)
+            return text(instance->text.substr(static_cast<size_t>(position), 1), false, span);
         if (instance->kind == Kind::String)
         {
             auto offsets = utf8Offsets(instance->text, span);
@@ -1277,6 +1410,26 @@ namespace dk3
 
     Value Runtime::sliceValues(Value receiver, const std::optional<Value> &first, const std::optional<Value> &last, const std::optional<Value> &stride, const Span &span)
     {
+        if (mayOverload(receiver))
+        {
+            Object *bounds = allocate(Kind::Record, span);
+            roots.push_back(bounds);
+            bounds->origin = sliceType;
+            const std::pair<const char *, const std::optional<Value> *> fields[]{{"start", &first}, {"stop", &last}, {"step", &stride}};
+            for (const auto &[name, bound] : fields)
+            {
+                Value value = *bound ? **bound : Value{};
+                if (!std::holds_alternative<std::monostate>(value))
+                    integer(value, span);
+                bounds->bindings[name] = {value, false, "Int?"};
+            }
+            Object *key = allocate(Kind::Tuple, span);
+            roots.push_back(key);
+            key->items.push_back(bounds);
+            Value custom;
+            if (overloaded("getslice", receiver, {{"", key}}, span, custom))
+                return custom;
+        }
         Object *source = object(receiver, span);
         if (source->kind != Kind::List && source->kind != Kind::Tuple && source->kind != Kind::String && source->kind != Kind::Bytes)
             throw Error(span, "Value is not sliceable", "type");
@@ -1704,6 +1857,12 @@ namespace dk3
                 throw Error(span, "Unknown member '" + name + "'", "name");
             return field->second.value;
         }
+        if (instance->kind == Kind::Variant)
+        {
+            auto field = instance->bindings.find(name);
+            if (field != instance->bindings.end())
+                return field->second.value;
+        }
         auto methods = nativeMethods.find(instance->kind);
         if (methods != nativeMethods.end())
         {
@@ -1846,6 +2005,20 @@ namespace dk3
                 FrameScope frame(*this, *function->code, function->parent, receiver && receiver->origin ? &receiver->origin->text : nullptr);
                 try
                 {
+                    if (function->code->native && nativeAllowed() && std::all_of(arguments.begin(), arguments.end(), [](const Argument &argument)
+                                                                                 { return argument.name.empty(); }))
+                    {
+                        Value values[16];
+                        size_t count = std::min<size_t>(arguments.size(), 16);
+                        for (size_t index = 0; index < count; index++)
+                            values[index] = arguments[index].value;
+                        if (arguments.size() <= 16)
+                            if (std::optional<Value> result = callNative(*function->code->native, function, values, count, receiver))
+                            {
+                                roots.push_back(*result);
+                                return *result;
+                            }
+                    }
                     // Fill in any missing default arguments before entering the bytecode loop.
                     Value result = executeBytecode(*function->bytecode, function->parent, arguments, span, function->bytecode->captures ? &function->items : nullptr, receiver);
                     roots.push_back(result);
@@ -1891,7 +2064,7 @@ namespace dk3
                     }
                     else if (!custom)
                         throw Error(span, "Collection subclass fields require defaults or a custom init", "type");
-                    record->bindings.emplace(field.name, binding);
+                    record->slots.push_back(&record->bindings.emplace(field.name, binding).first->second);
                     defaults->bindings.emplace(field.name, binding);
                 }
                 constructing.push_back(record);
@@ -2001,6 +2174,9 @@ namespace dk3
             Object *record = allocate(function->kind == Kind::ClassType ? Kind::Instance : Kind::Record, span);
             record->origin = function;
             record->bindings = environment->bindings;
+            record->slots.reserve(parameters.size());
+            for (const auto &parameter : parameters)
+                record->slots.push_back(&record->bindings.at(parameter.name));
             if (function->kind == Kind::ClassType)
                 for (size_t position = 0; position < parameters.size(); position++)
                 {
@@ -2072,6 +2248,14 @@ namespace dk3
             Value result = call(function, arguments, hostSpan());
             roots.resize(scratch);
             return result;
+        }
+        catch (const Thrown &thrown)
+        {
+            std::string message = display(thrown.value);
+            roots.resize(scratch);
+            Error error(thrown.span, message, "throw");
+            error.trace = thrown.trace;
+            throw error;
         }
         catch (...)
         {
@@ -2788,6 +2972,7 @@ namespace dk3
         }
         target->bindings.insert(staged.begin(), staged.end());
         target->traits.push_back(trait);
+        bindingEpoch++;
     }
     void Runtime::executeDeclaration(const Ast &node, Object *environment)
     {
@@ -2809,7 +2994,7 @@ namespace dk3
                 if (base->kind != Kind::ClassType)
                     throw Error(node->span, "Base must be a user class", "type");
                 // Check if trying to extend a primitive type (Int, Float, Bool, String)
-                if (base->text == "Int" || base->text == "Float" || base->text == "Bool" || base->text == "String")
+                if (base->text == "Int" || base->text == "Float" || base->text == "Bool" || base->text == "String" || base->text == "Bytes")
                     throw Error(node->span, "'" + base->text + "' cannot be extended by '" + record->text + "'", "type");
                 if (base->inheritanceDepth >= 128)
                     throw Error(node->span, "Class inheritance depth exceeded", "limit");
@@ -2880,10 +3065,8 @@ namespace dk3
                                         throw Error(method->span, "Operator hooks cannot use rest parameters", "type");
                                 if (method->text == "toString" && !method->type.empty() && method->type != "String" && method->type != "Any")
                                     throw Error(method->span, "toString must return String", "type");
-                                if (operatorSpec && operatorSpec->predicate && !method->type.empty() && method->type != "Bool" && method->type != "Any")
-                                    throw Error(method->span, "Comparison hook must return Bool", "type");
-                                if (method->text == "__setitem__" && !method->type.empty() && method->type != "Null" && method->type != "Any")
-                                    throw Error(method->span, "__setitem__ must return Null", "type");
+                                if ((method->text == "__setitem__" || method->text == "__setslice__") && !method->type.empty() && method->type != "Null" && method->type != "Any")
+                                    throw Error(method->span, method->text + " must return Null", "type");
                             }
                             Value function = evaluate(method, classScope);
                             define(record, method->text, function, false, "", method->span);
@@ -2945,23 +3128,68 @@ namespace dk3
             enumeration->text = node->text;
             enumeration->code = node;
             enumeration->parent = environment;
-            for (const Ast &variant : node->children)
-            {
-                if (variant->names.empty())
-                {
-                    Object *value = allocate(Kind::Variant, variant->span);
-                    value->origin = enumeration;
-                    value->text = variant->text;
-                    define(enumeration, variant->text, value, false, "", variant->span);
-                    continue;
-                }
-                Object *constructor = allocate(Kind::Constructor, variant->span);
-                constructor->origin = enumeration;
-                constructor->text = variant->text;
-                constructor->code = variant;
-                define(enumeration, variant->text, constructor, false, "", variant->span);
-            }
+            // Bound first so the enum stays rooted (and self-referable) while variant values are evaluated.
             define(environment, node->text, enumeration, false, "", node->span);
+            try
+            {
+                bool valued = false;
+                for (const Ast &variant : node->children)
+                {
+                    if (variant->names.empty())
+                    {
+                        Object *value = allocate(Kind::Variant, variant->span);
+                        value->origin = enumeration;
+                        value->text = variant->text;
+                        define(enumeration, variant->text, value, false, "", variant->span);
+                        if (!variant->children.empty())
+                        {
+                            valued = true;
+                            const Ast &expression = variant->children[0];
+                            Value raw = evaluate(expression, environment);
+                            Object *rawObject = std::holds_alternative<Object *>(raw) ? std::get<Object *>(raw) : nullptr;
+                            if (!std::holds_alternative<int64_t>(raw) && !std::holds_alternative<double>(raw) &&
+                                !(rawObject && (rawObject->kind == Kind::String || rawObject->kind == Kind::Bytes)))
+                                throw Error(expression->span, "Enum values must be Int, Float, String or Bytes", "type");
+                            for (const Ast &earlier : node->children)
+                            {
+                                if (earlier == variant)
+                                    break;
+                                Object *other = object(enumeration->bindings.at(earlier->text).value, variant->span);
+                                if (equal(other->bindings.at("value").value, raw))
+                                    throw Error(variant->span, "Duplicate enum value: " + node->text + "." + variant->text + " equals " + node->text + "." + earlier->text, "value");
+                            }
+                            define(value, "value", raw, false, "", variant->span);
+                        }
+                        continue;
+                    }
+                    Object *constructor = allocate(Kind::Constructor, variant->span);
+                    constructor->origin = enumeration;
+                    constructor->text = variant->text;
+                    constructor->code = variant;
+                    define(enumeration, variant->text, constructor, false, "", variant->span);
+                }
+                if (valued)
+                {
+                    Value lookup = native(node->text + ".fromValue", [enumeration](const std::vector<Argument> &arguments, const Span &span) -> Value
+                                          {
+                        if (arguments.size() != 1)
+                            throw Error(span, "fromValue expects one value", "call");
+                        for (const Ast &variant : enumeration->code->children)
+                        {
+                            Value candidate = enumeration->bindings.at(variant->text).value;
+                            if (equal(object(candidate, span)->bindings.at("value").value, arguments[0].value))
+                                return candidate;
+                        }
+                        return Value{}; });
+                    object(lookup, node->span)->origin = enumeration; // keeps the captured enum alive
+                    define(enumeration, "fromValue", lookup, false, "", node->span);
+                }
+            }
+            catch (...)
+            {
+                environment->bindings.erase(node->text);
+                throw;
+            }
         }
         else if (node->kind == "import")
             define(environment, node->names[0], loadModule(node->text, node->span), false, "", node->span);
@@ -2970,9 +3198,16 @@ namespace dk3
             Object *module = loadModule(node->text, node->span);
             std::vector<std::pair<std::string, Value>> aliases;
             std::set<std::string> seen;
-            for (size_t index = 0; index < node->names.size(); index += 2)
+            std::vector<std::string> names = node->names;
+            if (names.size() == 2 && names[0] == "*")
             {
-                const std::string &name = node->names[index], &alias = node->names[index + 1];
+                names.clear();
+                for (const auto &binding : module->bindings)
+                    names.insert(names.end(), {binding.first, binding.first});
+            }
+            for (size_t index = 0; index < names.size(); index += 2)
+            {
+                const std::string &name = names[index], &alias = names[index + 1];
                 if (environment->bindings.count(alias) || !seen.insert(alias).second)
                     throw Error(node->span, "Duplicate import alias '" + alias + "'", "name");
                 auto found = module->bindings.find(name);
@@ -3521,16 +3756,14 @@ namespace dk3
                 enqueue(handler.carried);
         }
     }
-    void Runtime::collectionSafePoint()
+    void Runtime::collectNow()
     {
-        if (collectionRequested || heap.size() >= nextCollection)
-        {
-            collectionRequested = false;
-            collect();
-        }
+        collectionRequested = false;
+        collect();
     }
     void Runtime::collect()
     {
+        collectionRequested = false;
         collections++;
         ProfileClock profileBegin;
         size_t profileBefore = heap.size();
@@ -3571,15 +3804,39 @@ namespace dk3
                     mark(method.owner);
             }
         }
+        for (NativeContext *context : nativeContexts)
+            for (NativeFrame *frame = context->frames; frame; frame = frame->previous)
+            {
+                const Value *slots = reinterpret_cast<const Value *>(frame + 1);
+                for (uint64_t slot = 0; slot < frame->count; slot++)
+                    mark(slots[slot]);
+            }
         for (const auto &module : modules)
             mark(module.second);
+        if (streamLibrary)
+            mark(streamLibrary);
         for (const auto &type : nativeMethods)
             for (const auto &method : type.second)
                 mark(method.second);
-        size_t beforeSweep = heap.size();
-        heap.erase(std::remove_if(heap.begin(), heap.end(), [](const auto &value)
-                                  { return !value->marked; }),
-                   heap.end());
+        size_t beforeSweep = heap.size(), kept = 0;
+        for (size_t position = 0; position < heap.size(); position++)
+        {
+            if (heap[position]->marked)
+            {
+                if (kept != position)
+                    heap[kept] = std::move(heap[position]);
+                kept++;
+            }
+            else if (spare.size() < 4096)
+            {
+                // Rebuild in place: cheaper than assigning a value-initialized (zero-filled) temporary.
+                Object *dead = heap[position].get();
+                dead->~Object();
+                new (dead) Object;
+                spare.push_back(std::move(heap[position]));
+            }
+        }
+        heap.resize(kept);
         if (heap.size() != beforeSweep)
             bindingEpoch++;
         for (const auto &value : heap)
@@ -3625,7 +3882,7 @@ namespace dk3
         if ((instance->kind == Kind::Instance || instance->kind == Kind::Record) && std::find(instance->origin->traits.begin(), instance->origin->traits.end(), sizedTrait) != instance->origin->traits.end())
             return integer(call(member(value, "length", span), {}, span), span);
         if (instance->kind == Kind::String)
-            count = utf8Offsets(instance->text, span).size() - 1;
+            count = asciiText(instance->text) ? instance->text.size() : utf8Offsets(instance->text, span).size() - 1;
         else if (instance->kind == Kind::Bytes)
             count = instance->text.size();
         else if (instance->kind == Kind::Map)
@@ -3732,6 +3989,11 @@ namespace dk3
             for (const auto &method : stringMembers())
                 result.push_back({method.name, "Function", method.detail, false});
         }
+        else if (instance->kind == Kind::Bytes)
+        {
+            for (const auto &method : bytesMembers())
+                result.push_back({method.name, "Function", method.detail, false});
+        }
         else if (instance->kind == Kind::Resource && instance->external)
         {
             result = {{"closed", "Bool", instance->external->closed ? "true" : "false", false},
@@ -3788,12 +4050,12 @@ namespace dk3
         Object *target = object(map, span);
         if (target->kind != Kind::Map || !primitiveKey(key))
             throw Error(span, "Map lookup requires a Map and primitive key", "type");
-        for (const auto &entry : target->entries)
-            if (equal(entry.first, key))
-            {
-                value = entry.second;
-                return true;
-            }
+        size_t position = entryPosition(target, key);
+        if (position < target->entries.size())
+        {
+            value = target->entries[position].second;
+            return true;
+        }
         value = {};
         return false;
     }
@@ -3803,12 +4065,12 @@ namespace dk3
         Object *target = object(map, span);
         if (target->kind != Kind::Map || !primitiveKey(key))
             throw Error(span, "Map set requires a Map and primitive key", "type");
-        for (auto &entry : target->entries)
-            if (equal(entry.first, key))
-            {
-                entry.second = value;
-                return;
-            }
+        size_t position = entryPosition(target, key);
+        if (position < target->entries.size())
+        {
+            target->entries[position].second = value;
+            return;
+        }
         target->entries.emplace_back(key, value);
     }
     bool Runtime::removeEntry(Value map, Value key, const Span &span)
@@ -3817,13 +4079,67 @@ namespace dk3
         Object *target = object(map, span);
         if (target->kind != Kind::Map || !primitiveKey(key))
             throw Error(span, "Map remove requires a Map and primitive key", "type");
-        for (auto entry = target->entries.begin(); entry != target->entries.end(); ++entry)
-            if (equal(entry->first, key))
-            {
-                target->entries.erase(entry);
-                return true;
-            }
-        return false;
+        size_t position = entryPosition(target, key);
+        if (position == target->entries.size())
+            return false;
+        target->entries.erase(target->entries.begin() + static_cast<std::ptrdiff_t>(position));
+        target->entryIndex.reset();
+        return true;
+    }
+    size_t MapKeyHash::operator()(const Value &key) const
+    {
+        if (std::holds_alternative<int64_t>(key))
+            return std::hash<int64_t>{}(std::get<int64_t>(key));
+        if (std::holds_alternative<double>(key))
+        {
+            double real = std::get<double>(key);
+            if (std::isfinite(real) && real >= -9223372036854775808.0 && real < 9223372036854775808.0 && std::trunc(real) == real)
+                return std::hash<int64_t>{}(static_cast<int64_t>(real));
+            return std::hash<double>{}(real);
+        }
+        if (std::holds_alternative<bool>(key))
+            return std::get<bool>(key) ? 0x51ed27u : 0x2545f4u;
+        if (std::holds_alternative<Object *>(key))
+        {
+            const Object *text = std::get<Object *>(key);
+            size_t hash = std::hash<std::string>{}(text->text);
+            return text->kind == Kind::Bytes ? hash ^ 0x9e3779b97f4a7c15ull : hash;
+        }
+        return 0x7f4a7c15u;
+    }
+    bool MapKeyEqual::operator()(const Value &left, const Value &right) const { return Runtime::equal(left, right); }
+    size_t Runtime::entryPosition(Object *map, const Value &key)
+    {
+        auto &entries = map->entries;
+        if (entries.size() < 8)
+        {
+            for (size_t position = 0; position < entries.size(); position++)
+                if (equal(entries[position].first, key))
+                    return position;
+            return entries.size();
+        }
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            if (!map->entryIndex || map->entryIndex->indexed > entries.size())
+                map->entryIndex = std::make_unique<MapIndex>();
+            MapIndex &index = *map->entryIndex;
+            for (; index.indexed < entries.size(); index.indexed++)
+                index.positions.emplace(entries[index.indexed].first, index.indexed);
+            auto found = index.positions.find(key);
+            if (found == index.positions.end())
+                return entries.size();
+            if (found->second < entries.size() && equal(entries[found->second].first, key))
+                return found->second;
+            map->entryIndex.reset();
+        }
+        throw Error(hostSpan(), "Map index is inconsistent", "internal");
+    }
+    void Runtime::tickEntries(const Span &span, size_t count)
+    {
+        if (!config.profiler && !cleanupDepth && !currentTask && !config.stepLimit && !config.interrupted)
+            return;
+        for (size_t visited = 0; visited < count; visited++)
+            tick(span);
     }
     Value Runtime::run(const std::string &source, const std::string &file)
     {

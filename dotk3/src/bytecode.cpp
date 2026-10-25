@@ -77,7 +77,7 @@ namespace dk3
                 size_t position = emit(ByteOp::Binary, node, compound);
                 if (!code.optimization)
                     return;
-                const std::string symbol = compound ? node->text.substr(0, 1) : node->text;
+                const std::string symbol = compound ? compoundOperator(node->text) : node->text;
                 using Math = ByteInstruction::Math;
                 if (node->numeric == 2)
                 {
@@ -90,7 +90,7 @@ namespace dk3
                 }
                 else
                 {
-                    for (const auto &entry : std::vector<std::pair<std::string, Math>>{{"+", Math::Add}, {"-", Math::Subtract}, {"*", Math::Multiply}, {"//", Math::FloorDivide}, {"%", Math::Modulo}, {"==", Math::Equal}, {"!=", Math::NotEqual}, {"<", Math::Less}, {">", Math::Greater}, {"<=", Math::LessEqual}, {">=", Math::GreaterEqual}})
+                    for (const auto &entry : std::vector<std::pair<std::string, Math>>{{"+", Math::Add}, {"-", Math::Subtract}, {"*", Math::Multiply}, {"//", Math::FloorDivide}, {"%", Math::Modulo}, {"==", Math::Equal}, {"!=", Math::NotEqual}, {"<", Math::Less}, {">", Math::Greater}, {"<=", Math::LessEqual}, {">=", Math::GreaterEqual}, {"&", Math::BitAnd}, {"|", Math::BitOr}, {"^", Math::BitXor}, {"<<", Math::ShiftLeft}, {">>", Math::ShiftRight}})
                         if (entry.first == symbol)
                         {
                             code.instructions[position].math = entry.second;
@@ -139,6 +139,18 @@ namespace dk3
                         if (r && ((r ^ b) < 0))
                             r += b;
                     }
+                    else if (symbol == "&")
+                        r = a & b;
+                    else if (symbol == "|")
+                        r = a | b;
+                    else if (symbol == "^")
+                        r = a ^ b;
+                    else if (symbol == "<<" || symbol == ">>")
+                    {
+                        if (b < 0)
+                            return;
+                        r = shiftInt(a, b, symbol == "<<");
+                    }
                     else
                         return;                             // comparisons produce Bool — leave them alone for simplicity
                     code.instructions.resize(position - 2); // drop lhs, rhs, binary
@@ -170,27 +182,83 @@ namespace dk3
                 size_t slot = local(node->text);
                 emit(slot == std::numeric_limits<size_t>::max() ? ByteOp::LoadName : ByteOp::LoadLocal, node, slot == std::numeric_limits<size_t>::max() ? name(node->text) : slot);
             }
+            // Operand jumps can only target the comparison itself, so fusing it with the branch keeps every target valid.
+            size_t branchUnless(const Ast &condition, const Ast &node)
+            {
+                using Math = ByteInstruction::Math;
+                auto &last = code.instructions.back();
+                bool comparison = (last.math >= Math::Equal && last.math <= Math::GreaterEqual) || (last.math >= Math::EqualF && last.math <= Math::GreaterEqualF);
+                if (condition->kind == "binary" && !condition->widen && last.op == ByteOp::Binary && !last.operand && comparison)
+                {
+                    last.op = ByteOp::BranchCompare;
+                    return code.instructions.size() - 1;
+                }
+                return emit(ByteOp::BranchFalse, node);
+            }
+            bool fuseLocalIncrement()
+            {
+                using Math = ByteInstruction::Math;
+                size_t count = code.instructions.size();
+                if (count < 4)
+                    return false;
+                const auto &load = code.instructions[count - 4], &constant = code.instructions[count - 3];
+                const auto &operation = code.instructions[count - 2], &store = code.instructions[count - 1];
+                if (load.op != ByteOp::LoadLocal || constant.op != ByteOp::Int || operation.op != ByteOp::Binary || !operation.operand ||
+                    (operation.math != Math::Add && operation.math != Math::Subtract) || store.op != ByteOp::StoreLocal || store.operand != load.operand)
+                    return false;
+                ByteInstruction fused = operation;
+                fused.op = ByteOp::AddLocalInt;
+                fused.operand = load.operand;
+                fused.integer = constant.integer;
+                code.instructions.resize(count - 4);
+                code.instructions.push_back(std::move(fused));
+                return true;
+            }
             void clear(size_t depth, const Ast &node)
             {
                 for (size_t index = scopes.size(); index > depth; index--)
                     for (const auto &binding : scopes[index - 1])
                         emit(ByteOp::ClearLocal, node, binding.second);
             }
+            static bool decorators(const Ast &node)
+            {
+                return std::any_of(node->annotations.begin(), node->annotations.end(), [](const Annotation &annotation)
+                                   { return !annotation.builtin; });
+            }
+            // Evaluates decorators in source order, pushes the value, then applies them innermost first.
+            void decorate(const Ast &node, bool function)
+            {
+                std::vector<const Annotation *> applied;
+                for (const auto &annotation : node->annotations)
+                    if (!annotation.builtin)
+                    {
+                        applied.push_back(&annotation);
+                        expression(annotation.expression);
+                    }
+                if (function)
+                    emit(ByteOp::Closure, node);
+                else
+                    load(node);
+                for (size_t count = applied.size(); count-- > 0;)
+                {
+                    Ast call = std::make_shared<Node>();
+                    call->kind = "call";
+                    call->span = applied[count]->span;
+                    call->names = {""};
+                    size_t position = emit(ByteOp::Call, call, 1);
+                    code.instructions[position].integer = slotClosures && !lexical;
+                }
+            }
             void expression(const Ast &node)
             {
                 if (node->widen && node->kind == "literal" && node->literalKind == TokenKind::Integer)
                 {
-                    std::string digits = node->text;
-                    digits.erase(std::remove(digits.begin(), digits.end(), '_'), digits.end());
-                    try
+                    auto value = integerLiteralValue(node->text);
+                    if (value && *value <= static_cast<uint64_t>(INT64_MAX))
                     {
-                        double value = static_cast<double>(std::stoll(digits, nullptr, 0));
                         size_t position = emit(ByteOp::Float, node);
-                        code.instructions[position].floating = value;
+                        code.instructions[position].floating = static_cast<double>(*value);
                         return;
-                    }
-                    catch (const std::exception &)
-                    {
                     }
                 }
                 expressionInner(node);
@@ -207,17 +275,14 @@ namespace dk3
                 {
                     if (node->literalKind == TokenKind::Integer)
                     {
-                        std::string digits = node->text;
-                        digits.erase(std::remove(digits.begin(), digits.end(), '_'), digits.end());
-                        int64_t value = 0;
-                        auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
-                        if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size())
+                        auto value = integerLiteralValue(node->text);
+                        if (!value || *value > static_cast<uint64_t>(INT64_MAX))
                         {
                             emit(ByteOp::Literal, node);
                             return;
                         }
                         size_t position = emit(ByteOp::Int, node);
-                        code.instructions[position].integer = value;
+                        code.instructions[position].integer = static_cast<int64_t>(*value);
                     }
                     else if (node->literalKind == TokenKind::Float)
                     {
@@ -267,15 +332,13 @@ namespace dk3
                 {
                     if (node->text == "-" && node->children[0]->kind == "literal" && node->children[0]->literalKind == TokenKind::Integer)
                     {
-                        std::string digits = node->children[0]->text;
-                        digits.erase(std::remove(digits.begin(), digits.end(), '_'), digits.end());
-                        uint64_t value = 0;
-                        auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
-                        if (parsed.ec != std::errc{} || parsed.ptr != digits.data() + digits.size() || value > uint64_t{1} << 63)
+                        auto parsed = integerLiteralValue(node->children[0]->text);
+                        if (!parsed)
                         {
                             emit(ByteOp::Literal, node, 1);
                             return;
                         }
+                        uint64_t value = *parsed;
                         size_t position = emit(ByteOp::Int, node);
                         code.instructions[position].integer = value == uint64_t{1} << 63 ? INT64_MIN : -static_cast<int64_t>(value);
                     }
@@ -346,7 +409,8 @@ namespace dk3
                         emit(ByteOp::ResolveMethod, callee);
                         for (size_t index = 1; index < node->children.size(); index++)
                             expression(node->children[index]);
-                        emit(ByteOp::InvokeMethod, node, node->children.size() - 1);
+                        size_t invoke = emit(ByteOp::InvokeMethod, node, node->children.size() - 1);
+                        code.instructions[invoke].integer = positionalOnly && slotClosures && !lexical;
                         if (callee->safe)
                             code.instructions[skip].operand = code.instructions.size();
                     }
@@ -448,8 +512,15 @@ namespace dk3
                         if (slot == std::numeric_limits<size_t>::max())
                             slot = name(target->text);
                         bool external = local(target->text) == std::numeric_limits<size_t>::max();
-                        emit(external ? ByteOp::CheckName : ByteOp::CheckLocal, node, slot);
-                        if (node->text != "=")
+                        if (external || !code.optimization || !code.locals[slot].mutableBinding)
+                            emit(external ? ByteOp::CheckName : ByteOp::CheckLocal, node, slot);
+                        if (node->text != "=" && code.optimization && node->children[1]->kind == "literal")
+                        {
+                            load(target);
+                            expression(node->children[1]);
+                            operation(node, true);
+                        }
+                        else if (node->text != "=")
                         {
                             expression(node->children[1]);
                             load(target);
@@ -591,6 +662,18 @@ namespace dk3
             }
             void statement(const Ast &node)
             {
+                // Top-level script loops may have native code (see NativeTier); the op skips the bytecode when it ran.
+                if (code.program && !lexical && scopes.size() == 1 && loops.empty() && (node->kind == "while" || node->kind == "for_c" || node->kind == "for"))
+                {
+                    size_t skip = emit(ByteOp::NativeStatement, node);
+                    statementBody(node);
+                    code.instructions[skip].operand = code.instructions.size();
+                    return;
+                }
+                statementBody(node);
+            }
+            void statementBody(const Ast &node)
+            {
                 if (node->kind == "block")
                 {
                     emit(ByteOp::Tick, node);
@@ -602,7 +685,13 @@ namespace dk3
                 if (node->kind == "expression")
                 {
                     expression(node->children[0]);
-                    emit(ByteOp::Pop, node);
+                    if (code.optimization && node->children[0]->kind == "assignment" && fuseLocalIncrement())
+                    {
+                    }
+                    else if (code.optimization && code.instructions.back().op == ByteOp::StoreLocal && node->children[0]->kind == "assignment")
+                        code.instructions.back().op = ByteOp::DeclareLocal;
+                    else
+                        emit(ByteOp::Pop, node);
                 }
                 else if (node->kind == "binding")
                 {
@@ -623,12 +712,28 @@ namespace dk3
                     }
                 }
                 else if (node->kind == "function" && (lexical || (code.program && scopes.size() == 1)))
-                    emit(ByteOp::DefineFunction, node);
+                {
+                    if (decorators(node))
+                    {
+                        decorate(node, true);
+                        emit(ByteOp::DeclareName, node);
+                    }
+                    else
+                        emit(ByteOp::DefineFunction, node);
+                }
                 else if (node->kind == "type_alias")
                 {
                 }
                 else if ((lexical || (code.program && scopes.size() == 1)) && (node->kind == "class" || node->kind == "record" || node->kind == "trait" || node->kind == "impl" || node->kind == "enum"))
+                {
                     emit(ByteOp::DeclareType, node);
+                    // Type decorators observe the declared type; its name stays bound to that type.
+                    if (decorators(node))
+                    {
+                        decorate(node, false);
+                        emit(ByteOp::Pop, node);
+                    }
+                }
                 else if ((lexical || (code.program && scopes.size() == 1)) && (node->kind == "import" || node->kind == "from_import"))
                     emit(ByteOp::Import, node);
                 else if ((lexical || slotClosures) && node->kind == "throw")
@@ -675,6 +780,27 @@ namespace dk3
                         expression(node->children[0]);
                     emit(ByteOp::Return, node);
                 }
+                else if (node->kind == "if" && code.optimization)
+                {
+                    expression(node->children[0]);
+                    size_t branch = branchUnless(node->children[0], node);
+                    if (node->children[1]->kind == "block")
+                        block(node->children[1], true);
+                    else
+                        statement(node->children[1]);
+                    if (node->children.size() > 2)
+                    {
+                        size_t end = emit(ByteOp::Jump, node);
+                        code.instructions[branch].operand = code.instructions.size();
+                        if (node->children[2]->kind == "block")
+                            block(node->children[2], true);
+                        else
+                            statement(node->children[2]);
+                        code.instructions[end].operand = code.instructions.size();
+                    }
+                    else
+                        code.instructions[branch].operand = code.instructions.size();
+                }
                 else if (node->kind == "if")
                 {
                     expression(node->children[0]);
@@ -702,14 +828,17 @@ namespace dk3
                     size_t begin = code.instructions.size();
                     emit(ByteOp::Point, node);
                     expression(node->children[0]);
-                    size_t branch = emit(ByteOp::JumpFalse, node);
-                    emit(ByteOp::Pop, node);
+                    bool fused = code.optimization != 0;
+                    size_t branch = fused ? branchUnless(node->children[0], node) : emit(ByteOp::JumpFalse, node);
+                    if (!fused)
+                        emit(ByteOp::Pop, node);
                     loops.push_back({begin, scopes.size(), {}});
                     block(node->children[1], true);
                     emit(ByteOp::SafePoint, node);
                     emit(ByteOp::Jump, node, begin);
                     code.instructions[branch].operand = code.instructions.size();
-                    emit(ByteOp::Pop, node);
+                    if (!fused)
+                        emit(ByteOp::Pop, node);
                     for (size_t jump : loops.back().breaks)
                         code.instructions[jump].operand = code.instructions.size();
                     loops.pop_back();
@@ -722,8 +851,10 @@ namespace dk3
                     size_t begin = code.instructions.size();
                     emit(ByteOp::Point, node);
                     expression(node->children[1]);
-                    size_t branch = emit(ByteOp::JumpFalse, node);
-                    emit(ByteOp::Pop, node);
+                    bool fused = code.optimization != 0;
+                    size_t branch = fused ? branchUnless(node->children[1], node) : emit(ByteOp::JumpFalse, node);
+                    if (!fused)
+                        emit(ByteOp::Pop, node);
                     loops.push_back({begin, scopes.size(), {}});
                     block(node->children[3], true);
                     size_t increment = code.instructions.size();
@@ -734,7 +865,8 @@ namespace dk3
                     emit(ByteOp::SafePoint, node);
                     emit(ByteOp::Jump, node, begin);
                     code.instructions[branch].operand = code.instructions.size();
-                    emit(ByteOp::Pop, node);
+                    if (!fused)
+                        emit(ByteOp::Pop, node);
                     for (size_t jump : loops.back().breaks)
                         code.instructions[jump].operand = code.instructions.size();
                     loops.pop_back();
@@ -758,6 +890,12 @@ namespace dk3
         public:
             void enableSlotClosures(bool value) { slotClosures = value; }
             void enableMethod(bool value) { method = value; }
+            std::shared_ptr<const Bytecode> finish()
+            {
+                code.maxStack = operandStackDepth(code);
+                prepareSites(code);
+                return std::make_shared<const Bytecode>(std::move(code));
+            }
             // Compile a deferred expression as a zero-arg closure body (expr result is discarded).
             std::shared_ptr<const Bytecode> compileDeferredExpr(const Ast &exprNode, const std::vector<std::string> &captured, unsigned optimization)
             {
@@ -774,7 +912,7 @@ namespace dk3
                 emit(ByteOp::Pop, exprNode);
                 emit(ByteOp::Null, exprNode);
                 emit(ByteOp::Return, exprNode);
-                return valid ? std::make_shared<const Bytecode>(std::move(code)) : nullptr;
+                return valid ? finish() : nullptr;
             }
             std::shared_ptr<const Bytecode> compileClosure(const Ast &node, const std::vector<std::string> &captured, unsigned optimization)
             {
@@ -796,7 +934,7 @@ namespace dk3
                 block(node->children[0], false);
                 emit(ByteOp::Null, node->children[0]);
                 emit(ByteOp::Return, node->children[0]);
-                return valid ? std::make_shared<const Bytecode>(std::move(code)) : nullptr;
+                return valid ? finish() : nullptr;
             }
             std::shared_ptr<const Bytecode> expressionCode(const Ast &node, unsigned optimization)
             {
@@ -806,7 +944,7 @@ namespace dk3
                 emit(ByteOp::Return, node);
                 if (!valid)
                     throw Error(node->span, "Cannot lower expression to bytecode: " + node->kind, "internal");
-                return std::make_shared<const Bytecode>(std::move(code));
+                return finish();
             }
             std::shared_ptr<const Bytecode> statementCode(const Ast &node, unsigned optimization)
             {
@@ -818,7 +956,7 @@ namespace dk3
                 emit(ByteOp::Return, node);
                 if (!valid)
                     throw Error(node->span, "Cannot lower statement to bytecode: " + node->kind, "internal");
-                return std::make_shared<const Bytecode>(std::move(code));
+                return finish();
             }
             std::shared_ptr<const Bytecode> compile(const Ast &node, unsigned optimization, bool echoResult)
             {
@@ -889,7 +1027,7 @@ namespace dk3
                                 valid = false;
                         }
                     }
-                return valid ? std::make_shared<const Bytecode>(std::move(code)) : nullptr;
+                return valid ? finish() : nullptr;
             }
         };
     }
@@ -901,10 +1039,193 @@ namespace dk3
         return compiler.compile(node, optimization, echoResult);
     }
     std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization) { return Compiler{}.expressionCode(node, optimization); }
+    std::shared_ptr<const Bytecode> compileClosure(const Ast &node, const std::vector<std::string> &captured, unsigned optimization)
+    {
+        Compiler compiler;
+        compiler.enableSlotClosures(true);
+        return compiler.compileClosure(node, captured, optimization);
+    }
     std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization) { return Compiler{}.statementCode(node, optimization); }
+    void prepareSites(Bytecode &code)
+    {
+        size_t count = 0;
+        for (auto &instruction : code.instructions)
+            if (instruction.op == ByteOp::Member || instruction.op == ByteOp::PrepareMember || instruction.op == ByteOp::SetMember || instruction.op == ByteOp::ResolveMethod)
+                instruction.cachedKind = static_cast<int64_t>(count++);
+        code.sites.assign(count, {});
+    }
+    size_t operandStackDepth(const Bytecode &code)
+    {
+        const size_t count = code.instructions.size();
+        if (!count)
+            return 0;
+        auto fail = [&](size_t at, const std::string &reason)
+        {
+            const Ast &node = code.instructions[at].node;
+            throw Error(node ? node->span : Span{}, "Invalid bytecode at " + std::to_string(at) + " (" + byteOpName(code.instructions[at].op) + "): " + reason, "internal");
+        };
+        std::vector<long> depth(count, -1);
+        std::vector<size_t> pending{0};
+        depth[0] = 0;
+        long peak = 0;
+        auto reach = [&](size_t from, size_t to, long value)
+        {
+            if (to == count)
+                return;
+            if (to > count)
+                fail(from, "jump target out of range");
+            if (depth[to] < 0)
+            {
+                depth[to] = value;
+                pending.push_back(to);
+            }
+            else if (depth[to] != value)
+                fail(to, "inconsistent operand depth " + std::to_string(depth[to]) + " vs " + std::to_string(value));
+        };
+        while (!pending.empty())
+        {
+            size_t at = pending.back();
+            pending.pop_back();
+            const ByteInstruction &instruction = code.instructions[at];
+            long current = depth[at], pops = 0, pushes = 0;
+            long operand = static_cast<long>(instruction.operand);
+            switch (instruction.op)
+            {
+            case ByteOp::Tick:
+            case ByteOp::Point:
+            case ByteOp::SafePoint:
+            case ByteOp::ClearLocal:
+            case ByteOp::CheckLocal:
+            case ByteOp::CheckName:
+            case ByteOp::DefineFunction:
+            case ByteOp::DeclareType:
+            case ByteOp::Import:
+            case ByteOp::Jump:
+            case ByteOp::MatchFail:
+            case ByteOp::AddLocalInt:
+            case ByteOp::NativeStatement:
+                break;
+            case ByteOp::Null:
+            case ByteOp::Bool:
+            case ByteOp::Int:
+            case ByteOp::Float:
+            case ByteOp::Text:
+            case ByteOp::Literal:
+            case ByteOp::Closure:
+            case ByteOp::LoadLocal:
+            case ByteOp::LoadName:
+            case ByteOp::MakeClosure:
+            case ByteOp::IterNext:
+                pushes = 1;
+                break;
+            case ByteOp::Dup:
+                pops = 1;
+                pushes = 2;
+                break;
+            case ByteOp::StoreLocal:
+            case ByteOp::StoreName:
+            case ByteOp::CheckObject:
+            case ByteOp::Member:
+            case ByteOp::PrepareMember:
+            case ByteOp::PrepareSlice:
+            case ByteOp::ResolveMethod:
+            case ByteOp::InstanceOf:
+            case ByteOp::Cast:
+            case ByteOp::NonNull:
+            case ByteOp::IntToFloat:
+            case ByteOp::Unary:
+            case ByteOp::JumpFalse:
+            case ByteOp::JumpTrue:
+            case ByteOp::JumpPresent:
+            case ByteOp::JumpNull:
+            case ByteOp::Throw:
+            case ByteOp::MatchTest:
+            case ByteOp::MatchBind:
+            case ByteOp::Match:
+                pops = pushes = 1;
+                break;
+            case ByteOp::Swap:
+                pops = pushes = 2;
+                break;
+            case ByteOp::DeclareLocal:
+            case ByteOp::DeclareName:
+            case ByteOp::Pop:
+            case ByteOp::Defer:
+            case ByteOp::BranchFalse:
+            case ByteOp::IterInit:
+            case ByteOp::Return:
+                pops = 1;
+                break;
+            case ByteOp::Index:
+            case ByteOp::Binary:
+            case ByteOp::Format:
+            case ByteOp::SetMember:
+                pops = 2;
+                pushes = 1;
+                break;
+            case ByteOp::BranchCompare:
+                pops = 2;
+                break;
+            case ByteOp::SetIndex:
+                pops = 3;
+                pushes = 1;
+                break;
+            case ByteOp::Slice:
+                pops = 4;
+                pushes = 1;
+                break;
+            case ByteOp::Call:
+            case ByteOp::InvokeMethod:
+            case ByteOp::CallMethod:
+                pops = operand + 1;
+                pushes = 1;
+                break;
+            case ByteOp::CallNative:
+            case ByteOp::List:
+            case ByteOp::Tuple:
+            case ByteOp::Map:
+                pops = operand;
+                pushes = 1;
+                break;
+            }
+            if (current < pops)
+                fail(at, "operand stack underflow");
+            long after = current - pops + pushes;
+            peak = std::max({peak, current, after});
+            switch (instruction.op)
+            {
+            case ByteOp::Return:
+            case ByteOp::MatchFail:
+            case ByteOp::Throw:
+                break;
+            case ByteOp::Jump:
+                reach(at, instruction.operand, after);
+                break;
+            case ByteOp::IterNext:
+                reach(at, at + 1, after);
+                reach(at, instruction.operand, current);
+                break;
+            case ByteOp::JumpFalse:
+            case ByteOp::JumpTrue:
+            case ByteOp::JumpPresent:
+            case ByteOp::JumpNull:
+            case ByteOp::MatchTest:
+            case ByteOp::BranchFalse:
+            case ByteOp::BranchCompare:
+            case ByteOp::NativeStatement:
+                reach(at, at + 1, after);
+                reach(at, instruction.operand, after);
+                break;
+            default:
+                reach(at, at + 1, after);
+                break;
+            }
+        }
+        return static_cast<size_t>(peak);
+    }
     const char *byteOpName(ByteOp op)
     {
-        static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat", "MakeClosure", "IterInit", "IterNext", "MatchTest", "MatchBind", "MatchFail", "CallNative", "CallMethod", "Defer"};
+        static const char *names[] = {"Tick", "Point", "Null", "Bool", "Int", "Float", "Text", "LoadLocal", "StoreLocal", "DeclareLocal", "ClearLocal", "LoadName", "StoreName", "CheckLocal", "CheckName", "CheckObject", "DeclareName", "DefineFunction", "Member", "Index", "SetIndex", "Binary", "Unary", "Call", "List", "Tuple", "Map", "Pop", "Dup", "Jump", "JumpFalse", "JumpTrue", "JumpPresent", "SafePoint", "Return", "Literal", "Closure", "Format", "Slice", "Match", "PrepareMember", "SetMember", "Swap", "DeclareType", "Import", "Throw", "PrepareSlice", "ResolveMethod", "InvokeMethod", "InstanceOf", "Cast", "NonNull", "JumpNull", "IntToFloat", "MakeClosure", "IterInit", "IterNext", "MatchTest", "MatchBind", "MatchFail", "CallNative", "CallMethod", "Defer", "BranchFalse", "BranchCompare", "AddLocalInt", "NativeStatement"};
         return names[static_cast<size_t>(op)];
     }
 }

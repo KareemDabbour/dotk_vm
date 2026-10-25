@@ -156,7 +156,7 @@ It does not change script/module loading or create a filesystem sandbox.
 C hosts initialize DK3Files with dk3_files_init, provide read/info callbacks and
 call dk3_set_files(vm, &files). abi_version must be DK3_FILES_ABI_VERSION and size
 must cover the struct. The existing DK3Config layout is unchanged. max_bytes
-defaults to 4 MiB; zero permits only empty reads. Either callback may be omitted
+defaults to SIZE_MAX (no cap); zero permits only empty reads. Either callback may be omitted
 to deny that operation. dk3_set_files(vm, NULL) revokes both capabilities.
 
 Read callbacks receive path and maximum bytes and return DK3_OK plus a borrowed

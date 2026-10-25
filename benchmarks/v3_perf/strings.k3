@@ -1,0 +1,8 @@
+var checksum = 0
+let text = "alpha,beta,gamma,delta,epsilon,zeta,eta,theta"
+for (var i = 0; i < 40000; i++) {
+    let parts = text.split(",")
+    let line = f"{parts[i % 8]}-{i}"
+    checksum = (checksum + line.length() + parts[3].find("t") + "|".join(parts).length()) % 1000000007
+}
+System.print(checksum)

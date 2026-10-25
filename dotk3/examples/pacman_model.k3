@@ -8,6 +8,18 @@ class Ghost {
     constructor(spawn: Int) -> Null { self.spawn = spawn; self.position = spawn }
 }
 
+
+fn memo<T, U>(f: fn(T) -> U) -> fn(T) -> U {
+    let cache: Map<T, U> = {}
+    return fn(x: T) -> U {
+        let known = cache.get(x)
+        if known != null { return known }
+        let value = f(x)
+        cache[x] = value
+        return value
+    }
+}
+
 export class PacMan {
     let width: Int = 28
     let height: Int = 31

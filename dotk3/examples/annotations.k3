@@ -1,0 +1,80 @@
+from System import print
+
+# Decorators rebind top-level functions; they are evaluated top-down and applied bottom-up.
+fn logged(label: String) -> fn(fn(Int) -> Int) -> fn(Int) -> Int {
+    return fn(f: fn(Int) -> Int) -> fn(Int) -> Int {
+        return fn(x: Int) -> Int {
+            print(f"{label}({x})")
+            return f(x)
+        }
+    }
+}
+
+fn memo<T, U>(f: fn(T) -> U) -> fn(T) -> U {
+    let cache: Map<T, U> = {}
+    return fn(x: T) -> U {
+        let known = cache.get(x)
+        if known != null { return known }
+        let value = f(x)
+        cache[x] = value
+        return value
+    }
+}
+
+@memo
+fn fib(n: Int) -> Int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+@memo
+fn name(x: String) -> String { return "Dotk" }
+
+
+@memo
+fn name2(n2: String) -> Int { return 1 }
+
+@logged("square")
+@pure
+fn square(x: Int) -> Int { return x * x }
+
+# Type decorators observe the declared type, e.g. for registration.
+let registry: List<String> = []
+fn register(t: Type) -> Type {
+    registry.append(Reflection.type(t))
+    return t
+}
+
+
+fn column(name: String, size: Int = 0) -> Int { return size }
+
+@register
+class Account {
+    @column("account_name", 64) 
+    var name: String = ""
+    var cents: Int = 0
+
+    fn balance() -> Float { return Math.toFloat(self.cents) / 100.0 }
+    @deprecated("use balance()") 
+    fn dollars() -> Int { return self.cents // 100 }
+}
+
+class Savings extends Account {
+    @override 
+    fn balance() -> Float { return Math.toFloat(self.cents) / 100.0 + 1.0 }
+}
+
+@deprecated("use fib")
+fn slowFib(n: Int) -> Int { return n }
+
+@test
+fn fibIsFast() -> Null {
+    if fib(60) != 1548008755920 { throw Error(Error.Kind.Value, "fib") }
+}
+
+# Decorated names refer to the decorator's result, so reflect on annotated declarations or members.
+print(fib(60), square(7), registry.length())
+print(Reflection.annotations(slowFib), Reflection.annotations(Account, "name"), Reflection.annotation(Account, "column", "name"))
+print(Reflection.annotation(Account, "deprecated", "dollars"), Savings().balance())
+
+print(Reflection.annotations(Savings))

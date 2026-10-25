@@ -233,9 +233,104 @@ static void methodDispatchTests() {
     }
 }
 
+static void inlineCacheTests() {
+    for (unsigned level : {0u, 1u, 2u}) {
+        dk3::Config config; config.optimizationLevel = level;
+        dk3::Runtime runtime(config);
+        runtime.run(R"(
+            trait Named { fn name() -> String }
+            class Base { fn name() -> String { return 'base' } }
+            class Kid extends Base {}
+            fn label(value) { return value.name() }
+            let kid = Kid();
+            var before = ''; var after = '';
+            before = label(kid);
+            impl Named for Kid { fn name() -> String { return 'kid' } }
+            after = label(kid);
+            class Wide { var a: Int = 1; var b: Int = 2 }
+            class Narrow { var b: Int = 20 }
+            fn readB(value) { return value.b }
+            fn bump(value) { value.b += 5; return value.b }
+            let wide = Wide(); let narrow = Narrow();
+            let mixed = readB(wide) + readB(narrow) + readB(wide) + bump(narrow) + bump(wide) + readB(narrow);
+            class Secret { private var hidden: Int = 7; fn peek() { return self.hidden } }
+            fn reach(value) { return value.hidden }
+            let secret = Secret();
+            let peeked = secret.peek() + secret.peek();
+            class Fixed { let value: Int; constructor(value: Int) { self.assign(value) }; fn assign(value: Int) { self.value = value } }
+            let fixed = Fixed(3);
+            var churn = 0;
+            while churn < 200 { let temporary = [Wide(), Narrow()]; churn += readB(temporary[churn % 2]) - readB(temporary[churn % 2]) + 1 }
+            let afterChurn = readB(wide) + readB(narrow);
+        )", "inline-cache.k3");
+        assert(std::get<dk3::Object *>(runtime.get("before"))->text == "base" && std::get<dk3::Object *>(runtime.get("after"))->text == "kid");
+        assert(std::get<int64_t>(runtime.get("mixed")) == 2 + 20 + 2 + 25 + 7 + 25);
+        assert(std::get<int64_t>(runtime.get("peeked")) == 14 && std::get<int64_t>(runtime.get("afterChurn")) == 7 + 25);
+        for (const auto &failure : std::vector<std::pair<std::string, std::string>>{
+            {"reach(secret)", "access"}, {"secret.hidden = 1", "access"}, {"fixed.assign(4)", "mutability"}, {"readB(secret)", "name"}}) {
+            bool rejected = false;
+            try { runtime.run(failure.first, "inline-cache-errors.k3"); } catch (const dk3::Error &error) { rejected = error.category == failure.second; }
+            assert(rejected);
+        }
+    }
+}
+
+static void mapIndexTests() {
+    for (unsigned level : {0u, 1u, 2u}) {
+        dk3::Config config; config.optimizationLevel = level; std::string output;
+        config.write = [&](const std::string &value) { output += value; };
+        dk3::Runtime runtime(config);
+        runtime.run(R"(
+            let m = {};
+            for (var i = 0; i < 40; i++) { m[i] = i * 2 }
+            m[1.0] = 100; m[-0.0] = 7; m['k'] = 1; m[b'k'] = 2;
+            System.print(m[1], m[0], m.length(), m['k'], m[b'k'], m.contains(2.5), m.get(39.0));
+            m.remove(5); m[5] = 55; m.remove(10);
+            System.print(m.keys()[38], m[5], m.contains(10), m.length());
+            m.clear(); m['x'] = 1;
+            System.print(m.length(), m['x'], m.contains(3));
+            let big = {};
+            for (var i = 0; i < 20; i++) { big[i] = i }
+            big.compute(4, fn(k, v) => null);
+            big.merge(30, 1, fn(a, b) => a + b); big.merge(30, 1, fn(a, b) => a + b);
+            let copied = Map(big); copied.remove(0);
+            System.print(big.get(19) + big.get(3), big.contains(4), big[30], big.length(), copied.length(), copied.contains(0), big.contains(0));
+        )", "map-index.k3");
+        assert(output == "100 7 42 1 2 false 78\nk 55 false 41\n1 1 false\n22 false 2 20 19 false true\n");
+    }
+}
+
+static void annotationTests() {
+    for (unsigned level : {0u, 1u, 2u}) {
+        dk3::Config config; config.optimizationLevel = level; std::string output;
+        config.write = [&](const std::string &value) { output += value; };
+        dk3::Runtime runtime(config);
+        runtime.run(R"(
+            var log = [];
+            fn trace(label) { log.append('make ' + label); return fn(f) { log.append('apply ' + label); return fn(x) => f(x) * 10 } }
+            fn register(t) { log.append('register'); return 0 }
+            @trace('outer') @trace('inner') fn base(x) { return x + 1 }
+            @register record Point { x: Int, y: Int }
+            @trace('rec') fn countdown(n) { if n <= 0 { return 0 }; return countdown(n - 1) + 1 }
+            fn column(name, size) { return size }
+            class User { @column('user_name', 32) var name: String = ''; @deprecated fn legacy(@column('id', -1.5) id: Int) { return id } }
+            @pure @test fn square(x = 2) { return x * x }
+            System.print(base(1), Point(1, 2).x, log, countdown(2));
+            System.print(Reflection.annotations(base), Reflection.annotations(Point), Reflection.annotations(User, 'name'), Reflection.annotation(User(), 'column', 'name'));
+            System.print(Reflection.annotation(User().legacy, 'column', 'id'), Reflection.annotations(User, 'legacy'), Reflection.annotations(square), Reflection.annotation(square, 'missing'), Reflection.annotations(1));
+        )", "annotations.k3");
+        assert(output == "200 1 [make outer, make inner, apply inner, apply outer, register, make rec, apply rec] 110\n"
+                         "[] [register] [column] [user_name, 32]\n"
+                         "[id, -1.5] [deprecated] [pure, test] null []\n");
+    }
+}
+
 int main() {
     nativeRegistrationTests();
     methodDispatchTests();
+    inlineCacheTests();
+    mapIndexTests();
+    annotationTests();
     for (int level : {0, 1, 2}) {
         dk3::Config parityConfig; parityConfig.optimizationLevel = static_cast<unsigned>(level); parityConfig.objectLimit = 10000; std::string parityOutput;
         parityConfig.write = [&](const std::string &value) { parityOutput += value; };
@@ -261,6 +356,9 @@ int main() {
         parityOutput.clear();
         parity.run("var sliceEffects = 0; fn sliceBound() { sliceEffects += 1; return 0 }; let nonsliceable = {}; try { nonsliceable[sliceBound():] } catch error {}; System.print(sliceEffects)", "slice-order.k3");
         assert(parityOutput == "0\n");
+        parityOutput.clear();
+        parity.run("var fusedText = 'a'; var fusedCount = 0; while fusedText != 'aaaa' { fusedText = fusedText + 'a'; fusedCount += 1 }; fn fusedFloat() { var f = 1.5; f += 1; f -= 3; return f }; fn fusedWrap() { var w = 9223372036854775807; w += 1; return w }; var fusedMaybe = null; var fusedHits = 0; if (fusedMaybe ?? 3) < 5 { fusedHits += 1 }; if 1 < (fusedMaybe ?? 3) { fusedHits += 10 }; for (var i = 0; i < 4; i++) { if i != 2 { fusedHits += 100 } }; class FusedOdd { fn __lt__(other) { return 1 } }; var fusedOdd = 'none'; try { if FusedOdd() < FusedOdd() { fusedOdd = 'ran' } } catch error { fusedOdd = error.message }; System.print(fusedCount, fusedFloat(), fusedWrap(), fusedHits, fusedOdd)", "fused-ops.k3");
+        assert(parityOutput == "3 -0.5 -9223372036854775808 311 Condition requires Bool, got Int\n");
     }
     {
         dk3::Runtime simple;
@@ -368,7 +466,7 @@ int main() {
     assert(output == "item:Ada item:Ada item:Ada\nitem:Grace\n"); output.clear();
     runtime.run("record VectorOperator { x: Int, y: Int; fn toString() -> String { return Text.str(self.x) + ',' + Text.str(self.y) }; fn __add__(other: VectorOperator) -> VectorOperator { GC.collect(); return VectorOperator(self.x + other.x, self.y + other.y) }; fn __mul__(amount: Int) -> VectorOperator { return VectorOperator(self.x * amount, self.y * amount) }; fn __neg__() -> VectorOperator { return VectorOperator(-self.x, -self.y) }; fn __lt__(other: VectorOperator) -> Bool { return self.x < other.x } }\nlet firstVector = VectorOperator(1,2)\nlet secondVector = VectorOperator(3,4)\nSystem.print(firstVector + secondVector, firstVector * 3, -firstVector, firstVector < secondVector)\nvar compoundVector = firstVector\ncompoundVector += secondVector\nSystem.print(compoundVector)\nclass OperatorBase { let value: Int; fn __add__(other: Int) -> Int { return self.value + other } }\nclass OperatorChild extends OperatorBase {}\nSystem.print(OperatorChild(5) + 2)", "operators.k3");
     assert(output == "4,6 3,6 -1,-2 true\n4,6\n7\n"); output.clear();
-    for (const std::string &code : {"class WrongPredicate { fn __lt__(other) { return 1 } }; WrongPredicate() < WrongPredicate()", "class PrivateOperator { private fn __add__(other) {} }", "class GeneratorOperator { fn __add__(other) { yield 1 } }", "firstVector + 1", "2 * firstVector"}) {
+    for (const std::string &code : {"class WrongPredicate { fn __lt__(other) { return 1 } }; if WrongPredicate() < WrongPredicate() {}", "class PrivateOperator { private fn __add__(other) {} }", "class GeneratorOperator { fn __add__(other) { yield 1 } }", "firstVector + 1", "2 * firstVector"}) {
         bool rejected = false; try { runtime.run(code, "operator-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
@@ -493,7 +591,8 @@ int main() {
     assert(output == "-9223372036854775808 9223372036854775807\n1\n[[1],[1]]\n"); output.clear();
     std::string deepJson(65, '['); deepJson += '0'; deepJson += std::string(65, ']');
     runtime.set("deepJson", runtime.text(deepJson, false, dk3::Span{}));
-    for (const std::string &code : {"Json.parse(deepJson)", "Json.parse('-9223372036854775809')", "Json.parse('1e9999')", "Json.parse('[1,]')", "Json.parse('null true')", "Json.parse('{\"a\":1,\"\\\\u0061\":2}')", "{ record String {}; Json.stringify({String(): 1}) }"}) {
+    runtime.run("Json.parse(deepJson)", "json-deep-parse.k3");
+    for (const std::string &code : {"Json.parse('-9223372036854775809')", "Json.parse('1e9999')", "Json.parse('[1,]')", "Json.parse('null true')", "Json.parse('{\"a\":1,\"\\\\u0061\":2}')", "{ record String {}; Json.stringify({String(): 1}) }"}) {
         bool rejected = false; try { runtime.run(code, "json-boundary-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
@@ -504,8 +603,18 @@ int main() {
     bool jsonLimited = false;
     try { limitedJson.run("Json.parse(input)", "json-budget.k3"); } catch (const dk3::Error &error) { jsonLimited = error.category == "limit"; }
     assert(jsonLimited);
-    runtime.set("oversizedJson", runtime.text(std::string(4 * 1024 * 1024 + 1, 'x'), false, dk3::Span{}));
-    for (const std::string &code : {"Json.parse(oversizedJson)", "Json.stringify(oversizedJson)", "{ var nested = []; for index in Collections.range(65) { nested = [nested] }; Json.stringify(nested) }", "{ class JsonRecord {}; Json.stringify(JsonRecord()) }"}) {
+    runtime.set("largeJson", runtime.text(std::string(65 * 1024 * 1024, ' ') + std::string(200, '[') + std::string(200, ']'), false, dk3::Span{}));
+    runtime.run("Json.parse(largeJson)", "json-unbounded-parse.k3");
+    runtime.set("oversizedJson", runtime.text(std::string(65 * 1024 * 1024, 'x'), false, dk3::Span{}));
+    runtime.set("specialJson", runtime.text(std::string("\x01\t\"\\\xc3\xa9", 6), false, dk3::Span{}));
+    runtime.run(R"(let largeEncoded = Json.stringify(oversizedJson)
+var nested = []
+for index in Collections.range(20000) { nested = [nested] }
+let deepEncoded = Json.stringify(nested)
+Json.parse(deepEncoded)
+System.print(largeEncoded.length(), deepEncoded.length(), Json.stringify([specialJson, 1.0, 0.1, -0.0, 100000000000000000000.0, 9223372036854775807, null, true, (1,), {'k': []}])))", "json-unbounded.k3");
+    assert(output == "68157442 40002 " R"(["\u0001\t\"\\)" "\xc3\xa9" R"(",1.0,0.1,-0.0,1e+20,9223372036854775807,null,true,[1],{"k":[]}])" "\n"); output.clear();
+    for (const std::string &code : {"Json.parse(oversizedJson)", "{ class JsonRecord {}; Json.stringify(JsonRecord()) }"}) {
         bool rejected = false; try { runtime.run(code, "json-resource-errors.k3"); } catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
@@ -774,6 +883,115 @@ int main() {
     output.clear();
     runtime.run("record Profile { name: String, labels: List[String] = [] }\nrecord Point { x: Int, y: Int = x + 1 }\nenum Lookup { Found(Profile), Missing }\nlet firstProfile = Profile(name: 'Ada')\nlet secondProfile = Profile('Grace')\nfirstProfile.labels.append('active')\nGC.collect()\nSystem.print(Collections.len(firstProfile.labels), Collections.len(secondProfile.labels))\nlet point = Point(x: 3)\nSystem.print(point.y, point == Point(3, y: 4))\nlet lookup = Lookup.Found(firstProfile)\nSystem.print(match lookup { Lookup.Found(profile) => profile.name, Lookup.Missing => 'none' })", "record-contracts.k3");
     assert(output == "1 0\n4 true\nAda\n");
+    output.clear();
+    runtime.run("enum Marker: Bytes { Start = b'\\xFF\\xD8', End = b'\\xFF\\xD9' }\nlet scale = 10\nenum Level { Low = scale, High = Level.Low.value * 2 }\nGC.collect()\nlet header = b'\\xFF\\xD9\\x00'\nSystem.print(Marker.fromValue(header[0:2]) == Marker.End, Marker.fromValue(b'\\x00'), Marker.Start.value)\nSystem.print(Level.High.value, Level.fromValue(10) == Level.Low, match Level.High { Level.Low => 'low', Level.High => 'high' })\nSystem.print(Level.Low, [Marker.End])", "enum-values.k3");
+    assert(output == "true null b\"\\xff\\xd8\"\n20 true high\nLevel.Low [Marker.End]\n");
+    for (const std::string &source : {"enum Twice { A = 1, B = 1 }", "enum Wrong { A = true }"}) {
+        bool rejected = false;
+        try { runtime.run(source, "invalid-enum.k3"); } catch (const dk3::Error &) { rejected = true; }
+        assert(rejected);
+    }
+    output.clear();
+    runtime.run("enum Twice { A = 1, B = 2 }\nSystem.print(Twice.B.value)", "enum-rollback.k3");
+    assert(output == "2\n");
+    output.clear();
+    runtime.run("var bits = 0b1100\nbits |= 1\nbits &= ~4\nbits ^= 0xF0\nbits <<= 1\nbits >>= 2\nSystem.print(bits, 5 & 3, 5 | 3, 5 ^ 3, ~0, 1 << 63, -8 >> 1, 1 << 64, -1 >> 70, 3 & 1 == 1)", "bitwise.k3");
+    assert(output == "124 1 7 6 -1 -9223372036854775808 -4 0 -1 true\n");
+    for (const std::string &source : {"System.print(1 << -1)", "System.print(8 >> -2)"}) {
+        bool rejected = false;
+        try { runtime.run(source, "invalid-shift.k3"); } catch (const dk3::Error &error) { rejected = error.category == "value"; }
+        assert(rejected);
+    }
+    output.clear();
+    runtime.run("let packet = b'\\xFF\\xD8\\x00\\x10JFIF\\x00\\xFE\\xFF'\nGC.collect()\n"
+                "System.print(packet[2:4].toInt(), packet.readInt(0, 2), packet.readSignedInt(0, 2), packet.readInt(2, 2, 'little'), packet.readInt(2, 2, order: 'little'), packet[9:11].toSignedInt(order: 'little'))\n"
+                "System.print(4096.toBytes(2), 4096.toBytes(4, 'little'), (-2).toBytes(2), Bytes.of([74, 70]), b'-'.join([b'a', b'b']), packet[4:9])\n"
+                "System.print(packet.find(b'JFIF'), packet.find(b'\\xFF', 1), packet.find(b'Z'), packet.contains(b'IF'), packet.startsWith(b'\\xFF\\xD8'), packet.endsWith(b'\\xFF'))", "bytes-api.k3");
+    assert(output == "16 65496 -40 4096 4096 -2\nb\"\\x10\\x00\" b\"\\x00\\x10\\x00\\x00\" b\"\\xff\\xfe\" b\"JF\" b\"a-b\" b\"JFIF\\x00\"\n4 10 -1 true true true\n");
+    for (const std::string &source : {"packet.readInt(9, 4)", "packet.readInt(0, 9)", "packet.toInt()", "packet[0:2].toInt('middle')", "256.toBytes(1)", "Bytes.of([256])", "packet.find(b'x', 99)", "packet.readInt(0, size: 2, offset: 1)", "packet.readInt(size: 2)"}) {
+        bool rejected = false;
+        try { runtime.run(source, "invalid-bytes.k3"); } catch (const dk3::Error &) { rejected = true; }
+        assert(rejected);
+    }
+    output.clear();
+    runtime.run("var pulled = 0\nfn source() { for x in [1, 2, 3, 4, 5, 6] { pulled += 1; yield x } }\nlet pipeline = source().map(fn(x: Int) -> Int => x * x).filter(fn(x: Int) -> Bool => x % 2 == 0)\nGC.collect()\n"
+                "System.print(pulled, pipeline.take(2).toList(), pulled)\n"
+                "System.print(Collections.stream([b'\\x01\\x02', b'\\x03']).flatMap(fn(b: Bytes) -> Bytes => b).toList(), Collections.stream(Collections.range(10)).skip(7).count(), source().dropWhile(fn(x: Int) -> Bool => x < 5).first())\n"
+                "System.print(source().takeWhile(fn(x: Int) -> Bool => x < 3).reduce(callback: fn(a: Int, b: Int) -> Int => a + b, initial: 0), Collections.stream([2, 2]).toSet(), Collections.stream([1]).any(fn(x: Int) -> Bool => x > 0), Collections.stream([1]).all(fn(x: Int) -> Bool => x > 1))\n"
+                "System.print(Collectors.joining(['a', 'b'], '/'), Collectors.groupBy([1, 2, 3], fn(x: Int) -> Int => x % 2), Collectors.partitionBy([1, 2], fn(x: Int) -> Bool => x > 1), Collectors.toMap([1], fn(x: Int) -> Int => x, fn(x: Int) -> Int => -x))", "streams.k3");
+    assert(output == "0 [4, 16] 4\n[1, 2, 3] 3 5\n3 Set(2) true false\na/b {1: [1, 3], 0: [2]} {true: [2], false: [1]} {1: -1}\n");
+    output.clear();
+    runtime.run("let png = Encoding.fromHex('89504e470d0a1a0a0000000d494844520000000200000002080600000072b60d240000001349444154789c63f8cfc0f01f0c8134083400004949097828a0db770000000049454e44ae426082')\nGC.collect()\n"
+                "let info = ImageCodec.info(png)\nlet rgba = ImageCodec.decode(png)\n"
+                "System.print(info, rgba.length(), rgba.readInt(0, 4), rgba[12:16], ImageCodec.resize(rgba, 2, 2, 1, 1), ImageCodec.resize(rgba, 2, 2, 4, 4).length(), ImageCodec.resize(rgba, 2, 2, 2, 1)[0:4])", "image-codec.k3");
+    assert(output == "(2, 2, 4) 16 4278190335 b\"\\xff\\xff\\xff\\x80\" b\"mmm\\xdf\" 64 b\"\\x7f\\x00\\x7f\\xff\"\n");
+    // Untrusted input fails with catchable value errors: oversized headers, and stb reasons embedding corrupt chunk-name bytes.
+    output.clear();
+    runtime.run("let huge = Encoding.fromHex('89504e470d0a1a0a0000000d494844520000271000002710' + '0802000000' + '00000000' + '0000000049444154')\n"
+                "try { ImageCodec.info(huge) } catch error { System.print(error.kind, error.message) }\n"
+                "let corrupt = Encoding.fromHex('89504e470d0a1a0a0000000d494844520000000200000002080600000072b60d240000001349444154789c63f8cfc0f01f0c8134083400004949097828a0db770000000049454e86ae426082')\n"
+                "try { ImageCodec.decode(corrupt) } catch error { System.print(error.kind, error.message) }", "image-errors.k3");
+    assert(output == "value Image is larger than 67108864 pixels\nvalue Cannot decode image: IEN? PNG chunk not known\n");
+    for (const std::string &source : {"ImageCodec.info(b'')", "ImageCodec.decode(b'not an image')", "ImageCodec.decode('text')", "ImageCodec.resize(b'abcd', 2, 2, 1, 1)", "ImageCodec.resize(b'abcd', 1, 1, 0, 1)", "ImageCodec.resize(b'abcd', 1, 1, 100000, 100000)", "ImageCodec.resize(b'abcd', 1, 1, 1)"}) {
+        bool rejected = false;
+        try { runtime.run(source, "invalid-image.k3"); } catch (const dk3::Error &) { rejected = true; }
+        assert(rejected);
+    }
+    // a[i, j] indexes with the tuple (i, j); subscripts containing a slice go to __getslice__/__setslice__ as Collections.Slice records.
+    output.clear();
+    runtime.run("class Grid {\n  var log: List<Object?> = []\n"
+                "  fn __getitem__(key: Int | Tuple<Int>) -> Object? { return key }\n"
+                "  fn __setitem__(key: Int | Tuple<Int>, value: Int) -> Null { self.log.append((key, value)) }\n"
+                "  fn __getslice__(key: Tuple<Int | Collections.Slice>) -> Object? { return key }\n"
+                "  fn __setslice__(key: Tuple<Int | Collections.Slice>, value: Int) -> Null { self.log.append((key, value)) }\n"
+                "  fn __rmul__(other: Int) -> String { return 'rmul ' + Text.str(other) }\n"
+                "  fn __rsub__(other: Int) -> String { return 'rsub ' + Text.str(other) }\n"
+                "  fn __gt__(other: Int) -> String { return 'gt ' + Text.str(other) }\n}\n"
+                "let grid = Grid()\nGC.collect()\n"
+                "System.print(grid[1], grid[1, -2], grid[1:2], grid[::-1, 0])\nSystem.print(grid[:, 1:])\n"
+                "grid[3, 4] = 5\ngrid[0:1] = 7\ngrid[1, :] = 8\nSystem.print(grid.log)\n"
+                "System.print(2 * grid, 2 - grid, 1 < grid, grid > 3, Collections.Slice(1, step: -1))", "subscripts.k3");
+    assert(output == "1 (1, -2) (Slice(start: 1, stop: 2, step: null),) (Slice(start: null, stop: null, step: -1), 0)\n"
+                     "(Slice(start: null, stop: null, step: null), Slice(start: 1, stop: null, step: null))\n"
+                     "[((3, 4), 5), ((Slice(start: 0, stop: 1, step: null),), 7), ((1, Slice(start: null, stop: null, step: null)), 8)]\n"
+                     "rmul 2 rsub 2 gt 1 gt 3 Slice(start: 1, stop: null, step: -1)\n");
+    for (const std::string &source : {"[1, 2][0:1, 0]", "let fixed = [1, 2]\nfixed[0:1] = 3", "grid[0:1] += 1", "grid[0, 1:] -= 1", "grid[1:]++", "grid['a':]",
+                                      "class BadSlice { fn __setslice__(key: Object, value: Object) -> Int { return 1 } }"}) {
+        bool rejected = false;
+        try { runtime.run(source, "invalid-subscripts.k3"); } catch (const dk3::Error &) { rejected = true; }
+        assert(rejected);
+    }
+    // NDKernel: layouts are (offset, dimensions..., strides...); stride 0 broadcasts and negative strides walk backwards.
+    output.clear();
+    runtime.run("let a = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]\nGC.collect()\n"
+                "System.print(NDKernel.binary('add', a, (0, 2, 3, 3, 1), [10.0, 20.0], (0, 2, 3, 1, 0)), NDKernel.copy(a, (5, 3, -2)), NDKernel.unary('sqrt', [4, 9], (0, 2, 1)))\n"
+                "System.print(NDKernel.reduce('sum', a, (0, 2, 3, 3, 1), 0), NDKernel.reduce('argmax', a, (0, 2, 3, 3, 1), -1), NDKernel.reduce('mean', a, (0, 2, 3, 3, 1), 1), NDKernel.reduce('sum', [], (0, 0, 1), -1))\n"
+                "System.print(NDKernel.matmul(a, (0, 2, 3, 3, 1), a, (0, 3, 2, 1, 3)), NDKernel.where([1.0, 0.0], (0, 2, 1), a, (0, 2, 1), [-1.0], (0, 2, 0)), NDKernel.binary('mod', [-7.0, 7.0], (0, 2, 1), [3.0], (0, 2, 0)))\n"
+                "let shifted = [0.0, 1.0, 2.0, 3.0]\nNDKernel.assign(shifted, (1, 3, 1), shifted, (0, 3, 1))\n"
+                "System.print(shifted, NDKernel.toBytes([0.5, 2.0, -1.0], (0, 3, 1), 255.0), NDKernel.fromBytes(b'\\x00\\xff', 1.0), NDKernel.arange(0, 1, 0.25), NDKernel.linspace(0, 1, 3))\n"
+                "System.print(NDKernel.format(a, (0, 2, 3, 3, 1), 8))\nSystem.print(NDKernel.format([0.5, 2.25, 3.0, 0.1], (0, 4, 1), 8), NDKernel.format([0.00001, 1.0], (0, 2, 1), 8), NDKernel.format([7.0], (0,), 8))", "ndkernel.k3");
+    assert(output == "[10, 11, 12, 23, 24, 25] [5, 3, 1] [2, 3]\n[3, 5, 7] [5] [1, 4] [0]\n[5, 14, 14, 50] [0, -1] [2, 1]\n"
+                     "[0, 0, 1, 2] b\"\\x80\\xff\\x00\" [0, 255] [0, 0.25, 0.5, 0.75] [0, 0.5, 1]\n"
+                     "[[0. 1. 2.]\n [3. 4. 5.]]\n[0.5  2.25 3.   0.1 ] [1.e-05 1.e+00] 7.0\n");
+    // Layouts are validated before any element is touched; failures are catchable.
+    for (const auto &[source, category] : std::vector<std::pair<std::string, std::string>>{
+             {"NDKernel.copy([1.0], (0, 2, 1))", "index"}, {"NDKernel.copy([1.0], (-1, 1, 1))", "index"}, {"NDKernel.copy([1.0], (0, 3, 4611686018427387904))", "index"},
+             {"NDKernel.copy([1.0], (0, 1))", "value"}, {"NDKernel.copy([1.0], (0, -1, 1))", "value"}, {"NDKernel.copy([1.0], (0, 6000, 6000, 0, 0))", "value"},
+             {"NDKernel.copy(['x'], (0, 1, 1))", "type"}, {"NDKernel.copy((1.0,), (0, 1, 1))", "type"}, {"NDKernel.binary('nope', [1.0], (0,), [1.0], (0,))", "value"},
+             {"NDKernel.binary('add', [1.0], (0, 1, 1), [1.0], (0, 2, 0))", "value"}, {"NDKernel.reduce('min', [], (0, 0, 1), -1)", "value"},
+             {"NDKernel.reduce('sum', [1.0], (0, 1, 1), 1)", "index"}, {"NDKernel.fill(-1, 0.0)", "value"}, {"NDKernel.fill(40000000, 0.0)", "value"},
+             {"NDKernel.matmul([1.0], (0, 1, 1), [1.0], (0, 1, 1))", "value"}, {"NDKernel.arange(0, 1, 0)", "value"}, {"NDKernel.format([1.0], (0,), 30)", "value"}}) {
+        std::string caught;
+        try { runtime.run(source, "invalid-ndkernel.k3"); } catch (const dk3::Error &error) { caught = error.category; }
+        assert(caught == category);
+    }
+    {
+        dk3::Config kernelBudget; kernelBudget.stepLimit = 1000;
+        dk3::Runtime limitedKernel(kernelBudget);
+        bool limited = false;
+        try { limitedKernel.run("NDKernel.copy(NDKernel.fill(5000, 1.0), (0, 5000, 1))", "kernel-budget.k3"); } catch (const dk3::Error &error) { limited = error.category == "limit"; }
+        assert(limited);
+    }
     for (const std::string &source : {"firstProfile.name = 'changed'", "Profile()", "Profile(name: 'A', unknown: 2)", "Lookup.Found()"}) {
         bool rejected = false;
         try { runtime.run(source, "invalid-data.k3"); } catch (const dk3::Error &) { rejected = true; }

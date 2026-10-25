@@ -14,6 +14,38 @@ bytecode, O1 specializes checked Int arithmetic/comparisons, and O2 additionally
 uses per-frame binding caches invalidated by declaration epochs. No level removes
 language checks or source/step information. The CLI exposes -O0/-O1/-O2 and
 --engine bytecode; C SDK config layout is unchanged and uses runtime defaults.
+O1+ also applies semantics-preserving peepholes (BranchFalse for if/loop tests,
+no CheckLocal for mutable slots, no Swap for literal compound assignment); O0
+bytecode stays unfused as a differential reference.
+
+Every Bytecode records maxStack from operandStackDepth, a dataflow pass that also
+rejects underflow, inconsistent join depths and out-of-range jumps (including
+loaded .dotbc). Frames size operand storage once per call and execute through raw
+local/operand pointers; popped slots are cleared so GC roots stay exact. Stress
+builds add operand bounds checks (DK3_STACK_CHECKS).
+
+Member, PrepareMember, SetMember and ResolveMethod instructions own monomorphic
+inline cache sites (Bytecode::sites, numbered by prepareSites). Field sites cache
+a slot index into Object::slots (stable Binding pointers in class field order);
+method sites cache the resolved public method and owner. Entries are valid only
+for the cached receiver class and the current bindingEpoch, which advances on new
+globals, type member definitions, impl installation and any sweep that frees
+objects. Non-public members are never cached, so access checks stay exact.
+
+Maps with 8+ entries keep a lazily built first-match key index consistent with
+Runtime::equal (Int/Float keys that compare equal hash equally). Appends extend it
+incrementally; erase, clear and wholesale replacement reset it. Map methods still
+charge one step per entry a scan would have visited. Swept Objects are reset and
+pooled (bounded) for reuse by allocate.
+
+Annotations are AST metadata (syntax.hpp Annotation on Node and Parameter). The
+checker validates directive targets/arguments, types decorator application on
+top-level functions (the symbol becomes a value of the decorator's result type)
+and types, and emits @deprecated warnings at uses. The compiler lowers decorated
+functions to decorator evaluation, Closure, Call(1) per decorator and DeclareName;
+type decorators run after DeclareType and their result is discarded. Reflection
+reads literal arguments from the declaration AST; nothing is evaluated for
+metadata-only annotations. Runtime::invoke converts script throws into Error.
 
 The AST expression evaluator and statement walker have been removed. Eligible
 noncapturing functions/programs use slot bytecode; other bodies use compiled lexical

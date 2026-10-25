@@ -5,6 +5,20 @@
     { "name": "comment.line.number-sign.dotk3", "match": "#.*$" },
     { "include": "#strings" },
     {
+      "match": "(@)(jit|nojit|inline|override|deprecated|test|pure)\\b",
+      "captures": {
+        "1": { "name": "punctuation.definition.annotation.dotk3" },
+        "2": { "name": "storage.modifier.annotation.builtin.dotk3" }
+      }
+    },
+    {
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.annotation.dotk3" },
+        "2": { "name": "entity.name.function.decorator.dotk3" }
+      }
+    },
+    {
       "match": "\\b(record|class|trait|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "storage.type.dotk3" },
@@ -32,7 +46,7 @@
     { "name": "support.class.module.dotk3", "match": "\\b(?:System|IO|Reflection|Collections|Text|Math|Tasks|Files|Json|Random|Terminal|Sockets|Http|Requests)\\b" },
     { "name": "support.function.dotk3", "match": "\\b(?:print|len|type|members|binding|bindings|str|range|encode|decode|toInt|toFloat|gc|close|spawn|pump|cancel)\\b" },
     { "name": "constant.numeric.dotk3", "match": "\\b(?:0x[0-9A-Fa-f_]+|0b[01_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)\\b" },
-    { "name": "keyword.operator.dotk3", "match": "=>|->|\\?\\?|==|!=|<=|>=|&&|\\|\\||//|[-+*/%<>=!?:&]" }
+    { "name": "keyword.operator.dotk3", "match": "=>|->|\\?\\?|==|!=|<=|>=|&&|\\|\\||//|<<=?|>>=?|[-+*/%<>=!?:&|^~]" }
   ],
   "repository": {
     "strings": {

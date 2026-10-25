@@ -1,12 +1,70 @@
 #include "runtime.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <set>
+
+#ifdef DK3_STACK_CHECKS
+#define DK3_STACK_CHECK(condition)                                         \
+    do                                                                     \
+    {                                                                      \
+        if (!(condition))                                                  \
+        {                                                                  \
+            std::fputs("dotk3: operand stack bounds violated\n", stderr); \
+            std::abort();                                                  \
+        }                                                                  \
+    } while (0)
+#else
+#define DK3_STACK_CHECK(condition) ((void)0)
+#endif
 
 namespace dk3
 {
     namespace
     {
+        // Fixed-capacity view over a frame's pooled operand storage; popped slots are cleared so GC roots stay exact.
+        struct OperandStack
+        {
+            Value *base, *top, *limit;
+            Value &back()
+            {
+                DK3_STACK_CHECK(top > base);
+                return top[-1];
+            }
+            void push_back(const Value &value)
+            {
+                DK3_STACK_CHECK(top < limit);
+                *top++ = value;
+            }
+            template <typename... Arguments>
+            void emplace_back(Arguments &&...arguments)
+            {
+                DK3_STACK_CHECK(top < limit);
+                *top++ = Value(std::forward<Arguments>(arguments)...);
+            }
+            void pop_back()
+            {
+                DK3_STACK_CHECK(top > base);
+                *--top = Value{};
+            }
+            size_t size() const { return static_cast<size_t>(top - base); }
+            Value &operator[](size_t index)
+            {
+                DK3_STACK_CHECK(base + index < top);
+                return base[index];
+            }
+            Value *data() { return base; }
+            Value *begin() { return base; }
+            Value *end() { return top; }
+            void resize(size_t count)
+            {
+                DK3_STACK_CHECK(count <= size());
+                while (top > base + count)
+                    *--top = Value{};
+            }
+        };
         Object *byteObject(Value value, const Span &span)
         {
             if (!std::holds_alternative<Object *>(value))
@@ -36,6 +94,9 @@ namespace dk3
         FrameScope frame(*this, *function->code, function->parent, receiver && receiver->origin ? &receiver->origin->text : nullptr);
         try
         {
+            if (function->code->native && nativeAllowed())
+                if (std::optional<Value> result = callNative(*function->code->native, function, arguments, count, receiver))
+                    return *result;
             return executeBytecodeLoop<false>(*function->bytecode, function->parent, none, span, function->bytecode->captures ? &function->items : nullptr, arguments, count, receiver);
         }
         catch (...)
@@ -44,12 +105,128 @@ namespace dk3
             throw;
         }
     }
+    std::optional<Value> Runtime::callNative(const NativeFunction &native, Object *function, const Value *arguments, size_t count, Object *receiver)
+    {
+        uint64_t raw[16];
+        if (count != native.parameters.size() || count > 16 || native.method != (receiver != nullptr))
+            return std::nullopt;
+        if (!native.ready)
+        {
+            for (const auto &dependency : native.dependencies)
+                if (!global->bindings.count(dependency))
+                    return std::nullopt;
+            native.ready = true;
+        }
+        for (size_t index = 0; index < count; index++)
+        {
+            const Value &argument = arguments[index];
+            switch (native.parameters[index])
+            {
+            case 'i':
+                if (!std::holds_alternative<int64_t>(argument))
+                    return std::nullopt;
+                raw[index] = static_cast<uint64_t>(std::get<int64_t>(argument));
+                break;
+            case 'f':
+                if (!std::holds_alternative<double>(argument))
+                    return std::nullopt;
+                std::memcpy(&raw[index], &std::get<double>(argument), sizeof(double));
+                break;
+            case 'v':
+                // The caller's operand storage stays rooted for the whole call.
+                raw[index] = reinterpret_cast<uintptr_t>(&argument);
+                break;
+            default:
+                if (!std::holds_alternative<bool>(argument))
+                    return std::nullopt;
+                raw[index] = std::get<bool>(argument);
+                break;
+            }
+        }
+        Value self = receiver ? Value{receiver} : Value{};
+        Object *previousAccess = accessClass;
+        accessClass = nullptr;
+        for (Object *scope = function->parent; scope; scope = scope->parent)
+            if (scope->accessClass)
+            {
+                accessClass = scope->accessClass;
+                break;
+            }
+        struct Restore
+        {
+            Object *&access;
+            Object *previous;
+            ~Restore() { access = previous; }
+        } restore{accessClass, previousAccess};
+        return enterNative(native, function->parent, function, raw, &self);
+    }
+    bool Runtime::runNativeStatement(const NativeFunction &native, Object *environment)
+    {
+        if (!native.ready)
+        {
+            for (const auto &dependency : native.dependencies)
+                if (!global->bindings.count(dependency))
+                    return false;
+            native.ready = true;
+        }
+        enterNative(native, environment, nullptr, nullptr, nullptr);
+        return true;
+    }
+    Value Runtime::enterNative(const NativeFunction &native, Object *environment, Object *function, const uint64_t *raw, const Value *self)
+    {
+        Value boxed;
+        NativeContext context{&callDepth, 256, 0, nullptr, this, nativeHelpers(), native.sites, environment, self, &boxed, function, &bindingEpoch, &collectionRequested};
+        nativeContexts.push_back(&context);
+        struct Restore
+        {
+            Runtime &runtime;
+            size_t depth;
+            ~Restore()
+            {
+                runtime.nativeContexts.pop_back();
+                runtime.callDepth = depth;
+            }
+        } restore{*this, callDepth};
+        size_t unwound = nativeUnwind.size();
+        uint64_t result = native.entry(&context, raw);
+        if (context.failure == nativeException)
+        {
+            std::exception_ptr failure = std::move(nativeFailure);
+            nativeFailure = nullptr;
+            captureNativeFailure(failure, unwound);
+            std::rethrow_exception(failure);
+        }
+        if (context.failure)
+        {
+            const NativeSite &site = (*native.sites)[context.failure - 1];
+            std::exception_ptr failure = std::make_exception_ptr(Error(site.span, site.message, site.category));
+            captureNativeFailure(failure, unwound);
+            std::rethrow_exception(failure);
+        }
+        switch (native.result)
+        {
+        case 'v':
+            return boxed;
+        case 'i':
+            return Value{static_cast<int64_t>(result)};
+        case 'f':
+        {
+            double number;
+            std::memcpy(&number, &result, sizeof(double));
+            return Value{number};
+        }
+        case 'b':
+            return Value{result != 0};
+        default:
+            return Value{};
+        }
+    }
     template <bool profiled>
     Value Runtime::executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positionalArguments, size_t positionalCount, Object *self)
     {
         if (byteFrameDepth == byteFrames.size())
             byteFrames.emplace_back();
-        ByteFrame &frame = byteFrames[byteFrameDepth++];
+        ByteFrame &byteFrame = byteFrames[byteFrameDepth++];
         struct ReleaseFrame
         {
             ByteFrame &frame;
@@ -63,11 +240,20 @@ namespace dk3
                 frame.deferred.clear();
                 depth--;
             }
-        } releaseFrame{frame, byteFrameDepth};
-        frame.locals.assign(code.locals.size(), Value{});
-        frame.initialized.assign(code.locals.size(), false);
-        frame.nameResolutions.assign(code.names.size(), nullptr);
-        frame.stack.reserve(std::min<size_t>(code.instructions.size(), 64));
+        } releaseFrame{byteFrame, byteFrameDepth};
+        byteFrame.locals.assign(code.locals.size(), Value{});
+        byteFrame.initialized.assign(code.locals.size(), 0);
+        byteFrame.stack.assign(code.maxStack, Value{});
+        // Storage stays fixed for this activation, so raw pointers remain valid across nested calls.
+        struct
+        {
+            Value *locals;
+            unsigned char *initialized;
+            std::vector<MethodTarget> &methods;
+            std::vector<Value> &deferred;
+            OperandStack stack;
+        } frame{byteFrame.locals.data(), byteFrame.initialized.data(), byteFrame.methods, byteFrame.deferred,
+                {byteFrame.stack.data(), byteFrame.stack.data(), byteFrame.stack.data() + byteFrame.stack.size()}};
         Object *previousAccess = accessClass;
         accessClass = nullptr;
         for (Object *scope = environment; scope; scope = scope->parent)
@@ -143,7 +329,7 @@ namespace dk3
             }
         auto pop = [&]()
         { Value value = frame.stack.back(); frame.stack.pop_back(); return value; };
-        auto binding = [&](size_t index, const Span &location) -> Binding &
+        auto resolveBinding = [&](size_t index, const Span &location) -> Binding &
         {
             if (code.optimization < 2)
                 return lookup(environment, code.names[index], location);
@@ -180,12 +366,42 @@ namespace dk3
                 throw Error(location, "Field has not been initialized: '" + code.names[index] + "'", "state");
             return *cached;
         };
+        // Profiled runs always take resolveBinding so cache hit counters stay exact.
+        auto binding = [&](size_t index, const Span &location) -> Binding &
+        {
+            if constexpr (!profiled)
+                if (code.nameEnvironment == environment && code.nameEpoch == bindingEpoch && code.optimization >= 2)
+                    if (Binding *cached = static_cast<Binding *>(code.nameBindings[index]); cached && cached->initialized)
+                        return *cached;
+            return resolveBinding(index, location);
+        };
+        auto siteOf = [&](const ByteInstruction &at) -> ByteSite *
+        {
+            size_t index = static_cast<size_t>(at.cachedKind);
+            return index < code.sites.size() ? &code.sites[index] : nullptr;
+        };
+        auto cachedSlot = [&](const ByteSite *site, Object *instance) -> Binding *
+        {
+            return site && site->type == instance->origin && site->epoch == bindingEpoch && site->slot < instance->slots.size() ? instance->slots[site->slot] : nullptr;
+        };
+        // Only public fields are cached so access checks never depend on the calling class.
+        auto rememberSlot = [&](ByteSite *site, Object *instance, const Binding *field)
+        {
+            if (!site || field->visibility != Visibility::Public)
+                return;
+            for (size_t index = 0; index < instance->slots.size(); index++)
+                if (instance->slots[index] == field)
+                {
+                    *site = {instance->origin, bindingEpoch, nullptr, nullptr, index};
+                    return;
+                }
+        };
         auto runDeferred = [&](const Span &loc)
         {
-            while (!frame.deferred.empty())
+            while (!byteFrame.deferred.empty())
             {
-                Value fn = frame.deferred.back();
-                frame.deferred.pop_back();
+                Value fn = byteFrame.deferred.back();
+                byteFrame.deferred.pop_back();
                 try
                 {
                     call(fn, {}, loc);
@@ -282,20 +498,45 @@ namespace dk3
                 case ByteOp::PrepareSlice:
                 {
                     Object *value = byteObject(frame.stack.back(), location);
-                    if (value->kind != Kind::List && value->kind != Kind::Tuple && value->kind != Kind::String && value->kind != Kind::Bytes)
+                    if (value->kind != Kind::List && value->kind != Kind::Tuple && value->kind != Kind::String && value->kind != Kind::Bytes && !mayOverload(frame.stack.back()))
                         throw Error(location, "Value is not sliceable", "type");
                     break;
                 }
                 case ByteOp::PrepareMember:
-                    frame.stack.back() = prepareMemberWrite(frame.stack.back(), node->text, instruction.operand != 0, location);
+                {
+                    Value receiver = frame.stack.back();
+                    ByteSite *site = siteOf(instruction);
+                    Object *instance = std::holds_alternative<Object *>(receiver) ? std::get<Object *>(receiver) : nullptr;
+                    if (instance && instance->kind == Kind::Instance)
+                    {
+                        Binding *field = cachedSlot(site, instance);
+                        if (field && field->mutableBinding && (field->initialized || !instruction.operand))
+                            break;
+                    }
+                    Object *container = prepareMemberWrite(receiver, node->text, instruction.operand != 0, location);
+                    if (container == instance && container->kind == Kind::Instance)
+                    {
+                        auto found = container->bindings.find(node->text);
+                        if (found != container->bindings.end() && found->second.mutableBinding)
+                            rememberSlot(site, container, &found->second);
+                    }
+                    frame.stack.back() = container;
                     break;
+                }
                 case ByteOp::SetMember:
                 {
                     Object *container = byteObject(frame.stack[frame.stack.size() - 2], location);
-                    Binding *target = classBinding(container, node->children[0]->text);
+                    ByteSite *site = siteOf(instruction);
+                    Binding *target = container->kind == Kind::Instance ? cachedSlot(site, container) : nullptr;
+                    if (!target)
+                    {
+                        target = classBinding(container, node->children[0]->text);
+                        if (target && container->kind == Kind::Instance)
+                            rememberSlot(site, container, target);
+                    }
                     Value value = frame.stack.back();
                     if (node->text != "=")
-                        value = binary(node->text.substr(0, 1), target->value, value, location);
+                        value = binary(compoundOperator(node->text), target->value, value, location);
                     target->value = value;
                     target->initialized = true;
                     pop();
@@ -454,13 +695,50 @@ namespace dk3
                 case ByteOp::Member:
                 {
                     Value value = frame.stack.back();
+                    if (std::holds_alternative<Object *>(value))
+                    {
+                        Object *instance = std::get<Object *>(value);
+                        if (instance->kind == Kind::Instance || instance->kind == Kind::Record)
+                        {
+                            ByteSite *site = siteOf(instruction);
+                            Binding *cached = cachedSlot(site, instance);
+                            if (cached && cached->initialized)
+                            {
+                                frame.stack.back() = cached->value;
+                                break;
+                            }
+                            auto field = instance->bindings.find(node->text);
+                            if (field != instance->bindings.end() && field->second.initialized && canAccess(field->second))
+                            {
+                                rememberSlot(site, instance, &field->second);
+                                frame.stack.back() = field->second.value;
+                                break;
+                            }
+                        }
+                    }
                     frame.stack.back() = member(value, node->text, location);
                     break;
                 }
                 case ByteOp::ResolveMethod:
                 {
+                    Value receiver = frame.stack.back();
+                    ByteSite *site = siteOf(instruction);
+                    Object *instance = std::holds_alternative<Object *>(receiver) ? std::get<Object *>(receiver) : nullptr;
+                    if (instance && instance->kind == Kind::Instance && site && site->method && site->type == instance->origin && site->epoch == bindingEpoch)
+                    {
+                        frame.stack.back() = site->method;
+                        frame.methods.push_back({instance, site->owner});
+                        break;
+                    }
                     MethodTarget target;
-                    Value function = member(frame.stack.back(), node->text, location, false, &target);
+                    Value function = member(receiver, node->text, location, false, &target);
+                    if (site && instance && instance->kind == Kind::Instance && target.receiver == instance && std::holds_alternative<Object *>(function))
+                    {
+                        Object *owner = nullptr;
+                        Binding *method = classBinding(instance->origin, node->text, &owner);
+                        if (method && owner == target.owner && method->visibility == Visibility::Public && !method->staticMember)
+                            *site = {instance->origin, bindingEpoch, std::get<Object *>(function), owner, 0};
+                    }
                     frame.stack.back() = function;
                     frame.methods.push_back(target);
                     break;
@@ -479,8 +757,8 @@ namespace dk3
                     Value receiver = frame.stack[begin], key = frame.stack[begin + 1], value = frame.stack[begin + 2], custom;
                     Object *container = byteObject(receiver, location);
                     if (node->text != "=")
-                        value = binary(node->text.substr(0, 1), index(receiver, key, node->children[0]->span), value, location);
-                    if (!overloaded("setitem", receiver, {{"", key}, {"", value}}, location, custom))
+                        value = binary(compoundOperator(node->text), index(receiver, key, node->children[0]->span), value, location);
+                    if (!mayOverload(receiver) || !overloaded("setitem", receiver, {{"", key}, {"", value}}, location, custom))
                     {
                         if (container->kind == Kind::List)
                         {
@@ -505,7 +783,7 @@ namespace dk3
                     Value right = frame.stack.back(), left = frame.stack[frame.stack.size() - 2];
                     Value value;
                     using Math = ByteInstruction::Math;
-                    bool floatOperation = instruction.math >= Math::AddF;
+                    bool floatOperation = instruction.math >= Math::AddF && instruction.math <= Math::GreaterEqualF;
                     if (floatOperation && std::holds_alternative<double>(left) && std::holds_alternative<double>(right))
                     {
                         if constexpr (profiled)
@@ -593,6 +871,21 @@ namespace dk3
                         case Math::NotEqual:
                             value = first != second;
                             break;
+                        case Math::BitAnd:
+                            value = first & second;
+                            break;
+                        case Math::BitOr:
+                            value = first | second;
+                            break;
+                        case Math::BitXor:
+                            value = first ^ second;
+                            break;
+                        case Math::ShiftLeft:
+                        case Math::ShiftRight:
+                            if (second < 0)
+                                throw Error(location, "Negative shift count", "value");
+                            value = shiftInt(first, second, instruction.math == Math::ShiftLeft);
+                            break;
                         case Math::Less:
                             value = first < second;
                             break;
@@ -613,7 +906,7 @@ namespace dk3
                     {
                         if constexpr (profiled)
                             config.profiler->genericBinaryOperations++;
-                        value = binary(instruction.operand ? node->text.substr(0, 1) : node->text, left, right, location);
+                        value = binary(instruction.operand ? compoundOperator(node->text) : node->text, left, right, location);
                     }
                     pop();
                     frame.stack.back() = value;
@@ -628,6 +921,12 @@ namespace dk3
                         frame.stack.back() = !boolean(value, location);
                     else if (overloaded("unary" + node->text, value, {}, location, custom))
                         frame.stack.back() = custom;
+                    else if (node->text == "~")
+                    {
+                        if (!std::holds_alternative<int64_t>(value))
+                            throw Error(location, "Operator '~' requires an Int", "type");
+                        frame.stack.back() = ~std::get<int64_t>(value);
+                    }
                     else if (node->text == "+")
                     {
                         if (!std::holds_alternative<int64_t>(value) && !std::holds_alternative<double>(value))
@@ -721,7 +1020,8 @@ namespace dk3
                             }
                         }
                     }
-                    if (receiver && !receiver->origin && !config.profiler)
+                    // Exact builtin collections resolve these names to the same native methods member() would find.
+                    if (receiver && (!receiver->origin || receiver->origin->builtinCollection) && !config.profiler)
                     {
                         if (instruction.cachedKind != static_cast<int64_t>(receiver->kind))
                         {
@@ -762,19 +1062,23 @@ namespace dk3
                 case ByteOp::InvokeMethod:
                 {
                     size_t begin = frame.stack.size() - instruction.operand - 1;
-                    if (instruction.op == ByteOp::Call && instruction.integer && !profiled && !config.debug && std::holds_alternative<Object *>(frame.stack[begin]))
+                    if (instruction.integer && !profiled && !config.debug && std::holds_alternative<Object *>(frame.stack[begin]))
                     {
                         Object *callee = std::get<Object *>(frame.stack[begin]);
                         if (callee->kind == Kind::Function)
                         {
-                            if (!callee->bytecodeAttempted)
+                            Object *receiver = instruction.op == ByteOp::InvokeMethod ? frame.methods.back().receiver : nullptr;
+                            // Methods compile on their first (general) call so AOT lookup and method mode stay in one place.
+                            if (!callee->bytecodeAttempted && !receiver)
                             {
                                 callee->bytecode = compileBytecode(callee->code, config.optimizationLevel, false, true);
                                 callee->bytecodeAttempted = true;
                             }
-                            if (callee->bytecode)
+                            if (callee->bytecode && callee->bytecode->hasSelf == (receiver != nullptr))
                             {
-                                Value result = callFunctionFast(callee, frame.stack.data() + begin + 1, instruction.operand, location);
+                                Value result = callFunctionFast(callee, frame.stack.data() + begin + 1, instruction.operand, location, receiver);
+                                if (instruction.op == ByteOp::InvokeMethod)
+                                    frame.methods.pop_back();
                                 frame.stack.resize(begin);
                                 frame.stack.push_back(result);
                                 break;
@@ -822,13 +1126,129 @@ namespace dk3
                     cursor = instruction.operand;
                     break;
                 case ByteOp::JumpFalse:
-                    if (!boolean(frame.stack.back(), location))
+                {
+                    const Value &top = frame.stack.back();
+                    if (!(std::holds_alternative<bool>(top) ? std::get<bool>(top) : boolean(top, location)))
                         cursor = instruction.operand;
                     break;
+                }
+                case ByteOp::BranchFalse:
+                {
+                    const Value &top = frame.stack.back();
+                    bool condition = std::holds_alternative<bool>(top) ? std::get<bool>(top) : boolean(top, location);
+                    frame.stack.pop_back();
+                    if (!condition)
+                        cursor = instruction.operand;
+                    break;
+                }
+                case ByteOp::BranchCompare:
+                {
+                    using Math = ByteInstruction::Math;
+                    const Value &left = frame.stack[frame.stack.size() - 2], &right = frame.stack.back();
+                    bool condition;
+                    if (instruction.math >= Math::EqualF && instruction.math <= Math::GreaterEqualF && std::holds_alternative<double>(left) && std::holds_alternative<double>(right))
+                    {
+                        if constexpr (profiled)
+                            config.profiler->floatSpecializations++;
+                        double first = std::get<double>(left), second = std::get<double>(right);
+                        switch (instruction.math)
+                        {
+                        case Math::EqualF:
+                            condition = first == second;
+                            break;
+                        case Math::NotEqualF:
+                            condition = first != second;
+                            break;
+                        case Math::LessF:
+                            condition = first < second;
+                            break;
+                        case Math::GreaterF:
+                            condition = first > second;
+                            break;
+                        case Math::LessEqualF:
+                            condition = first <= second;
+                            break;
+                        default:
+                            condition = first >= second;
+                            break;
+                        }
+                    }
+                    else if (instruction.math < Math::AddF && std::holds_alternative<int64_t>(left) && std::holds_alternative<int64_t>(right))
+                    {
+                        if constexpr (profiled)
+                            config.profiler->integerSpecializations++;
+                        int64_t first = std::get<int64_t>(left), second = std::get<int64_t>(right);
+                        switch (instruction.math)
+                        {
+                        case Math::Equal:
+                            condition = first == second;
+                            break;
+                        case Math::NotEqual:
+                            condition = first != second;
+                            break;
+                        case Math::Less:
+                            condition = first < second;
+                            break;
+                        case Math::Greater:
+                            condition = first > second;
+                            break;
+                        case Math::LessEqual:
+                            condition = first <= second;
+                            break;
+                        default:
+                            condition = first >= second;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if constexpr (profiled)
+                            config.profiler->genericBinaryOperations++;
+                        Value value = binary(node->text, left, right, location);
+                        condition = std::holds_alternative<bool>(value) ? std::get<bool>(value) : boolean(value, location);
+                    }
+                    frame.stack.resize(frame.stack.size() - 2);
+                    if (!condition)
+                        cursor = instruction.operand;
+                    break;
+                }
+                case ByteOp::NativeStatement:
+                    if constexpr (!profiled)
+                        if (node->native && nativeAllowed() && runNativeStatement(*node->native, environment))
+                            cursor = instruction.operand;
+                    break;
+                case ByteOp::AddLocalInt:
+                {
+                    size_t slot = instruction.operand;
+                    if (!frame.initialized[slot])
+                        throw Error(location, "Field has not been initialized: '" + code.locals[slot].name + "'", "state");
+                    Value &target = frame.locals[slot];
+                    if (std::holds_alternative<int64_t>(target))
+                    {
+                        if constexpr (profiled)
+                            config.profiler->integerSpecializations++;
+                        int64_t result = 0;
+                        if (instruction.math == ByteInstruction::Math::Add)
+                            __builtin_add_overflow(std::get<int64_t>(target), instruction.integer, &result);
+                        else
+                            __builtin_sub_overflow(std::get<int64_t>(target), instruction.integer, &result);
+                        target = result;
+                    }
+                    else
+                    {
+                        if constexpr (profiled)
+                            config.profiler->genericBinaryOperations++;
+                        target = binary(compoundOperator(node->text), target, instruction.integer, location);
+                    }
+                    break;
+                }
                 case ByteOp::JumpTrue:
-                    if (boolean(frame.stack.back(), location))
+                {
+                    const Value &top = frame.stack.back();
+                    if (std::holds_alternative<bool>(top) ? std::get<bool>(top) : boolean(top, location))
                         cursor = instruction.operand;
                     break;
+                }
                 case ByteOp::JumpPresent:
                     if (!std::holds_alternative<std::monostate>(frame.stack.back()))
                         cursor = instruction.operand;

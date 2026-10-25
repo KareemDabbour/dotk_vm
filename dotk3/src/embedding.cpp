@@ -262,7 +262,7 @@ void dk3_config_init(DK3Config *config) {
 }
 void dk3_files_init(DK3Files *files) {
     if (!files) return;
-    *files = {}; files->size = sizeof(*files); files->abi_version = DK3_FILES_ABI_VERSION; files->max_bytes = 4 * 1024 * 1024;
+    *files = {}; files->size = sizeof(*files); files->abi_version = DK3_FILES_ABI_VERSION; files->max_bytes = std::numeric_limits<size_t>::max();
 }
 DK3Status dk3_set_files(DK3VM *vm, const DK3Files *provided) {
     if (provided && (provided->size < sizeof(DK3Files) || provided->abi_version != DK3_FILES_ABI_VERSION)) return DK3_INVALID;

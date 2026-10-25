@@ -6,8 +6,54 @@
 
 namespace dk3 {
 using Json = nlohmann::ordered_json;
-static constexpr size_t jsonByteLimit = 4 * 1024 * 1024;
-static constexpr size_t jsonDepthLimit = 64;
+
+// Length of the well-formed UTF-8 sequence at `index`, or 0 when it is malformed.
+static size_t utf8Sequence(const std::string &text, size_t index) {
+    auto at = [&](size_t offset) -> unsigned { return index + offset < text.size() ? static_cast<unsigned char>(text[index + offset]) : 0; };
+    auto continues = [&](size_t offset, unsigned low = 0x80, unsigned high = 0xBF) { return at(offset) >= low && at(offset) <= high; };
+    unsigned first = at(0);
+    if (first >= 0xC2 && first <= 0xDF) return continues(1) ? 2 : 0;
+    if (first == 0xE0) return continues(1, 0xA0) && continues(2) ? 3 : 0;
+    if (first == 0xED) return continues(1, 0x80, 0x9F) && continues(2) ? 3 : 0;
+    if (first >= 0xE1 && first <= 0xEF) return continues(1) && continues(2) ? 3 : 0;
+    if (first == 0xF0) return continues(1, 0x90) && continues(2) && continues(3) ? 4 : 0;
+    if (first >= 0xF1 && first <= 0xF3) return continues(1) && continues(2) && continues(3) ? 4 : 0;
+    if (first == 0xF4) return continues(1, 0x80, 0x8F) && continues(2) && continues(3) ? 4 : 0;
+    return 0;
+}
+
+// Same escaping as nlohmann's compact dump: non-ASCII stays verbatim, other controls become \u00xx.
+static void appendJsonString(std::string &output, const std::string &text, const Span &span) {
+    static const char hex[] = "0123456789abcdef";
+    output += '"';
+    size_t run = 0;
+    for (size_t index = 0; index < text.size();) {
+        unsigned char byte = static_cast<unsigned char>(text[index]);
+        if (byte >= 0x20 && byte != '"' && byte != '\\' && byte < 0x80) { index++; continue; }
+        output.append(text, run, index - run);
+        if (byte >= 0x80) {
+            size_t length = utf8Sequence(text, index);
+            if (!length) throw Error(span, "Cannot encode JSON value", "json");
+            output.append(text, index, length);
+            index += length;
+        } else {
+            switch (byte) {
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            default: output += "\\u00"; output += hex[byte >> 4]; output += hex[byte & 15];
+            }
+            index++;
+        }
+        run = index;
+    }
+    output.append(text, run, std::string::npos);
+    output += '"';
+}
 
 class JsonReader : public nlohmann::json_sax<Json> {
     struct Frame { Object *value; std::string key; std::unordered_set<std::string> keys; };
@@ -27,7 +73,6 @@ class JsonReader : public nlohmann::json_sax<Json> {
         return true;
     }
     bool begin(Kind kind) {
-        if (frames.size() >= jsonDepthLimit) throw Error(span, "JSON nesting limit exceeded", "limit");
         Object *value = runtime.allocate(kind, span); add(value); frames.push_back({value, {}, {}}); return true;
     }
 public:
@@ -68,7 +113,6 @@ void Runtime::installJson() {
         if (values.size() != 1 || !std::holds_alternative<Object *>(values[0]) || std::get<Object *>(values[0])->kind != Kind::String)
             throw Error(span, "Json.parse expects one String", "call");
         const auto &source = std::get<Object *>(values[0])->text;
-        if (source.size() > jsonByteLimit) throw Error(span, "JSON input exceeds byte limit", "limit");
         JsonReader reader(*this, span);
         try {
             if (!Json::sax_parse(source.begin(), source.end(), &reader)) throw Error(span, "Invalid JSON", "json");
@@ -78,44 +122,50 @@ void Runtime::installJson() {
     registerNative("Json.stringify", [this](const auto &arguments, const Span &span) -> Value {
         auto values = positional(arguments, span);
         if (values.size() != 1) throw Error(span, "Json.stringify expects one value", "call");
+        struct Frame { Object *object; size_t index; };
+        std::vector<Frame> stack;
         std::unordered_set<Object *> active;
-        size_t bytes = 0;
-        auto account = [&](size_t amount) {
-            if (amount > jsonByteLimit - bytes) throw Error(span, "JSON output exceeds byte limit", "limit");
-            bytes += amount;
-        };
-        std::function<Json(Value, size_t)> encode = [&](Value value, size_t depth) -> Json {
+        std::string output;
+        // Scalars are written immediately; containers open here and close in the loop below.
+        auto emit = [&](const Value &value) {
             tick(span);
-            if (std::holds_alternative<std::monostate>(value)) { account(4); return nullptr; }
-            if (std::holds_alternative<bool>(value)) { account(5); return std::get<bool>(value); }
-            if (std::holds_alternative<int64_t>(value)) { account(24); return std::get<int64_t>(value); }
+            if (std::holds_alternative<std::monostate>(value)) { output += "null"; return; }
+            if (std::holds_alternative<bool>(value)) { output += std::get<bool>(value) ? "true" : "false"; return; }
+            if (std::holds_alternative<int64_t>(value)) { output += std::to_string(std::get<int64_t>(value)); return; }
             if (std::holds_alternative<double>(value)) {
                 double number = std::get<double>(value);
                 if (!std::isfinite(number)) throw Error(span, "JSON Float is not finite", "json");
-                account(32); return number;
+                output += Json(number).dump(); return;
             }
             Object *object = std::get<Object *>(value);
-            if (object->kind == Kind::String) { account(object->text.size() + 2); return object->text; }
+            if (object->kind == Kind::String) { appendJsonString(output, object->text, span); return; }
             if (object->kind != Kind::List && object->kind != Kind::Tuple && object->kind != Kind::Map)
                 throw Error(span, "Unsupported JSON value: " + typeOf(value), "json");
-            if (depth >= jsonDepthLimit) throw Error(span, "JSON nesting limit exceeded", "limit");
             if (!active.insert(object).second) throw Error(span, "Cyclic value cannot be encoded as JSON", "json");
-            account(2); Json result = object->kind == Kind::Map ? Json::object() : Json::array();
-            if (object->kind == Kind::Map) {
-                for (const auto &entry : object->entries) {
-                    if (!std::holds_alternative<Object *>(entry.first) || std::get<Object *>(entry.first)->kind != Kind::String)
-                        throw Error(span, "JSON object keys must be String", "json");
-                    const auto &key = std::get<Object *>(entry.first)->text; account(key.size() + 4);
-                    result[key] = encode(entry.second, depth + 1);
-                }
-            } else for (Value item : object->items) { account(1); result.push_back(encode(item, depth + 1)); }
-            active.erase(object); return result;
+            output += object->kind == Kind::Map ? '{' : '[';
+            stack.push_back({object, 0});
         };
-        try {
-            std::string output = encode(values[0], 0).dump();
-            if (output.size() > jsonByteLimit) throw Error(span, "JSON output exceeds byte limit", "limit");
-            return text(std::move(output), false, span);
-        } catch (const Json::exception &) { throw Error(span, "Cannot encode JSON value", "json"); }
+        emit(values[0]);
+        while (!stack.empty()) {
+            Object *object = stack.back().object;
+            bool map = object->kind == Kind::Map;
+            size_t index = stack.back().index++;
+            if (index == (map ? object->entries.size() : object->items.size())) {
+                output += map ? '}' : ']';
+                active.erase(object);
+                stack.pop_back();
+                continue;
+            }
+            if (index) output += ',';
+            if (!map) { emit(object->items[index]); continue; }
+            const Value &key = object->entries[index].first;
+            if (!std::holds_alternative<Object *>(key) || std::get<Object *>(key)->kind != Kind::String)
+                throw Error(span, "JSON object keys must be String", "json");
+            appendJsonString(output, std::get<Object *>(key)->text, span);
+            output += ':';
+            emit(object->entries[index].second);
+        }
+        return text(std::move(output), false, span);
     });
 }
 }

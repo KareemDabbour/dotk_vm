@@ -12,6 +12,7 @@ class Int {
     fn coerceAtMost(max: Int) -> Int
     fn toFloat() -> Float
     fn toString(radix: Int = 10) -> String
+    fn toBytes(size: Int, order: String = 'big') -> Bytes
 }
 class Float {
     fn abs() -> Float
@@ -39,10 +40,25 @@ class String implements Collections_Sized, Iterable<String> {
     fn join(values: Iterable<String>) -> String
 }
 class Bytes implements Collections_Sized, Iterable<Int> {
+    static fn of(values: Iterable<Int>) -> Bytes
     fn length() -> Int
+    fn toInt(order: String = 'big') -> Int
+    fn toSignedInt(order: String = 'big') -> Int
+    fn readInt(offset: Int, size: Int, order: String = 'big') -> Int
+    fn readSignedInt(offset: Int, size: Int, order: String = 'big') -> Int
+    fn find(needle: Bytes, start: Int = 0) -> Int
+    fn contains(needle: Bytes) -> Bool
+    fn startsWith(prefix: Bytes) -> Bool
+    fn endsWith(suffix: Bytes) -> Bool
+    fn join(parts: Iterable<Bytes>) -> Bytes
 }
 trait Collections_Sized {
     fn length() -> Int
+}
+class Collections_Slice {
+    let start: Int? = null
+    let stop: Int? = null
+    let step: Int? = null
 }
 trait Iterable<T> {
     fn __iter__() -> Generator<T>
@@ -193,6 +209,28 @@ class Hash {
     static fn sha256(data: String | Bytes) -> String
     static fn crc32(data: String | Bytes) -> Int
 }
+class ImageCodec {
+    static fn info(data: Bytes) -> Tuple<Int>
+    static fn decode(data: Bytes) -> Bytes
+    static fn resize(pixels: Bytes, width: Int, height: Int, newWidth: Int, newHeight: Int) -> Bytes
+}
+class NDKernel {
+    static fn fill(count: Int, value: Float) -> List<Float>
+    static fn arange(start: Float, stop: Float, step: Float) -> List<Float>
+    static fn linspace(start: Float, stop: Float, count: Int) -> List<Float>
+    static fn random(count: Int) -> List<Float>
+    static fn normal(count: Int, mean: Float, deviation: Float) -> List<Float>
+    static fn copy(data: List<Float>, layout: Tuple<Int>) -> List<Float>
+    static fn binary(operation: String, left: List<Float>, leftLayout: Tuple<Int>, right: List<Float>, rightLayout: Tuple<Int>) -> List<Float>
+    static fn unary(operation: String, data: List<Float>, layout: Tuple<Int>) -> List<Float>
+    static fn where(mask: List<Float>, maskLayout: Tuple<Int>, left: List<Float>, leftLayout: Tuple<Int>, right: List<Float>, rightLayout: Tuple<Int>) -> List<Float>
+    static fn reduce(operation: String, data: List<Float>, layout: Tuple<Int>, axis: Int) -> List<Float>
+    static fn matmul(left: List<Float>, leftLayout: Tuple<Int>, right: List<Float>, rightLayout: Tuple<Int>) -> List<Float>
+    static fn assign(target: List<Float>, targetLayout: Tuple<Int>, source: List<Float>, sourceLayout: Tuple<Int>) -> Null
+    static fn fromBytes(data: Bytes, scale: Float) -> List<Float>
+    static fn toBytes(data: List<Float>, layout: Tuple<Int>, scale: Float) -> Bytes
+    static fn format(data: List<Float>, layout: Tuple<Int>, precision: Int) -> String
+}
 class GC {
     static fn collect() -> Null
     static fn stats() -> Map<String, Int>
@@ -265,6 +303,8 @@ class Reflection {
     static fn binding(name: String) -> Object?
     static fn bindings() -> List<String>
     static fn doc(value: Object?) -> String
+    static fn annotations(value: Object?, member: String? = null) -> List<String>
+    static fn annotation(value: Object?, name: String, member: String? = null) -> List<Object?>?
     static fn has(value: Object?, name: String) -> Bool
     static fn get(value: Object?, name: String) -> Object?
     static fn isInstance(value: Object?, type: Type) -> Bool

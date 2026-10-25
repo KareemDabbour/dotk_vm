@@ -30,8 +30,35 @@ Value Runtime::callNativeMethod(Object *receiver, const NativeMethod &method, co
         throw Error(span, "Collection init is only valid during construction", "state");
     if (arguments.size() < method.minimumArguments || arguments.size() > method.maximumArguments)
         throw Error(span, "Wrong number of " + method.name + " arguments", "call");
-    for (const auto &argument : arguments) if (!argument.name.empty()) throw Error(span, "This native expects positional arguments", "call");
-    return method.body(*this, receiver, arguments, span);
+    if (std::none_of(arguments.begin(), arguments.end(), [](const Argument &argument) { return !argument.name.empty(); }))
+        return method.body(*this, receiver, arguments, span);
+    if (method.parameters.empty()) throw Error(span, "This native expects positional arguments", "call");
+    std::vector<std::optional<Value>> slots(method.parameters.size());
+    bool named = false;
+    size_t next = 0;
+    for (const auto &argument : arguments) {
+        size_t index = next;
+        if (argument.name.empty()) {
+            if (named) throw Error(span, "Positional argument after named argument", "call");
+            next++;
+        } else {
+            auto found = std::find(method.parameters.begin(), method.parameters.end(), argument.name);
+            if (found == method.parameters.end()) throw Error(span, "Unknown argument '" + argument.name + "' for " + method.name, "call");
+            index = static_cast<size_t>(found - method.parameters.begin());
+            named = true;
+        }
+        if (index >= slots.size() || slots[index]) throw Error(span, "Duplicate argument for " + method.name, "call");
+        slots[index] = argument.value;
+    }
+    std::vector<Argument> ordered;
+    for (const auto &slot : slots) {
+        if (!slot) break;
+        ordered.push_back({std::string(), *slot});
+    }
+    bool gap = std::any_of(slots.begin() + static_cast<std::ptrdiff_t>(ordered.size()), slots.end(), [](const auto &slot) { return slot.has_value(); });
+    if (gap || ordered.size() < method.minimumArguments)
+        throw Error(span, "Missing argument '" + method.parameters[ordered.size()] + "' for " + method.name, "call");
+    return method.body(*this, receiver, ordered, span);
 }
 void Runtime::registerPrimitiveMethod(const std::string &typeName, NativePrimitiveMethod method) {
     requireRunning();
@@ -69,7 +96,7 @@ Value NativeMethods::length(Runtime &runtime, Object *receiver, const std::vecto
 Value NativeMethods::initialize(Runtime &runtime, Object *receiver, const std::vector<Argument> &arguments, const Span &span) {
     Object *type = runtime.collectionTypes.at(receiver->kind);
     Value initialized = type->native(arguments, span); runtime.roots.push_back(initialized); Object *source = object(initialized, span);
-    receiver->items = source->items; receiver->entries = source->entries; return {};
+    receiver->items = source->items; receiver->entries = source->entries; receiver->entryIndex.reset(); return {};
 }
 Object *NativeMethods::object(Value value, const Span &span) {
     if (!std::holds_alternative<Object *>(value)) throw Error(span, "Expected object, got " + Runtime::typeOf(value), "type");

@@ -44,6 +44,8 @@ struct Member {
     bool hasDefault = false;
     Visibility visibility = Visibility::Public;
     ClassInfo *owner = nullptr;
+    // Points into the declaring AST, which outlives the checker.
+    const std::vector<Annotation> *annotations = nullptr;
 };
 
 enum class ClassKind { Class, Record, Trait, Enum };

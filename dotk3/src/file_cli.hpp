@@ -1,13 +1,17 @@
 #pragma once
 #include "runtime.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 
 // stdio-backed File resource for the CLI; every path is resolved through the sandbox callback first.
 class StdioFile final : public dk3::FileHandle {
     std::FILE *file;
+    char *lineBuffer = nullptr;
+    size_t lineCapacity = 0;
     enum class Last { None, Read, Write } last = Last::None;
     static std::runtime_error failure(const char *operation) { return std::runtime_error(std::string(operation) + ": " + std::strerror(errno)); }
     void require() const { if (closed) throw std::runtime_error("File is closed"); }
@@ -16,29 +20,47 @@ class StdioFile final : public dk3::FileHandle {
         last = next;
     }
 public:
-    explicit StdioFile(std::FILE *file) : file(file) {}
-    ~StdioFile() override { if (!closed) { closed = true; std::fclose(file); } }
+    explicit StdioFile(std::FILE *file) : file(file) { std::setvbuf(file, nullptr, _IOFBF, 1 << 16); }
+    ~StdioFile() override {
+        std::free(lineBuffer);
+        if (!closed) { closed = true; std::fclose(file); }
+    }
     void close() override {
         if (closed) return;
         closed = true;
         if (std::fclose(file) != 0) throw failure("close");
     }
+    // Grows with the data actually read, so a huge `maximum` does not preallocate.
     std::string read(size_t maximum) override {
         require(); switchTo(Last::Read);
-        std::string bytes(maximum, '\0');
-        size_t count = maximum ? std::fread(bytes.data(), 1, maximum, file) : 0;
-        if (count < maximum && std::ferror(file)) throw failure("read");
-        bytes.resize(count); return bytes;
+        std::string bytes;
+        char chunk[1 << 16];
+        while (bytes.size() < maximum) {
+            size_t wanted = std::min(sizeof(chunk), maximum - bytes.size());
+            size_t count = std::fread(chunk, 1, wanted, file);
+            bytes.append(chunk, count);
+            if (count < wanted) {
+                if (std::ferror(file)) throw failure("read");
+                break;
+            }
+        }
+        return bytes;
     }
     std::optional<std::string> readLine(size_t maximum) override {
         require(); switchTo(Last::Read);
-        std::string line; int byte;
-        while ((byte = std::fgetc(file)) != EOF) {
-            if (byte == '\n') break;
-            if (line.size() == maximum) throw std::length_error("File line exceeds host limit");
+        std::string line;
+#ifdef _WIN32
+        int byte;
+        while ((byte = std::fgetc(file)) != EOF && byte != '\n')
             line += static_cast<char>(byte);
-        }
         if (byte == EOF) { if (std::ferror(file)) throw failure("read"); if (line.empty()) return {}; }
+#else
+        ssize_t count = ::getline(&lineBuffer, &lineCapacity, file);
+        if (count < 0) { if (std::ferror(file)) throw failure("read"); return {}; }
+        line.assign(lineBuffer, static_cast<size_t>(count));
+        if (line.back() == '\n') line.pop_back();
+#endif
+        if (line.size() > maximum) throw std::length_error("File line exceeds host limit");
         if (!line.empty() && line.back() == '\r') line.pop_back();
         return line;
     }

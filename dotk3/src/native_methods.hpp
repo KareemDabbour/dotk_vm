@@ -88,6 +88,7 @@ namespace dk3
         static Object *needle(const std::vector<Argument> &arguments, const Span &span);
         static Value split(Runtime &runtime, Object *receiver, const std::vector<Argument> &arguments, const Span &span);
         static Value join(Runtime &runtime, Object *receiver, const std::vector<Argument> &arguments, const Span &span);
+        static void installBytes(Runtime &runtime);
     };
     struct PrimitiveMethods
     {

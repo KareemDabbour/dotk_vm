@@ -1,0 +1,40 @@
+{
+  "notes": [
+    "Same DotK 3 source on the frozen pre-native-dispatch binary and the current release binary; use --baseline-source dotkv3.",
+    "Unprofiled alternating-order whole-process timings include launch, parse/compile, initialization and shutdown; startup is reported separately, not subtracted.",
+    "RSS and physical footprint are per-process high-water marks, not managed allocation counts. Profiler regression tests independently check zero managed call-wrapper allocations.",
+    "The benchmark helper retains historical dotkv2/dotkv3 result labels: here they mean before/after, not language versions."
+  ],
+  "workloads": [
+    {
+      "name": "startup",
+      "description": "Warm-cache startup and a single print.",
+      "expected": "0\n",
+      "dotkv3": "System.print(0)\n"
+    },
+    {
+      "name": "list_length",
+      "description": "200000 immediate List.length calls, with checked accumulation.",
+      "expected": "600000\n",
+      "dotkv3": "let values = [1,2,3]\nfn exercise() { var total = 0; for (var index = 0; index < 200000; index++) { total += values.length() }; return total }\nSystem.print(exercise())\n"
+    },
+    {
+      "name": "mixed_native_methods",
+      "description": "50000 iterations, nine immediate calls per iteration across List, Tuple, Set, Map, String and Bytes; append/remove balance retained contents.",
+      "expected": "950000\n",
+      "dotkv3": "let values = [1,2,3]; let pair = (1,2); let unique = Set([1,2]); let mapping = {'x': 1}; let key = 'x'; let word = 'alpha'; let needle = 'ph'; let bytes = b'ab'\nfn exercise() { var total = 0; for (var index = 0; index < 50000; index++) { values.append(4); total += values.removeAt(-1); total += values.length() + pair.length() + word.length() + bytes.length() + mapping.get(key); if unique.contains(2) { total += 1 }; if word.contains(needle) { total += 1 } }; return total }\nSystem.print(exercise())\n"
+    },
+    {
+      "name": "detached_length",
+      "description": "Extract one bound List.length value, then invoke it 200000 times.",
+      "expected": "600000\n",
+      "dotkv3": "let values = [1,2,3]; let size = values.length\nfn exercise() { var total = 0; for (var index = 0; index < 200000; index++) { total += size() }; return total }\nSystem.print(exercise())\n"
+    },
+    {
+      "name": "function_control",
+      "description": "200000 ordinary arithmetic function calls without native-bound dispatch.",
+      "expected": "600000\n",
+      "dotkv3": "fn size() { return 3 }\nfn exercise() { var total = 0; for (var index = 0; index < 200000; index++) { total += size() }; return total }\nSystem.print(exercise())\n"
+    }
+  ]
+}

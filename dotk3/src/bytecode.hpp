@@ -68,7 +68,15 @@ namespace dk3
         MatchFail,
         CallNative,
         CallMethod,
-        Defer
+        Defer,
+        // Pops the condition and jumps when it is false.
+        BranchFalse,
+        // Fused comparison (math) + BranchFalse; operand is the jump target.
+        BranchCompare,
+        // Statement-level `local += integer` / `local -= integer` (math Add/Subtract); operand is the slot.
+        AddLocalInt,
+        // Runs the statement's native code when allowed, then jumps to operand; otherwise falls through.
+        NativeStatement
     };
     struct ByteInstruction
     {
@@ -102,7 +110,13 @@ namespace dk3
             LessF,
             GreaterF,
             LessEqualF,
-            GreaterEqualF
+            GreaterEqualF,
+            // Appended: .dotbc files store this as a byte.
+            BitAnd,
+            BitOr,
+            BitXor,
+            ShiftLeft,
+            ShiftRight
         } math = Math::Generic;
     };
     struct ByteLocal
@@ -129,6 +143,14 @@ namespace dk3
     {
         std::vector<ByteMatchArm> arms;
     };
+    // Member/method inline cache; valid only while type and the runtime binding epoch both match.
+    struct ByteSite
+    {
+        const Object *type = nullptr;
+        uint64_t epoch = ~uint64_t{0};
+        Object *method = nullptr, *owner = nullptr;
+        size_t slot = 0;
+    };
     struct Bytecode
     {
         std::vector<ByteInstruction> instructions;
@@ -147,13 +169,23 @@ namespace dk3
         bool hasSelf = false;
         unsigned optimization = 2;
         bool program = false;
+        // Peak operand stack depth; frames size their operand storage to this once per call.
+        size_t maxStack = 0;
         // Resolved global/module bindings, valid for one environment and binding epoch.
         mutable std::vector<void *> nameBindings;
         mutable Object *nameEnvironment = nullptr;
         mutable uint64_t nameEpoch = ~uint64_t{0};
+        // Indexed by ByteInstruction::cachedKind, assigned on first execution of a member site.
+        mutable std::vector<ByteSite> sites;
     };
     std::shared_ptr<const Bytecode> compileBytecode(const Ast &node, unsigned optimization = 2, bool echoResult = false, bool slotClosures = false, bool method = false);
     std::shared_ptr<const Bytecode> compileExpression(const Ast &node, unsigned optimization = 2);
+    // Slot closure code: parameters, then `captured` locals copied from Function::items.
+    std::shared_ptr<const Bytecode> compileClosure(const Ast &node, const std::vector<std::string> &captured, unsigned optimization = 2);
     std::shared_ptr<const Bytecode> compileStatement(const Ast &node, unsigned optimization = 2);
+    // Verifies operand stack balance and jump targets; throws Error on malformed code.
+    size_t operandStackDepth(const Bytecode &code);
+    // Assigns inline cache sites to member/method instructions; call once before sharing the code.
+    void prepareSites(Bytecode &code);
     const char *byteOpName(ByteOp op);
 }

@@ -244,7 +244,7 @@ namespace dk3
             {
                 text += advance();
                 std::string pair = text + peek();
-                for (const char *compound : {"==", "!=", "<=", ">=", "->", "=>", "&&", "||", "//", "**", "?.", "+=", "-=", "*=", "/=", "??", "++", "--"})
+                for (const char *compound : {"==", "!=", "<=", ">=", "->", "=>", "&&", "||", "//", "**", "?.", "+=", "-=", "*=", "/=", "??", "++", "--", "&=", "|=", "^=", "<<"})
                 {
                     if (pair == compound)
                     {
@@ -252,7 +252,10 @@ namespace dk3
                         break;
                     }
                 }
-                if (std::string("(){}[],:;.?+-*/%!=<>&|").find(text[0]) == std::string::npos)
+                // `>>` stays two tokens so nested generics like List<List<Int>> close; the parser joins adjacent ones.
+                if (text == "<<" && peek() == '=')
+                    text += advance();
+                if (std::string("(){}[],:;.?+-*/%!=<>&|@^~").find(text[0]) == std::string::npos)
                     throw Error(span, "Unexpected character");
             }
             span.length = position - span.offset;

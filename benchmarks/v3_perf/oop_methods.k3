@@ -1,0 +1,35 @@
+class Vec {
+    var x: Int
+    var y: Int
+
+    fn add(other: Vec) -> Null {
+        self.x = self.x + other.x
+        self.y = self.y + other.y
+    }
+
+    fn dot(other: Vec) -> Int {
+        return self.x * other.x + self.y * other.y
+    }
+}
+
+class Particle {
+    let position: Vec
+    let velocity: Vec
+
+    fn step() -> Int {
+        self.position.add(self.velocity)
+        return self.position.dot(self.velocity) % 1000
+    }
+}
+
+let particles: List<Particle> = []
+for (var i = 0; i < 100; i++) {
+    particles.append(Particle(Vec(i, -i), Vec(1, i % 7)))
+}
+var checksum = 0
+for (var round = 0; round < 3000; round++) {
+    for particle in particles {
+        checksum = (checksum + particle.step()) % 1000000007
+    }
+}
+System.print(checksum)

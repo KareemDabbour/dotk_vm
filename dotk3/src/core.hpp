@@ -5,13 +5,19 @@
 #include <unordered_map>
 
 namespace dk3 {
-struct OperatorHook { const char *symbol; const char *name; size_t arguments; bool predicate; };
+struct OperatorHook { const char *symbol; const char *name; size_t arguments; };
 inline const std::vector<OperatorHook> &operatorHooks() {
-    static const std::vector<OperatorHook> hooks{{"+", "__add__", 1, false}, {"-", "__sub__", 1, false}, {"*", "__mul__", 1, false},
-        {"/", "__div__", 1, false}, {"//", "__floordiv__", 1, false}, {"%", "__mod__", 1, false}, {"**", "__pow__", 1, false},
-        {"<", "__lt__", 1, true}, {"<=", "__le__", 1, true}, {">", "__gt__", 1, true}, {">=", "__ge__", 1, true},
-        {"unary-", "__neg__", 0, false}, {"unary+", "__pos__", 0, false},
-        {"getitem", "__getitem__", 1, false}, {"setitem", "__setitem__", 2, false}};
+    static const std::vector<OperatorHook> hooks{{"+", "__add__", 1}, {"-", "__sub__", 1}, {"*", "__mul__", 1},
+        {"/", "__div__", 1}, {"//", "__floordiv__", 1}, {"%", "__mod__", 1}, {"**", "__pow__", 1},
+        {"<", "__lt__", 1}, {"<=", "__le__", 1}, {">", "__gt__", 1}, {">=", "__ge__", 1},
+        {"unary-", "__neg__", 0}, {"unary+", "__pos__", 0},
+        {"&", "__and__", 1}, {"|", "__or__", 1}, {"^", "__xor__", 1}, {"<<", "__lshift__", 1}, {">>", "__rshift__", 1},
+        {"unary~", "__invert__", 0},
+        {"getitem", "__getitem__", 1}, {"setitem", "__setitem__", 2},
+        {"getslice", "__getslice__", 1}, {"setslice", "__setslice__", 2},
+        // Reflected hooks run on the right operand when the left one has no hook for the operator.
+        {"r+", "__radd__", 1}, {"r-", "__rsub__", 1}, {"r*", "__rmul__", 1}, {"r/", "__rdiv__", 1},
+        {"r//", "__rfloordiv__", 1}, {"r%", "__rmod__", 1}, {"r**", "__rpow__", 1}};
     return hooks;
 }
 inline const OperatorHook *operatorHook(const std::string &symbol) { for (const auto &hook : operatorHooks()) if (hook.symbol == symbol) return &hook; return nullptr; }
@@ -59,6 +65,20 @@ inline const std::vector<StringMember> &stringMembers() {
 inline const StringMember *stringMember(const std::string &name) {
     for (const auto &member : stringMembers()) if (member.name == name) return &member;
     return nullptr;
+}
+struct BytesMember { const char *name; const char *result; const char *detail; size_t minimum, maximum; std::vector<std::string> parameters; };
+inline const std::vector<BytesMember> &bytesMembers() {
+    static const std::vector<BytesMember> members{
+        {"toInt", "Int", "toInt(order: String = 'big') -> Int", 0, 1, {"order"}},
+        {"toSignedInt", "Int", "toSignedInt(order: String = 'big') -> Int", 0, 1, {"order"}},
+        {"readInt", "Int", "readInt(offset: Int, size: Int, order: String = 'big') -> Int", 2, 3, {"offset", "size", "order"}},
+        {"readSignedInt", "Int", "readSignedInt(offset: Int, size: Int, order: String = 'big') -> Int", 2, 3, {"offset", "size", "order"}},
+        {"find", "Int", "find(needle: Bytes, start: Int = 0) -> Int", 1, 2, {"needle", "start"}},
+        {"contains", "Bool", "contains(needle: Bytes) -> Bool", 1, 1, {"needle"}},
+        {"startsWith", "Bool", "startsWith(prefix: Bytes) -> Bool", 1, 1, {"prefix"}},
+        {"endsWith", "Bool", "endsWith(suffix: Bytes) -> Bool", 1, 1, {"suffix"}},
+        {"join", "Bytes", "join(parts: Iterable<Bytes>) -> Bytes", 1, 1, {"parts"}}};
+    return members;
 }
 struct SetMember { const char *name; const char *result; const char *detail; size_t arguments; };
 inline const std::vector<SetMember> &setMembers() {

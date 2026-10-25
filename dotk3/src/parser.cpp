@@ -169,6 +169,53 @@ namespace dk3
                 result->text = std::move(text);
                 return result;
             }
+            // Collections.Slice(start, stop, step); omitted bounds are null.
+            Ast sliceKey(const Span &span, const Ast &start, const Ast &stop, const Ast &step)
+            {
+                Ast callee = node("member", span, "Slice");
+                callee->children.push_back(node("name", span, "Collections"));
+                Ast call = node("call", span);
+                call->children.push_back(callee);
+                for (Ast bound : {start, stop, step})
+                {
+                    if (!bound)
+                    {
+                        bound = node("literal", span, "null");
+                        bound->literalKind = TokenKind::Name;
+                    }
+                    call->names.emplace_back();
+                    call->children.push_back(bound);
+                }
+                return call;
+            }
+            Ast hookCall(const Span &span, const Ast &receiver, const std::string &hook, const std::vector<Ast> &arguments)
+            {
+                Ast callee = node("member", span, hook);
+                callee->children.push_back(receiver);
+                Ast call = node("call", span);
+                call->children.push_back(callee);
+                for (const Ast &argument : arguments)
+                {
+                    call->names.emplace_back();
+                    call->children.push_back(argument);
+                }
+                return call;
+            }
+            static bool sliceTarget(const Ast &target)
+            {
+                return target->kind == "slice" || (target->kind == "call" && target->children.size() == 2 && target->children[0]->kind == "member" && target->children[0]->text == "__getslice__");
+            }
+            // `a[1:2] = v` / `a[1:2, j] = v` become a.__setslice__(key, v).
+            Ast sliceAssignment(const Ast &target, const Ast &value)
+            {
+                if (target->kind == "slice")
+                {
+                    Ast key = node("tuple", target->span);
+                    key->children.push_back(sliceKey(target->span, target->children[1], target->children[2], target->children[3]));
+                    return hookCall(target->span, target->children[0], "__setslice__", {key, value});
+                }
+                return hookCall(target->span, target->children[0]->children[0], "__setslice__", {target->children[1], value});
+            }
             std::string typeName(TypeAst *out = nullptr)
             {
                 TypeAst type = typeExpr();
@@ -331,6 +378,7 @@ namespace dk3
                     {
                         newlines();
                         Parameter parameter;
+                        parameter.annotations = annotationList();
                         parameter.rest = take("*");
                         Token identifier = name();
                         parameter.name = identifier.text;
@@ -351,6 +399,70 @@ namespace dk3
                             break;
                     } while (take(","));
                 consume(")");
+                return result;
+            }
+            // Expects the opening '(' to be consumed already.
+            void callArguments(const Ast &call)
+            {
+                newlines();
+                bool named = false;
+                if (!at(")"))
+                    do
+                    {
+                        newlines();
+                        if (at(")"))
+                            break;
+                        std::string argument;
+                        if (peek().kind == TokenKind::Name && peek(1).text == ":" && peek(2).text != ":")
+                        {
+                            argument = name().text;
+                            consume(":");
+                            named = true;
+                            if (std::find(call->names.begin(), call->names.end(), argument) != call->names.end())
+                                throw Error(peek().span, "Duplicate named argument");
+                        }
+                        else if (named)
+                            throw Error(peek().span, "Positional argument after named arguments");
+                        call->names.push_back(argument);
+                        call->children.push_back(expression());
+                        newlines();
+                    } while (take(","));
+                consume(")");
+            }
+            std::vector<Annotation> annotationList()
+            {
+                std::vector<Annotation> result;
+                while (at("@"))
+                {
+                    Token marker = consume("@");
+                    Token first = name();
+                    Annotation annotation;
+                    annotation.name = first.text;
+                    annotation.span = marker.span;
+                    annotation.expression = node("name", first.span, first.text);
+                    while (take("."))
+                    {
+                        Token member = name();
+                        Ast access = node("member", member.span, member.text);
+                        access->children.push_back(annotation.expression);
+                        annotation.expression = access;
+                        annotation.name += "." + member.text;
+                    }
+                    if (take("<"))
+                        annotation.expression->typeArgs = typeArgumentList();
+                    if (take("("))
+                    {
+                        Ast call = node("call", first.span);
+                        call->children.push_back(annotation.expression);
+                        callArguments(call);
+                        annotation.expression = call;
+                    }
+                    annotation.builtin = builtinAnnotation(annotation.name);
+                    if (annotation.builtin && findAnnotation(result, annotation.name))
+                        throw Error(marker.span, "Duplicate annotation '@" + annotation.name + "'");
+                    result.push_back(std::move(annotation));
+                    newlines();
+                }
                 return result;
             }
             Ast function(const Span &span, std::string identifier = "")
@@ -414,6 +526,7 @@ namespace dk3
             }
             Ast statement()
             {
+                std::vector<Annotation> annotations = annotationList();
                 Token start = peek();
                 bool exported = take("export");
                 Ast result;
@@ -475,6 +588,7 @@ namespace dk3
                     std::vector<std::string> members;
                     while (!at("}"))
                     {
+                        std::vector<Annotation> memberAnnotations = annotationList();
                         Token location = peek();
                         std::string identifier;
                         Visibility visibility = Visibility::Public;
@@ -505,6 +619,7 @@ namespace dk3
                             for (const auto &parameter : method->parameters)
                                 if (parameter.name == "self")
                                     throw Error(location.span, "self is an implicit method binding");
+                            method->annotations = std::move(memberAnnotations);
                             result->children.push_back(method);
                         }
                         else if (staticMember)
@@ -524,6 +639,7 @@ namespace dk3
                                 consume("=");
                                 field->children.push_back(expression());
                             }
+                            field->annotations = std::move(memberAnnotations);
                             result->children.push_back(field);
                         }
                         else
@@ -542,6 +658,7 @@ namespace dk3
                             field.type = typeName(&field.typeExpr);
                             if (take("="))
                                 field.defaultValue = expression();
+                            field.annotations = std::move(memberAnnotations);
                             result->parameters.push_back(field);
                         }
                         if (identifier == "self" || std::find(members.begin(), members.end(), identifier) != members.end())
@@ -562,8 +679,10 @@ namespace dk3
                     result->documentation = docstring();
                     while (!at("}"))
                     {
+                        std::vector<Annotation> memberAnnotations = annotationList();
                         Token location = consume("fn");
                         Ast signature = node("signature", location.span, name().text);
+                        signature->annotations = std::move(memberAnnotations);
                         if (signature->text == "self" || signature->text == "init")
                             throw Error(location.span, "Reserved trait lifecycle member");
                         signature->typeParams = typeParameters();
@@ -611,8 +730,10 @@ namespace dk3
                     separators();
                     while (!at("}"))
                     {
+                        std::vector<Annotation> memberAnnotations = annotationList();
                         Token location = consume("fn");
                         Ast method = function(location.span, name().text);
+                        method->annotations = std::move(memberAnnotations);
                         for (const auto &parameter : method->parameters)
                             if (parameter.name == "self")
                                 throw Error(location.span, "self is an implicit method binding");
@@ -632,6 +753,8 @@ namespace dk3
                 {
                     result = node("enum", start.span, name().text);
                     result->typeParams = typeParameters();
+                    if (take(":"))
+                        result->type = typeName(&result->typeExpr);
                     consume("{");
                     separators();
                     result->documentation = docstring();
@@ -649,6 +772,8 @@ namespace dk3
                                 } while (take(","));
                             consume(")");
                         }
+                        else if (take("="))
+                            variant->children.push_back(expression());
                         for (const auto &previous : result->children)
                             if (previous->text == variant->text)
                                 throw Error(variant->span, "Duplicate enum variant");
@@ -658,6 +783,13 @@ namespace dk3
                         separators();
                     }
                     consume("}");
+                    bool valued = !result->type.empty() || std::any_of(result->children.begin(), result->children.end(), [](const Ast &variant)
+                                                                        { return !variant->children.empty(); });
+                    if (valued && !result->typeParams.empty())
+                        throw Error(start.span, "Enums with values cannot have type parameters");
+                    for (const auto &variant : result->children)
+                        if (valued && variant->children.empty())
+                            throw Error(variant->span, variant->typeExprs.empty() ? "Every variant of an enum with values needs '= value'" : "Variants of an enum with values cannot have payloads");
                 }
                 else if (take("if"))
                 {
@@ -761,14 +893,18 @@ namespace dk3
                             result->text += '.' + name().text;
                     }
                     consume("import");
-                    do
-                    {
-                        std::string imported = name().text, alias = imported;
-                        if (take("as"))
-                            alias = name().text;
-                        result->names.push_back(imported);
-                        result->names.push_back(alias);
-                    } while (take(","));
+                    // `*` is stored as the pair ("*", "*"); no identifier can collide with it.
+                    if (take("*"))
+                        result->names = {"*", "*"};
+                    else
+                        do
+                        {
+                            std::string imported = name().text, alias = imported;
+                            if (take("as"))
+                                alias = name().text;
+                            result->names.push_back(imported);
+                            result->names.push_back(alias);
+                        } while (take(","));
                 }
                 else if (take("import"))
                 {
@@ -795,6 +931,8 @@ namespace dk3
                     if (at("++") || at("--"))
                     {
                         Token operation = tokens[position++];
+                        if (sliceTarget(left))
+                            throw Error(operation.span, "Cannot increment a slice; write a[...] = a[...] + 1");
                         if (left->kind != "name" && left->kind != "index" && left->kind != "member")
                             throw Error(left->span, "Invalid increment target");
                         Ast assignment = node("assignment", operation.span, operation.text == "++" ? "+=" : "-=");
@@ -803,19 +941,34 @@ namespace dk3
                         assignment->children = {left, one};
                         left = assignment;
                     }
-                    else if (at("=") || at("+=") || at("-=") || at("*=") || at("/="))
+                    else if (at("=") || at("+=") || at("-=") || at("*=") || at("/=") || at("&=") || at("|=") || at("^=") || at("<<=") || rightShift() == ">>=")
                     {
-                        Token operation = tokens[position++];
-                        Ast assignment = node("assignment", operation.span, operation.text);
-                        if (left->kind != "name" && left->kind != "index" && left->kind != "member")
-                            throw Error(left->span, "Invalid assignment target");
-                        assignment->children = {left, expression()};
-                        left = assignment;
+                        Token operation = rightShift() == ">>=" ? takeRightShift(">>=") : tokens[position++];
+                        if (sliceTarget(left))
+                        {
+                            if (operation.text != "=")
+                                throw Error(operation.span, "Compound assignment to a slice is not supported; write a[...] = a[...] " + compoundOperator(operation.text) + " value");
+                            left = sliceAssignment(left, expression());
+                        }
+                        else
+                        {
+                            Ast assignment = node("assignment", operation.span, operation.text);
+                            if (left->kind != "name" && left->kind != "index" && left->kind != "member")
+                                throw Error(left->span, "Invalid assignment target");
+                            assignment->children = {left, expression()};
+                            left = assignment;
+                        }
                     }
                     result->children.push_back(left);
                 }
                 if (exported && result->kind != "binding" && result->kind != "function" && result->kind != "record" && result->kind != "class" && result->kind != "trait" && result->kind != "enum" && result->kind != "type_alias")
                     throw Error(start.span, "Only declarations can be exported");
+                if (!annotations.empty())
+                {
+                    if ((result->kind != "function" || result->text.empty()) && result->kind != "record" && result->kind != "class" && result->kind != "trait" && result->kind != "enum")
+                        throw Error(annotations.front().span, "Annotations apply to function and type declarations");
+                    result->annotations = std::move(annotations);
+                }
                 if (!result->endOffset && position)
                 {
                     const auto &last = tokens[position - 1];
@@ -836,23 +989,53 @@ namespace dk3
                     return 4;
                 if (operation == "<" || operation == ">" || operation == "<=" || operation == ">=" || operation == "is")
                     return 5;
-                if (operation == "+" || operation == "-")
+                if (operation == "|")
                     return 6;
-                if (operation == "*" || operation == "/" || operation == "//" || operation == "%")
+                if (operation == "^")
                     return 7;
-                if (operation == "**")
+                if (operation == "&")
                     return 8;
+                if (operation == "<<" || operation == ">>")
+                    return 9;
+                if (operation == "+" || operation == "-")
+                    return 10;
+                if (operation == "*" || operation == "/" || operation == "//" || operation == "%")
+                    return 11;
+                if (operation == "**")
+                    return 12;
                 return 0;
+            }
+            // ">>" or ">>=" when the next tokens are `>` followed directly by `>` or `>=`; empty otherwise.
+            std::string rightShift() const
+            {
+                const Token &first = peek(), &second = peek(1);
+                if (first.kind != TokenKind::Symbol || first.text != ">" || second.kind != TokenKind::Symbol || second.span.offset != first.span.offset + 1)
+                    return "";
+                return second.text == ">" ? ">>" : second.text == ">=" ? ">>="
+                                                                          : "";
+            }
+            // Consumes a joined `>>`/`>>=` as one token.
+            Token takeRightShift(const std::string &text)
+            {
+                Token joined = tokens[position];
+                joined.text = text;
+                joined.span.length = text.size();
+                position += 2;
+                return joined;
             }
             Ast expression(int minimum = 1)
             {
                 Ast left = prefix();
                 for (;;)
                 {
-                    int priority = peek().kind == TokenKind::Name || peek().kind == TokenKind::Symbol ? precedence(peek().text) : 0;
+                    std::string shift = rightShift();
+                    if (shift == ">>=")
+                        break;
+                    int priority = !shift.empty() ? precedence(shift) : peek().kind == TokenKind::Name || peek().kind == TokenKind::Symbol ? precedence(peek().text)
+                                                                                                                                            : 0;
                     if (priority < minimum)
                         break;
-                    Token operation = tokens[position++];
+                    Token operation = shift.empty() ? tokens[position++] : takeRightShift(shift);
                     if (operation.text == "is")
                     {
                         Ast test = node("is", operation.span, "is");
@@ -872,10 +1055,10 @@ namespace dk3
             {
                 Token token = peek();
                 Ast result;
-                if (take("-") || take("+") || take("!") || take("not"))
+                if (take("-") || take("+") || take("!") || take("not") || take("~"))
                 {
                     result = node("unary", token.span, token.text);
-                    result->children.push_back(expression(8));
+                    result->children.push_back(expression(12));
                     return result;
                 }
                 if (token.kind == TokenKind::FormatString)
@@ -1076,30 +1259,7 @@ namespace dk3
                     {
                         Ast call = node("call", result->span);
                         call->children.push_back(result);
-                        newlines();
-                        bool named = false;
-                        if (!at(")"))
-                            do
-                            {
-                                newlines();
-                                if (at(")"))
-                                    break;
-                                std::string argument;
-                                if (peek().kind == TokenKind::Name && peek(1).text == ":" && peek(2).text != ":")
-                                {
-                                    argument = name().text;
-                                    consume(":");
-                                    named = true;
-                                    if (std::find(call->names.begin(), call->names.end(), argument) != call->names.end())
-                                        throw Error(peek().span, "Duplicate named argument");
-                                }
-                                else if (named)
-                                    throw Error(peek().span, "Positional argument after named arguments");
-                                call->names.push_back(argument);
-                                call->children.push_back(expression());
-                                newlines();
-                            } while (take(","));
-                        consume(")");
+                        callArguments(call);
                         result = call;
                     }
                     else if (take("."))
@@ -1119,29 +1279,58 @@ namespace dk3
                     }
                     else if (take("["))
                     {
-                        Ast first;
-                        if (!at(":"))
-                            first = expression();
-                        if (take(":"))
+                        // a[i, j] indexes with the tuple (i, j); any slice among several subscripts calls __getslice__.
+                        const Span open = tokens[position - 1].span;
+                        std::vector<Ast> keys;
+                        Ast bounds[3];
+                        bool sliced = false;
+                        do
                         {
-                            Ast slice = node("slice", result->span);
-                            slice->children = {result, first, nullptr, nullptr};
-                            if (!at(":") && !at("]"))
-                                slice->children[2] = expression();
+                            Ast first;
+                            if (!at(":"))
+                                first = expression();
                             if (take(":"))
                             {
-                                if (!at("]"))
-                                    slice->children[3] = expression();
+                                Ast stop, step;
+                                if (!at(":") && !at("]") && !at(","))
+                                    stop = expression();
+                                if (take(":") && !at("]") && !at(","))
+                                    step = expression();
+                                bounds[0] = first;
+                                bounds[1] = stop;
+                                bounds[2] = step;
+                                keys.push_back(sliceKey(first ? first->span : open, first, stop, step));
+                                sliced = true;
                             }
+                            else
+                                keys.push_back(first);
+                        } while (take(","));
+                        consume("]");
+                        if (keys.size() == 1 && sliced)
+                        {
+                            Ast slice = node("slice", result->span);
+                            slice->children = {result, bounds[0], bounds[1], bounds[2]};
                             result = slice;
+                        }
+                        else if (sliced)
+                        {
+                            Ast key = node("tuple", open);
+                            key->children = std::move(keys);
+                            result = hookCall(result->span, result, "__getslice__", {key});
                         }
                         else
                         {
                             Ast index = node("index", result->span);
-                            index->children = {result, first};
+                            if (keys.size() == 1)
+                                index->children = {result, keys[0]};
+                            else
+                            {
+                                Ast key = node("tuple", open);
+                                key->children = std::move(keys);
+                                index->children = {result, key};
+                            }
                             result = index;
                         }
-                        consume("]");
                     }
                     else if (take("?."))
                     {

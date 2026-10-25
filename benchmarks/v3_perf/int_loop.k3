@@ -1,0 +1,5 @@
+var total = 0
+for (var i = 0; i < 3000000; i++) {
+    total = (total + (i * 17 + 3) % 1009) % 1000000007
+}
+System.print(total)

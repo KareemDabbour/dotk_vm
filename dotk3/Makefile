@@ -1,7 +1,17 @@
 CXX ?= c++
 MODE ?= release
+LLVM ?= 0
 BUILD = build/$(MODE)
+ifeq ($(LLVM),1)
+LLVM_CONFIG ?= llvm-config
+BUILD = build/$(MODE)-llvm
+LLVM_CXXFLAGS := -isystem $(shell $(LLVM_CONFIG) --includedir) -DDK3_LLVM
+LLVM_LDFLAGS := $(shell $(LLVM_CONFIG) --ldflags) $(shell $(LLVM_CONFIG) --link-shared --libs) -Wl,-rpath,$(shell $(LLVM_CONFIG) --libdir)
+endif
 CXXFLAGS = -std=c++17 -Wall -Wextra -Wpedantic -g
+# `import std.x` falls back to $(DK3_LIBRARY_DIR)/std/x.k3 when neither the script dir nor DOTK3_PATH has it.
+DK3_LIBRARY_DIR ?= $(CURDIR)
+CXXFLAGS += '-DDK3_LIBRARY_DIR="$(DK3_LIBRARY_DIR)"'
 CLI_LIBS ?= -ledit -lcurl
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
@@ -14,22 +24,39 @@ PLUGIN_LDFLAGS =
 PLUGIN_EXPORT = -rdynamic -ldl
 endif
 NETWORK_OBJECTS = $(BUILD)/files_module.o $(BUILD)/library_module.o $(BUILD)/stdlib_module.o $(BUILD)/network_module.o $(BUILD)/requests_module.o $(BUILD)/picohttpparser.o $(BUILD)/bytecode.o $(BUILD)/runtime_bytecode.o $(BUILD)/profiler.o $(BUILD)/native_methods.o
-NETWORK_OBJECTS += $(BUILD)/native_list_methods.o $(BUILD)/native_map_methods.o $(BUILD)/native_set_methods.o $(BUILD)/native_text_methods.o $(BUILD)/native_primitive_methods.o
+NETWORK_OBJECTS += $(BUILD)/native_list_methods.o $(BUILD)/native_map_methods.o $(BUILD)/native_set_methods.o $(BUILD)/native_text_methods.o $(BUILD)/native_primitive_methods.o $(BUILD)/native_bridge.o
+NETWORK_OBJECTS += $(BUILD)/image_module.o $(BUILD)/stb_image_impl.o $(BUILD)/ndarray_module.o
 ifeq ($(OS),Windows_NT)
 CLI_LIBS =
 endif
 ifeq ($(MODE),stress)
-CXXFLAGS += -O0 -fsanitize=undefined -fno-sanitize-recover=all
+CXXFLAGS += -O0 -fsanitize=undefined -fno-sanitize-recover=all -DDK3_STACK_CHECKS
 LDFLAGS += -fsanitize=undefined
 else
 CXXFLAGS += -O2
 endif
 
-.PHONY: all library lsp example-native example-plugin test test-lexer test-parser test-runtime test-profiler test-typer test-static test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
+.PHONY: all library lsp example-native example-plugin test test-lexer test-parser test-runtime test-profiler test-typer test-static test-native test-embedding test-generators test-tasks test-embedding-threads test-cli test-diagnostics test-network test-debugger test-editor test-lsp clean
 all: $(BUILD)/dotk3 $(BUILD)/dotk3-lsp
+ifeq ($(LLVM),1)
+all: $(BUILD)/libdotk3-run.a $(BUILD)/libdotk3-run.flags
+endif
 
-$(BUILD)/dotk3: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/embedding.o $(BUILD)/aot.o $(BUILD)/main.o
-	$(CXX) $^ $(LDFLAGS) $(PLUGIN_EXPORT) $(CLI_LIBS) -o $@
+CLI_OBJECTS = $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/runtime.o $(BUILD)/core_module.o $(NETWORK_OBJECTS) $(BUILD)/json_module.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/debugger.o $(BUILD)/embedding.o $(BUILD)/aot.o
+$(BUILD)/dotk3: $(CLI_OBJECTS) $(BUILD)/native_jit.o $(BUILD)/main.o
+	$(CXX) $^ $(LDFLAGS) $(LLVM_LDFLAGS) $(PLUGIN_EXPORT) $(CLI_LIBS) -o $@
+
+$(BUILD)/native_jit.o: CXXFLAGS += $(LLVM_CXXFLAGS)
+
+# Runtime linked into `dotk3 --build` executables: the CLI without LLVM.
+$(BUILD)/native_jit_stub.o: src/native_jit.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -MMD -MP -I src -c $< -o $@
+
+$(BUILD)/libdotk3-run.a: $(CLI_OBJECTS) $(BUILD)/native_jit_stub.o $(BUILD)/main.o
+	rm -f $@ && $(AR) rcs $@ $^
+
+$(BUILD)/libdotk3-run.flags: Makefile | $(BUILD)
+	printf '%s\n' '$(strip $(LDFLAGS) $(PLUGIN_EXPORT) $(CLI_LIBS))' > $@
 
 $(BUILD)/dotk3-lsp: $(BUILD)/lexer.o $(BUILD)/parser.o $(BUILD)/types.o $(BUILD)/typer.o $(BUILD)/lsp_main.o
 	$(CXX) $^ $(LDFLAGS) $(PLUGIN_EXPORT) -o $@
@@ -47,6 +74,12 @@ $(BUILD)/%.o: src/%.cpp | $(BUILD)
 
 $(BUILD)/picohttpparser.o: vendor/picohttpparser.c vendor/picohttpparser.h | $(BUILD)
 	$(CC) -std=c11 -Wall -Wextra -g $(if $(filter stress,$(MODE)),-O0 $(LDFLAGS),-O2) -c $< -o $@
+
+# Vendored upstream code is built without warnings or sanitizers; the module wrapping it is checked.
+$(BUILD)/stb_image_impl.o: vendor/stb_image_impl.c vendor/stb_image.h | $(BUILD)
+	$(CC) -std=c11 -w -g -O2 -c $< -o $@
+
+$(BUILD)/image_module.o: vendor/stb_image.h
 
 $(BUILD)/lexer-test: tests/lexer.cpp $(BUILD)/lexer.o
 	$(CXX) $(CXXFLAGS) -I src $^ $(LDFLAGS) -o $@
@@ -149,6 +182,17 @@ test-network: $(BUILD)/dotk3
 test-static: $(BUILD)/dotk3
 	sh tests/static.sh $(BUILD)/dotk3
 	sh tests/static_examples.sh $(BUILD)/dotk3
+
+test-native: $(BUILD)/dotk3
+ifeq ($(LLVM),1)
+test-native: $(BUILD)/libdotk3-run.a $(BUILD)/libdotk3-run.flags
+endif
+test-native:
+ifeq ($(LLVM),1)
+	sh tests/native.sh $(BUILD)/dotk3
+else
+	@echo "test-native needs the LLVM tier: make LLVM=1 test-native"; exit 1
+endif
 
 test-editor: $(BUILD)/dotk3-lsp
 	ruby tests/editor.rb

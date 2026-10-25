@@ -420,4 +420,83 @@ void Runtime::installStdlib() {
         return text(digits.substr(0, 8) + '-' + digits.substr(8, 4) + '-' + digits.substr(12, 4) + '-' + digits.substr(16, 4) + '-' + digits.substr(20), false, span);
     });
 }
+
+// Lazy pipelines are ordinary DotK generators, so laziness, errors, close and GC match user generators.
+static const char *streamSource = R"DK3(fn stream(items) { for item in items { yield item } }
+fn map(items, callback) { for item in items { yield callback(item) } }
+fn filter(items, predicate) { for item in items { if predicate(item) { yield item } } }
+fn flatMap(items, callback) { for item in items { for inner in callback(item) { yield inner } } }
+fn take(items, count) { if count <= 0 { return null }; var taken = 0; for item in items { yield item; taken += 1; if taken >= count { return null } } }
+fn skip(items, count) { var seen = 0; for item in items { if seen >= count { yield item } else { seen += 1 } } }
+fn takeWhile(items, predicate) { for item in items { if not predicate(item) { return null }; yield item } }
+fn dropWhile(items, predicate) { var dropping = true; for item in items { if dropping and predicate(item) { continue }; dropping = false; yield item } }
+fn toList(items) { let result = []; for item in items { result.append(item) }; return result }
+fn toSet(items) { return Set(items) }
+fn forEach(items, callback) { for item in items { callback(item) }; return null }
+fn count(items) { var total = 0; for item in items { total += 1 }; return total }
+fn first(items) { for item in items { return item }; return null }
+fn reduce(items, callback, initial) { var result = initial; for item in items { result = callback(result, item) }; return result }
+fn any(items, predicate) { for item in items { if predicate(item) { return true } }; return false }
+fn all(items, predicate) { for item in items { if not predicate(item) { return false } }; return true }
+fn toMap(items, keyMapper, valueMapper) { let result = Map(); for item in items { result[keyMapper(item)] = valueMapper(item) }; return result }
+fn joining(items, separator = "") { return separator.join(items) }
+fn groupBy(items, classifier) { let groups = Map(); for item in items { let key = classifier(item); if not groups.contains(key) { groups[key] = [] }; groups[key].append(item) }; return groups }
+fn partitionBy(items, predicate) { let parts = Map(); parts[true] = []; parts[false] = []; for item in items { parts[predicate(item)].append(item) }; return parts }
+)DK3";
+
+Value Runtime::streamCall(const char *name, Value items, const std::vector<Argument> &arguments, const Span &span) {
+    std::vector<Argument> values{{std::string(), items}};
+    values.insert(values.end(), arguments.begin(), arguments.end());
+    return call(streamFunction(name), values, span);
+}
+
+// Parsed on first use so programs without streams pay nothing at startup.
+Value Runtime::streamFunction(const char *name) {
+    if (!streamLibrary) {
+        Ast program = parse(std::make_shared<Source>(Source{"<stream>", streamSource}));
+        Object *library = allocate(Kind::Environment, program->span);
+        library->parent = prelude;
+        for (const Ast &node : program->children) {
+            Object *function = allocate(Kind::Function, node->span);
+            function->code = node;
+            function->parent = library;
+            function->text = node->text;
+            define(library, node->text, function, false, "", node->span);
+        }
+        streamLibrary = library;
+    }
+    return streamLibrary->bindings.at(name).value;
+}
+
+void Runtime::installStreams() {
+    registerNative("Collections.stream", [this](const auto &arguments, const Span &span) -> Value {
+        auto values = positional(arguments, span);
+        if (values.size() != 1) throw Error(span, "stream expects one iterable", "call");
+        return call(streamFunction("stream"), arguments, span);
+    });
+    for (const char *name : {"toList", "toSet", "count", "joining", "toMap", "groupBy", "partitionBy"})
+        registerNative(std::string("Collectors.") + name, [this, name](const auto &arguments, const Span &span) -> Value {
+            return call(streamFunction(name), arguments, span);
+        });
+    using Body = NativeMethod::Body;
+    const std::vector<std::tuple<const char *, const char *, size_t, size_t, std::vector<std::string>, Body>> methods{
+        {"map", "Generator", 1, 1, {"callback"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("map", g, a, s); }},
+        {"filter", "Generator", 1, 1, {"predicate"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("filter", g, a, s); }},
+        {"flatMap", "Generator", 1, 1, {"callback"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("flatMap", g, a, s); }},
+        {"take", "Generator", 1, 1, {"count"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("take", g, a, s); }},
+        {"skip", "Generator", 1, 1, {"count"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("skip", g, a, s); }},
+        {"takeWhile", "Generator", 1, 1, {"predicate"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("takeWhile", g, a, s); }},
+        {"dropWhile", "Generator", 1, 1, {"predicate"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("dropWhile", g, a, s); }},
+        {"toList", "List", 0, 0, {}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("toList", g, a, s); }},
+        {"toSet", "Set", 0, 0, {}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("toSet", g, a, s); }},
+        {"forEach", "Null", 1, 1, {"callback"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("forEach", g, a, s); }},
+        {"count", "Int", 0, 0, {}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("count", g, a, s); }},
+        {"first", "Any", 0, 0, {}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("first", g, a, s); }},
+        {"reduce", "Any", 2, 2, {"callback", "initial"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("reduce", g, a, s); }},
+        {"any", "Bool", 1, 1, {"predicate"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("any", g, a, s); }},
+        {"all", "Bool", 1, 1, {"predicate"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("all", g, a, s); }},
+        {"toMap", "Map", 2, 2, {"keyMapper", "valueMapper"}, [](Runtime &r, Object *g, const std::vector<Argument> &a, const Span &s) -> Value { return r.streamCall("toMap", g, a, s); }}};
+    for (const auto &[name, result, minimum, maximum, parameters, body] : methods)
+        registerNativeMethod({Kind::Generator, name, result, minimum, maximum, body, false, parameters});
+}
 }

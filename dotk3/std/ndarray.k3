@@ -1,0 +1,907 @@
+# NumPy-style n-dimensional arrays of Float, computed by the native NDKernel.
+#
+#   import std.ndarray as np
+#   let a = np.arange(6.0).reshape(2, 3)
+#   System.print(a * 2 + 1, a.sumAxis(0), a[1, 2], a[:, 1:])
+#
+# Integer subscripts read or write one Float (a[1, 2]); any slice gives a view sharing the data (a[0, :]),
+# so writes through it change the original. Arithmetic and comparisons broadcast as in NumPy, and
+# comparisons give 1.0/0.0 masks. Unlike NumPy, == stays structural equality; use eq() for masks.
+
+from std.image import *
+from Collections import Sized
+
+# Matches NDKernel's element cap.
+let maxElements = 33554432
+
+export class NDArray implements Sized {
+    # Element (i0, i1, ...) is data[offset + i0 * strides[0] + i1 * strides[1] + ...].
+    let data: List<Float>
+    let shape: Tuple<Int>
+    let strides: Tuple<Int>
+    let offset: Int
+
+    fn ndim() -> Int {
+        return self.shape.length()
+    }
+
+    fn size() -> Int {
+        return sizeOf(self.shape)
+    }
+
+    # Length of the first axis.
+    fn length() -> Int {
+        if self.shape.length() == 0 {
+            throw Error(Error.Kind.Value, "A 0-d array has no length")
+        }
+        return self.shape[0]
+    }
+
+    # (offset, dimensions..., strides...), the form NDKernel takes.
+    fn layout() -> Tuple<Int> {
+        let parts: List<Int> = [self.offset]
+        parts.extend(self.shape)
+        parts.extend(self.strides)
+        return Tuple(parts)
+    }
+
+    fn isContiguous() -> Bool {
+        return self.size() <= 1 or self.strides == contiguousStrides(self.shape)
+    }
+
+    fn copy() -> NDArray {
+        return fromData(NDKernel.copy(self.data, self.layout()), self.shape)
+    }
+
+    # Elements in row-major order.
+    fn toList() -> List<Float> {
+        return NDKernel.copy(self.data, self.layout())
+    }
+
+    # Nested Lists of Float, one level per axis.
+    fn toNested() -> List<Object?> {
+        let result: List<Object?> = []
+        if self.ndim() == 0 {
+            result.append(self.item())
+            return result
+        }
+        if self.ndim() == 1 {
+            for value in self.toList() {
+                result.append(value)
+            }
+            return result
+        }
+        for index in Collections.range(self.shape[0]) {
+            result.append(self.row(index).toNested())
+        }
+        return result
+    }
+
+    # The only element of a size-1 array.
+    fn item() -> Float {
+        if self.size() != 1 {
+            throw Error(Error.Kind.Value, f"item() needs exactly one element, the array has {self.size()}")
+        }
+        return self.toList()[0]
+    }
+
+    # Same elements in a new shape; one dimension may be -1 to infer it. A view when the array is contiguous.
+    fn reshape(*shape: Int) -> NDArray {
+        return self.reshapeTo(Tuple(shape))
+    }
+
+    fn reshapeTo(shape: Tuple<Int>) -> NDArray {
+        let dimensions: List<Int> = []
+        var unknown = -1
+        var known = 1
+        for axis in Collections.range(shape.length()) {
+            let dimension = shape[axis]
+            if dimension == -1 {
+                if unknown >= 0 {
+                    throw Error(Error.Kind.Value, "reshape accepts only one -1 dimension")
+                }
+                unknown = axis
+            } else if dimension < 0 {
+                throw Error(Error.Kind.Value, f"Invalid dimension {dimension} in reshape")
+            } else {
+                known *= dimension
+            }
+            dimensions.append(dimension)
+        }
+        let size = self.size()
+        if unknown >= 0 {
+            if known == 0 or size % known != 0 {
+                throw Error(Error.Kind.Value, f"Cannot reshape an array of size {size} into shape {shape}")
+            }
+            dimensions[unknown] = size // known
+        }
+        let target = Tuple(dimensions)
+        if sizeOf(target) != size {
+            throw Error(Error.Kind.Value, f"Cannot reshape an array of size {size} into shape {target}")
+        }
+        let source = self.contiguous()
+        return NDArray(source.data, target, contiguousStrides(target), source.offset)
+    }
+
+    # A contiguous copy as one axis.
+    fn flatten() -> NDArray {
+        let values = self.toList()
+        return fromData(values, (values.length(),))
+    }
+
+    # View with the axes permuted; reverses them by default.
+    fn transpose(*axes: Int) -> NDArray {
+        let count = self.ndim()
+        let order: List<Int> = []
+        if axes.length() == 0 {
+            for axis in Collections.range(count - 1, -1, -1) {
+                order.append(axis)
+            }
+        } else {
+            if axes.length() != count {
+                throw Error(Error.Kind.Value, f"transpose needs {count} axes, got {axes.length()}")
+            }
+            for axis in axes {
+                let normal = normalAxis(axis, count)
+                if order.contains(normal) {
+                    throw Error(Error.Kind.Value, f"Repeated axis {axis} in transpose")
+                }
+                order.append(normal)
+            }
+        }
+        let shape: List<Int> = []
+        let strides: List<Int> = []
+        for axis in order {
+            shape.append(self.shape[axis])
+            strides.append(self.strides[axis])
+        }
+        return NDArray(self.data, Tuple(shape), Tuple(strides), self.offset)
+    }
+
+    # View of index along axis, with that axis removed.
+    fn select(axis: Int, index: Int) -> NDArray {
+        let along = normalAxis(axis, self.ndim())
+        let at = normalIndex(index, self.shape[along], along)
+        let shape: List<Int> = []
+        let strides: List<Int> = []
+        for position in Collections.range(self.ndim()) {
+            if position != along {
+                shape.append(self.shape[position])
+                strides.append(self.strides[position])
+            }
+        }
+        return NDArray(self.data, Tuple(shape), Tuple(strides), self.offset + at * self.strides[along])
+    }
+
+    fn row(index: Int) -> NDArray {
+        return self.select(0, index)
+    }
+
+    fn column(index: Int) -> NDArray {
+        return self.select(1, index)
+    }
+
+    # a[i] on a 1-d array or a[i, j, ...] with one index per axis; negative indices count from the end.
+    fn __getitem__(index: Int | Tuple<Int>) -> Float {
+        return self.data[self.elementOffset(indexTuple(index))]
+    }
+
+    fn __setitem__(index: Int | Tuple<Int>, value: Float) -> Null {
+        self.data[self.elementOffset(indexTuple(index))] = value + 0.0
+    }
+
+    # a[1:3], a[:, 0], a[::-1, 2:]: a view. Integer subscripts drop their axis; missing trailing axes are kept whole.
+    fn __getslice__(key: Tuple<Int | Collections.Slice>) -> NDArray {
+        if key.length() > self.ndim() {
+            throw Error(Error.Kind.Index, f"Too many subscripts ({key.length()}) for an array of shape {self.shape}")
+        }
+        let shape: List<Int> = []
+        let strides: List<Int> = []
+        var at = self.offset
+        for axis in Collections.range(self.ndim()) {
+            let length = self.shape[axis]
+            let stride = self.strides[axis]
+            if axis >= key.length() {
+                shape.append(length)
+                strides.append(stride)
+                continue
+            }
+            let part = key[axis]
+            if part is Int {
+                at += normalIndex(part, length, axis) * stride
+                continue
+            }
+            let bounds = sliceBounds(part as Collections.Slice, length)
+            at += bounds[0] * stride
+            shape.append(bounds[2])
+            strides.append(bounds[1] * stride)
+        }
+        return NDArray(self.data, Tuple(shape), Tuple(strides), at)
+    }
+
+    fn __setslice__(key: Tuple<Int | Collections.Slice>, value: NDArray | Float) -> Null {
+        self.__getslice__(key).assign(value)
+    }
+
+    # Writes value, broadcast to this array's shape, into its elements.
+    fn assign(value: NDArray | Float) -> Null {
+        let source = operand(value)
+        NDKernel.assign(self.data, self.layout(), source.data, stretch(source, self.shape))
+    }
+
+    fn __add__(other: NDArray | Float) -> NDArray {
+        return combine("add", self, operand(other))
+    }
+
+    fn __sub__(other: NDArray | Float) -> NDArray {
+        return combine("sub", self, operand(other))
+    }
+
+    fn __mul__(other: NDArray | Float) -> NDArray {
+        return combine("mul", self, operand(other))
+    }
+
+    fn __div__(other: NDArray | Float) -> NDArray {
+        return combine("div", self, operand(other))
+    }
+
+    fn __floordiv__(other: NDArray | Float) -> NDArray {
+        return combine("floordiv", self, operand(other))
+    }
+
+    fn __mod__(other: NDArray | Float) -> NDArray {
+        return combine("mod", self, operand(other))
+    }
+
+    fn __pow__(other: NDArray | Float) -> NDArray {
+        return combine("pow", self, operand(other))
+    }
+
+    fn __radd__(other: Float) -> NDArray {
+        return combine("add", scalar(other), self)
+    }
+
+    fn __rsub__(other: Float) -> NDArray {
+        return combine("sub", scalar(other), self)
+    }
+
+    fn __rmul__(other: Float) -> NDArray {
+        return combine("mul", scalar(other), self)
+    }
+
+    fn __rdiv__(other: Float) -> NDArray {
+        return combine("div", scalar(other), self)
+    }
+
+    fn __rfloordiv__(other: Float) -> NDArray {
+        return combine("floordiv", scalar(other), self)
+    }
+
+    fn __rmod__(other: Float) -> NDArray {
+        return combine("mod", scalar(other), self)
+    }
+
+    fn __rpow__(other: Float) -> NDArray {
+        return combine("pow", scalar(other), self)
+    }
+
+    fn __neg__() -> NDArray {
+        return apply("neg", self)
+    }
+
+    fn __pos__() -> NDArray {
+        return self.copy()
+    }
+
+    fn __lt__(other: NDArray | Float) -> NDArray {
+        return combine("lt", self, operand(other))
+    }
+
+    fn __le__(other: NDArray | Float) -> NDArray {
+        return combine("le", self, operand(other))
+    }
+
+    fn __gt__(other: NDArray | Float) -> NDArray {
+        return combine("gt", self, operand(other))
+    }
+
+    fn __ge__(other: NDArray | Float) -> NDArray {
+        return combine("ge", self, operand(other))
+    }
+
+    # Logical operators on masks: nonzero is true.
+    fn __and__(other: NDArray | Float) -> NDArray {
+        return combine("and", self, operand(other))
+    }
+
+    fn __or__(other: NDArray | Float) -> NDArray {
+        return combine("or", self, operand(other))
+    }
+
+    fn __xor__(other: NDArray | Float) -> NDArray {
+        return combine("xor", self, operand(other))
+    }
+
+    fn __invert__() -> NDArray {
+        return apply("not", self)
+    }
+
+    fn eq(other: NDArray | Float) -> NDArray {
+        return combine("eq", self, operand(other))
+    }
+
+    fn ne(other: NDArray | Float) -> NDArray {
+        return combine("ne", self, operand(other))
+    }
+
+    # Elementwise |self - other| <= absolute + relative * |other|, as numpy.allclose.
+    fn allClose(other: NDArray | Float, relative: Float = 0.00001, absolute: Float = 0.00000001) -> Bool {
+        let right = operand(other)
+        let difference = apply("abs", combine("sub", self, right))
+        let limit = combine("add", scalar(absolute), combine("mul", scalar(relative), apply("abs", right)))
+        return combine("le", difference, limit).all()
+    }
+
+    fn clip(low: Float, high: Float) -> NDArray {
+        return combine("min", combine("max", self, scalar(low)), scalar(high))
+    }
+
+    # Calls callback on every element; much slower than the vectorised operators.
+    fn map(callback: fn(Float) -> Float) -> NDArray {
+        return fromData(self.toList().map(callback), self.shape)
+    }
+
+    # Matrix product. 1-d operands act as a row (left) or column (right) and that axis is dropped from the result.
+    fn dot(other: NDArray) -> NDArray {
+        if self.ndim() == 1 and other.ndim() == 1 {
+            return scalar(combine("mul", self, other).sum())
+        }
+        if self.ndim() == 1 and other.ndim() == 2 {
+            let result = self.reshape(1, -1).dot(other)
+            return result.reshape(result.shape[1])
+        }
+        if self.ndim() == 2 and other.ndim() == 1 {
+            let result = self.dot(other.reshape(-1, 1))
+            return result.reshape(result.shape[0])
+        }
+        if self.ndim() != 2 or other.ndim() != 2 {
+            throw Error(Error.Kind.Value, f"dot supports 1-d and 2-d arrays, got shapes {self.shape} and {other.shape}")
+        }
+        return fromData(NDKernel.matmul(self.data, self.layout(), other.data, other.layout()), (self.shape[0], other.shape[1]))
+    }
+
+    fn matmul(other: NDArray) -> NDArray {
+        return self.dot(other)
+    }
+
+    fn sum() -> Float {
+        return self.reduceAll("sum")
+    }
+
+    fn prod() -> Float {
+        return self.reduceAll("prod")
+    }
+
+    fn mean() -> Float {
+        return self.reduceAll("mean")
+    }
+
+    fn min() -> Float {
+        return self.reduceAll("min")
+    }
+
+    fn max() -> Float {
+        return self.reduceAll("max")
+    }
+
+    # Population variance and standard deviation (NumPy's default ddof=0).
+    fn variance() -> Float {
+        return self.reduceAll("var")
+    }
+
+    fn std() -> Float {
+        return self.reduceAll("std")
+    }
+
+    # Row-major position of the first minimum / maximum.
+    fn argmin() -> Int {
+        return Math.toInt(self.reduceAll("argmin"))
+    }
+
+    fn argmax() -> Int {
+        return Math.toInt(self.reduceAll("argmax"))
+    }
+
+    fn any() -> Bool {
+        return self.reduceAll("any") != 0.0
+    }
+
+    fn all() -> Bool {
+        return self.reduceAll("all") != 0.0
+    }
+
+    fn sumAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("sum", axis, keepDims)
+    }
+
+    fn prodAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("prod", axis, keepDims)
+    }
+
+    fn meanAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("mean", axis, keepDims)
+    }
+
+    fn minAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("min", axis, keepDims)
+    }
+
+    fn maxAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("max", axis, keepDims)
+    }
+
+    fn varianceAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("var", axis, keepDims)
+    }
+
+    fn stdAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("std", axis, keepDims)
+    }
+
+    fn argminAxis(axis: Int) -> NDArray {
+        return self.reduceAxis("argmin", axis, false)
+    }
+
+    fn argmaxAxis(axis: Int) -> NDArray {
+        return self.reduceAxis("argmax", axis, false)
+    }
+
+    fn anyAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("any", axis, keepDims)
+    }
+
+    fn allAxis(axis: Int, keepDims: Bool = false) -> NDArray {
+        return self.reduceAxis("all", axis, keepDims)
+    }
+
+    fn toString() -> String {
+        return NDKernel.format(self.data, self.layout(), 8)
+    }
+
+    fn reduceAll(operation: String) -> Float {
+        return NDKernel.reduce(operation, self.data, self.layout(), -1)[0]
+    }
+
+    fn reduceAxis(operation: String, axis: Int, keepDims: Bool) -> NDArray {
+        let along = normalAxis(axis, self.ndim())
+        let shape: List<Int> = []
+        for position in Collections.range(self.ndim()) {
+            if position != along {
+                shape.append(self.shape[position])
+            } else if keepDims {
+                shape.append(1)
+            }
+        }
+        return fromData(NDKernel.reduce(operation, self.data, self.layout(), along), Tuple(shape))
+    }
+
+    fn contiguous() -> NDArray {
+        if self.isContiguous() {
+            return self
+        }
+        return self.copy()
+    }
+
+    fn elementOffset(indices: Tuple<Int>) -> Int {
+        if indices.length() != self.ndim() {
+            throw Error(Error.Kind.Index, f"An array of shape {self.shape} needs {self.ndim()} indices, got {indices.length()}; use a slice such as a[i, :] for a sub-array")
+        }
+        var at = self.offset
+        for axis in Collections.range(indices.length()) {
+            at += normalIndex(indices[axis], self.shape[axis], axis) * self.strides[axis]
+        }
+        return at
+    }
+}
+
+# Number of elements in shape; fails above the NDKernel element cap.
+fn sizeOf(shape: Tuple<Int>) -> Int {
+    var total = 1
+    for dimension in shape {
+        if dimension < 0 {
+            throw Error(Error.Kind.Value, f"Negative dimension in shape {shape}")
+        }
+        if dimension > 0 and total > maxElements // dimension {
+            throw Error(Error.Kind.Value, f"Shape {shape} has more than {maxElements} elements")
+        }
+        total *= dimension
+    }
+    return total
+}
+
+# Row-major strides for a contiguous array of this shape.
+fn contiguousStrides(shape: Tuple<Int>) -> Tuple<Int> {
+    let strides: List<Int> = []
+    var step = 1
+    for axis in Collections.range(shape.length() - 1, -1, -1) {
+        strides.insert(0, step)
+        step *= shape[axis]
+    }
+    return Tuple(strides)
+}
+
+fn fromData(data: List<Float>, shape: Tuple<Int>) -> NDArray {
+    return NDArray(data, shape, contiguousStrides(shape), 0)
+}
+
+fn normalAxis(axis: Int, count: Int) -> Int {
+    var position = axis
+    if position < 0 {
+        position += count
+    }
+    if position < 0 or position >= count {
+        throw Error(Error.Kind.Index, f"Axis {axis} is out of range for {count} dimensions")
+    }
+    return position
+}
+
+fn normalIndex(index: Int, length: Int, axis: Int) -> Int {
+    var position = index
+    if position < 0 {
+        position += length
+    }
+    if position < 0 or position >= length {
+        throw Error(Error.Kind.Index, f"Index {index} is out of bounds for axis {axis} with size {length}")
+    }
+    return position
+}
+
+fn indexTuple(index: Int | Tuple<Int>) -> Tuple<Int> {
+    if index is Int {
+        return (index,)
+    }
+    return index as Tuple<Int>
+}
+
+fn clampBound(bound: Int?, length: Int, low: Int, high: Int, fallback: Int) -> Int {
+    if bound == null {
+        return fallback
+    }
+    var value = bound
+    if value < 0 {
+        value += length
+    }
+    return value.clamp(low, high)
+}
+
+# (start, step, count) of a slice over length elements, clamping out-of-range bounds like Python.
+fn sliceBounds(slice: Collections.Slice, length: Int) -> Tuple<Int> {
+    let step = slice.step ?? 1
+    if step == 0 {
+        throw Error(Error.Kind.Value, "Slice step cannot be zero")
+    }
+    var start = 0
+    var stop = 0
+    var count = 0
+    if step > 0 {
+        start = clampBound(slice.start, length, 0, length, 0)
+        stop = clampBound(slice.stop, length, 0, length, length)
+        if stop > start {
+            count = (stop - start + step - 1) // step
+        }
+    } else {
+        start = clampBound(slice.start, length, -1, length - 1, length - 1)
+        stop = clampBound(slice.stop, length, -1, length - 1, -1)
+        if start > stop {
+            count = (start - stop - step - 1) // (-step)
+        }
+    }
+    return (start, step, count)
+}
+
+fn broadcastShape(first: Tuple<Int>, second: Tuple<Int>) -> Tuple<Int> {
+    let count = first.length().coerceAtLeast(second.length())
+    let result: List<Int> = []
+    for axis in Collections.range(count) {
+        let a = axis - (count - first.length())
+        let b = axis - (count - second.length())
+        var left = 1
+        var right = 1
+        if a >= 0 {
+            left = first[a]
+        }
+        if b >= 0 {
+            right = second[b]
+        }
+        if left != right and left != 1 and right != 1 {
+            throw Error(Error.Kind.Value, f"Shapes {first} and {second} cannot be broadcast together")
+        }
+        if left == 1 {
+            result.append(right)
+        } else {
+            result.append(left)
+        }
+    }
+    return Tuple(result)
+}
+
+# Layout viewing array with a broadcast shape: stretched and added axes get stride 0.
+fn broadcastLayout(array: NDArray, shape: Tuple<Int>) -> Tuple<Int> {
+    let parts: List<Int> = [array.offset]
+    parts.extend(shape)
+    let lead = shape.length() - array.ndim()
+    for axis in Collections.range(shape.length()) {
+        let own = axis - lead
+        if own < 0 or (array.shape[own] == 1 and shape[axis] != 1) {
+            parts.append(0)
+        } else {
+            parts.append(array.strides[own])
+        }
+    }
+    return Tuple(parts)
+}
+
+fn stretch(array: NDArray, shape: Tuple<Int>) -> Tuple<Int> {
+    if broadcastShape(array.shape, shape) != shape {
+        throw Error(Error.Kind.Value, f"Cannot broadcast shape {array.shape} to {shape}")
+    }
+    return broadcastLayout(array, shape)
+}
+
+fn combine(operation: String, left: NDArray, right: NDArray) -> NDArray {
+    let shape = broadcastShape(left.shape, right.shape)
+    return fromData(NDKernel.binary(operation, left.data, broadcastLayout(left, shape), right.data, broadcastLayout(right, shape)), shape)
+}
+
+fn apply(operation: String, array: NDArray) -> NDArray {
+    return fromData(NDKernel.unary(operation, array.data, array.layout()), array.shape)
+}
+
+fn operand(value: NDArray | Float) -> NDArray {
+    if value is NDArray {
+        return value
+    }
+    return scalar(value)
+}
+
+# ---- construction -------------------------------------------------------------------------------
+
+# A 0-d array holding value.
+export fn scalar(value: Float) -> NDArray {
+    return NDArray([value + 0.0], (), (), 0)
+}
+
+# values in the given shape (one axis of values.length() when no shape is given).
+export fn array(values: List<Float>, *shape: Int) -> NDArray {
+    let flat = NDKernel.copy(values, (0, values.length(), 1))
+    let result = fromData(flat, (flat.length(),))
+    if shape.length() == 0 {
+        return result
+    }
+    return result.reshapeTo(Tuple(shape))
+}
+
+# A 2-d array from equally long rows.
+export fn fromNested(rows: List<List<Float>>) -> NDArray {
+    let flat: List<Float> = []
+    var width = 0
+    if rows.length() > 0 {
+        width = rows[0].length()
+    }
+    for row in rows {
+        if row.length() != width {
+            throw Error(Error.Kind.Value, f"Rows must all have {width} elements")
+        }
+        flat.extend(row)
+    }
+    return array(flat, rows.length(), width)
+}
+
+export fn full(value: Float, *shape: Int) -> NDArray {
+    return filled(value, Tuple(shape))
+}
+
+fn filled(value: Float, shape: Tuple<Int>) -> NDArray {
+    return fromData(NDKernel.fill(sizeOf(shape), value), shape)
+}
+
+export fn zeros(*shape: Int) -> NDArray {
+    return filled(0.0, Tuple(shape))
+}
+
+export fn ones(*shape: Int) -> NDArray {
+    return filled(1.0, Tuple(shape))
+}
+
+# n x n identity matrix.
+export fn eye(n: Int) -> NDArray {
+    let result = zeros(n, n)
+    for index in Collections.range(n) {
+        result[index, index] = 1.0
+    }
+    return result
+}
+
+# arange(stop) or arange(start, stop, step): stop is excluded.
+export fn arange(start: Float, stop: Float? = null, step: Float = 1.0) -> NDArray {
+    var first = start
+    var last = start
+    if stop == null {
+        first = 0.0
+    } else {
+        last = stop
+    }
+    let values = NDKernel.arange(first, last, step)
+    return fromData(values, (values.length(),))
+}
+
+# count evenly spaced values from start to stop inclusive.
+export fn linspace(start: Float, stop: Float, count: Int = 50) -> NDArray {
+    return fromData(NDKernel.linspace(start, stop, count), (count,))
+}
+
+# Uniform samples in [0, 1); Random.seed makes them repeatable.
+export fn random(*shape: Int) -> NDArray {
+    let dimensions = Tuple(shape)
+    return fromData(NDKernel.random(sizeOf(dimensions)), dimensions)
+}
+
+export fn normal(mean: Float, deviation: Float, *shape: Int) -> NDArray {
+    let dimensions = Tuple(shape)
+    return fromData(NDKernel.normal(sizeOf(dimensions), mean, deviation), dimensions)
+}
+
+# Joins arrays whose shapes match except along axis.
+export fn concatenate(arrays: List<NDArray>, axis: Int = 0) -> NDArray {
+    if arrays.length() == 0 {
+        throw Error(Error.Kind.Value, "concatenate needs at least one array")
+    }
+    let first = arrays[0]
+    let along = normalAxis(axis, first.ndim())
+    var total = 0
+    for item in arrays {
+        if item.ndim() != first.ndim() {
+            throw Error(Error.Kind.Value, f"Cannot concatenate shapes {first.shape} and {item.shape}")
+        }
+        for position in Collections.range(first.ndim()) {
+            if position != along and item.shape[position] != first.shape[position] {
+                throw Error(Error.Kind.Value, f"Cannot concatenate shapes {first.shape} and {item.shape} along axis {along}")
+            }
+        }
+        total += item.shape[along]
+    }
+    let shape: List<Int> = []
+    shape.extend(first.shape)
+    shape[along] = total
+    let result = filled(0.0, Tuple(shape))
+    var start = 0
+    for item in arrays {
+        let key: List<Int | Collections.Slice> = []
+        for position in Collections.range(along) {
+            key.append(Collections.Slice(null, null, null))
+        }
+        key.append(Collections.Slice(start, start + item.shape[along], null))
+        result.__getslice__(Tuple(key)).assign(item)
+        start += item.shape[along]
+    }
+    return result
+}
+
+# ---- elementwise functions ----------------------------------------------------------------------
+
+export fn sqrt(value: NDArray | Float) -> NDArray {
+    return apply("sqrt", operand(value))
+}
+
+export fn exp(value: NDArray | Float) -> NDArray {
+    return apply("exp", operand(value))
+}
+
+export fn log(value: NDArray | Float) -> NDArray {
+    return apply("log", operand(value))
+}
+
+export fn log2(value: NDArray | Float) -> NDArray {
+    return apply("log2", operand(value))
+}
+
+export fn log10(value: NDArray | Float) -> NDArray {
+    return apply("log10", operand(value))
+}
+
+export fn abs(value: NDArray | Float) -> NDArray {
+    return apply("abs", operand(value))
+}
+
+export fn sin(value: NDArray | Float) -> NDArray {
+    return apply("sin", operand(value))
+}
+
+export fn cos(value: NDArray | Float) -> NDArray {
+    return apply("cos", operand(value))
+}
+
+export fn tan(value: NDArray | Float) -> NDArray {
+    return apply("tan", operand(value))
+}
+
+export fn tanh(value: NDArray | Float) -> NDArray {
+    return apply("tanh", operand(value))
+}
+
+export fn floor(value: NDArray | Float) -> NDArray {
+    return apply("floor", operand(value))
+}
+
+export fn ceil(value: NDArray | Float) -> NDArray {
+    return apply("ceil", operand(value))
+}
+
+# Halves round to even, as in NumPy.
+export fn round(value: NDArray | Float) -> NDArray {
+    return apply("round", operand(value))
+}
+
+export fn sign(value: NDArray | Float) -> NDArray {
+    return apply("sign", operand(value))
+}
+
+export fn isnan(value: NDArray | Float) -> NDArray {
+    return apply("isnan", operand(value))
+}
+
+export fn maximum(first: NDArray | Float, second: NDArray | Float) -> NDArray {
+    return combine("max", operand(first), operand(second))
+}
+
+export fn minimum(first: NDArray | Float, second: NDArray | Float) -> NDArray {
+    return combine("min", operand(first), operand(second))
+}
+
+export fn atan2(y: NDArray | Float, x: NDArray | Float) -> NDArray {
+    return combine("atan2", operand(y), operand(x))
+}
+
+# Elements of whenTrue where mask is nonzero, else of whenFalse; all three broadcast together.
+export fn where(mask: NDArray, whenTrue: NDArray | Float, whenFalse: NDArray | Float) -> NDArray {
+    let first = operand(whenTrue)
+    let second = operand(whenFalse)
+    let shape = broadcastShape(broadcastShape(mask.shape, first.shape), second.shape)
+    let data = NDKernel.where(mask.data, broadcastLayout(mask, shape), first.data, broadcastLayout(first, shape), second.data, broadcastLayout(second, shape))
+    return fromData(data, shape)
+}
+
+export fn dot(first: NDArray, second: NDArray) -> NDArray {
+    return first.dot(second)
+}
+
+export fn matmul(first: NDArray, second: NDArray) -> NDArray {
+    return first.dot(second)
+}
+
+# ---- images -------------------------------------------------------------------------------------
+
+# Pixels as Floats from 0 to 1: shape (height, width, 4) RGBA, or (height, width) luminance when gray.
+export fn fromImage(image: Image, gray: Bool = false) -> NDArray {
+    let rgba = fromData(NDKernel.fromBytes(image.pixels, 1.0 / 255.0), (image.height, image.width, 4))
+    if not gray {
+        return rgba
+    }
+    return rgba[:, :, 0] * 0.299 + rgba[:, :, 1] * 0.587 + rgba[:, :, 2] * 0.114
+}
+
+# The inverse of fromImage: (height, width) gray, or (height, width, 3 or 4) colour, values clamped to 0..1.
+export fn toImage(pixels: NDArray) -> Image {
+    if pixels.ndim() != 2 and not (pixels.ndim() == 3 and (pixels.shape[2] == 3 or pixels.shape[2] == 4)) {
+        throw Error(Error.Kind.Value, f"toImage needs shape (height, width) or (height, width, 3 or 4), got {pixels.shape}")
+    }
+    let height = pixels.shape[0]
+    let width = pixels.shape[1]
+    let rgba = ones(height, width, 4)
+    if pixels.ndim() == 2 {
+        rgba[:, :, :3] = pixels.reshape(height, width, 1)
+    } else {
+        rgba[:, :, :pixels.shape[2]] = pixels
+    }
+    return Image(width, height, NDKernel.toBytes(rgba.data, rgba.layout(), 255.0), 4)
+}

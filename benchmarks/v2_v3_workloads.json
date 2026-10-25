@@ -1,0 +1,61 @@
+{
+  "notes": [
+    "Equivalent loop counts, algorithms, retained data and checksum outputs; syntax/API spellings differ.",
+    "Integers remain exactly representable in DotK 2's numeric representation; no IO inside timed loops except identical GC calls.",
+    "Explicit matching GC checkpoints prevent DotK 3's bounded managed heap from failing; this is controlled GC behavior, not a comparison of default GC policies.",
+    "All time measurements include process launch, parsing/compilation, core initialization, workload execution and shutdown; startup is reported separately, not subtracted.",
+    "Peak RSS and macOS peak physical footprint are separate per-process high-water marks, not live managed heap or incremental allocation counts.",
+    "Binary footprint excludes separately installed system dynamic libraries and optional native modules; dependencies and stripped copies are recorded."
+  ],
+  "workloads": [
+    {
+      "name": "startup",
+      "description": "Initialize the runtime and print one integer; warm-cache process startup baseline.",
+      "expected": "0\n",
+      "dotkv2": "print(0)\n",
+      "dotkv3": "System.print(0)\n"
+    },
+    {
+      "name": "arithmetic",
+      "description": "100000 loop iterations with integer multiply/add/modulo and accumulation.",
+      "expected": "50396012\n",
+      "dotkv2": "var total = 0\nvar index = 0\nwhile (index < 100000) { total += (index * 17 + 3) % 1009; index += 1; }\nprint(total)\n",
+      "dotkv3": "var total = 0\nvar index = 0\nwhile index < 100000 { total += (index * 17 + 3) % 1009; index += 1; }\nSystem.print(total)\n"
+    },
+    {
+      "name": "function_calls",
+      "description": "25000 calls to the same arithmetic function.",
+      "expected": "82981\n",
+      "dotkv2": "fn step(value: Int) -> Int { return (value * 17 + 13) % 100003 }\nvar value = 1\nvar index = 0\nwhile (index < 25000) { value = step(value); index += 1;  }\nprint(value)\n",
+      "dotkv3": "fn step(value: Int) -> Int { return (value * 17 + 13) % 100003 }\nvar value = 1\nvar index = 0\nwhile index < 25000 { value = step(value); index += 1;  }\nSystem.print(value)\n"
+    },
+    {
+      "name": "recursive_fib",
+      "description": "Naive Fibonacci22 with the same recursion; no memoization.",
+      "expected": "17711\n",
+      "dotkv2": "var calls = 0\nfn fib(number: Int) -> Int {\ncalls += 1\nif (calls % 512 == 0) {  }\nif (number < 2) { return number }\nreturn fib(number - 1) + fib(number - 2)\n}\nprint(fib(22))\n",
+      "dotkv3": "var calls = 0\nfn fib(number: Int) -> Int {\ncalls += 1\nif calls % 512 == 0 {  }\nif number < 2 { return number }\nreturn fib(number - 1) + fib(number - 2)\n}\nSystem.print(fib(22))\n"
+    },
+    {
+      "name": "list_live",
+      "description": "Append and retain20000 integers then read/index/sum them.",
+      "expected": "959289\n",
+      "dotkv2": "var values = {}\nvar index = 0\nwhile (index < 20000) { values.append(index % 97); index += 1;  }\nvar total = 0\nindex = 0\nwhile (index < 20000) { total += values[index]; index += 1;  }\nprint(total)\n",
+      "dotkv3": "var values: List<Int> = []\nvar index = 0\nwhile index < 20000 { values.append(index % 97); index += 1;  }\nvar total = 0\nindex = 0\nwhile index < 20000 { total += values[index]; index += 1;  }\nSystem.print(total)\n"
+    },
+    {
+      "name": "map_live",
+      "description": "Insert and retain2000 integer keys/values then look up/sum all keys.",
+      "expected": "5997000\n",
+      "dotkv2": "var values = .{}\nvar index = 0\nwhile (index < 2000) { values[index] = index * 3; index += 1;  }\nvar total = 0\nindex = 0\nwhile (index < 2000) { total += values[index]; index += 1;  }\nprint(total)\n",
+      "dotkv3": "var values: Map<Int, Int> = {}\nvar index = 0\nwhile index < 2000 { values[index] = index * 3; index += 1;  }\nvar total = 0\nindex = 0\nwhile index < 2000 { total += values[index]; index += 1;  }\nSystem.print(total)\n"
+    },
+    {
+      "name": "string_split",
+      "description": "Split the same ASCII string into8 parts6000 times, query lengths/find, and collect every100 iterations.",
+      "expected": "108000\n",
+      "dotkv2": "var text = 'alpha,beta,gamma,delta,epsilon,zeta,eta,theta'\nvar total = 0\nvar index = 0\nwhile (index < 6000) { var parts = text.split(','); total += len(parts) + len(parts[4]) + parts[3].find('t'); index += 1;  }\nprint(total)\n",
+      "dotkv3": "var text = 'alpha,beta,gamma,delta,epsilon,zeta,eta,theta'\nvar total = 0\nvar index = 0\nwhile index < 6000 { var parts = text.split(','); total += parts.length() + parts[4].length() + parts[3].find('t'); index += 1;  }\nSystem.print(total)\n"
+    }
+  ]
+}

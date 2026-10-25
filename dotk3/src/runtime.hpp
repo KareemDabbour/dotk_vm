@@ -1,12 +1,14 @@
 #pragma once
 #include "bytecode.hpp"
 #include "debugger.hpp"
+#include "native_abi.hpp"
 #include "profiler.hpp"
 #include "syntax.hpp"
 
 #include <deque>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <random>
@@ -19,6 +21,20 @@ namespace dk3
 
     struct Object;
     using Value = std::variant<std::monostate, bool, int64_t, double, Object *>;
+    // Hash/equality over primitive map keys, consistent with Runtime::equal (so 1 and 1.0 collide).
+    struct MapKeyHash
+    {
+        size_t operator()(const Value &key) const;
+    };
+    struct MapKeyEqual
+    {
+        bool operator()(const Value &left, const Value &right) const;
+    };
+    struct MapIndex
+    {
+        std::unordered_map<Value, size_t, MapKeyHash, MapKeyEqual> positions;
+        size_t indexed = 0;
+    };
     struct TypeContract
     {
         std::string name;
@@ -125,6 +141,8 @@ namespace dk3
         size_t minimumArguments, maximumArguments;
         Body body;
         bool constructionOnly = false;
+        // When set, callers may pass these parameters by name.
+        std::vector<std::string> parameters = {};
     };
     struct NativePrimitiveMethod
     {
@@ -218,7 +236,11 @@ namespace dk3
         std::string elementType;
         std::vector<Value> items;
         std::vector<std::pair<Value, Value>> entries;
+        // First-match key positions for larger maps; must be reset whenever entries are erased or replaced.
+        std::unique_ptr<MapIndex> entryIndex;
         std::unordered_map<std::string, Binding> bindings;
+        // Instance/record fields in class field order; map nodes are never erased, so pointers stay valid.
+        std::vector<Binding *> slots;
         Object *parent = nullptr;
         Object *origin = nullptr;
         Object *baseClass = nullptr;
@@ -228,6 +250,9 @@ namespace dk3
         size_t inheritanceDepth = 0;
         Kind collectionKind = Kind::Instance;
         bool builtinCollection = false;
+        // Types only: whether this type or an ancestor defines an operator hook, valid while hookEpoch == bindingEpoch.
+        bool operatorHooks = false;
+        uint64_t hookEpoch = ~uint64_t{0};
         const NativeMethod *nativeMethod = nullptr;
         Ast code;
         std::shared_ptr<const Bytecode> bytecode;
@@ -286,7 +311,7 @@ namespace dk3
         std::function<std::shared_ptr<const Source>(const std::string &)> resolveSource;
         std::function<std::string(const std::string &, size_t)> readFile;
         std::function<std::optional<uint64_t>(const std::string &)> fileSize;
-        size_t maxFileBytes = 4 * 1024 * 1024;
+        size_t maxFileBytes = std::numeric_limits<size_t>::max(); // hosts may set a cap
         FileSystem fileSystem;
         std::function<std::optional<std::string>(const std::string &)> environment;
         std::function<std::optional<std::string>()> readLine;
@@ -322,6 +347,8 @@ namespace dk3
     class Runtime
     {
         std::vector<std::unique_ptr<Object>> heap;
+        // Swept objects already reset to their default state, reused before new allocations.
+        std::vector<std::unique_ptr<Object>> spare;
         std::vector<Value> roots;
         std::vector<std::optional<Value>> handles;
         std::unordered_map<std::string, Object *> modules;
@@ -337,6 +364,8 @@ namespace dk3
         Object *errorType;
         Object *objectType = nullptr;
         Object *errorKindType = nullptr;
+        // Collections.Slice: the key record for a[start:stop:step] subscripts passed to __getslice__/__setslice__.
+        Object *sliceType = nullptr;
         Object *sizedTrait = nullptr;
         Object *coreNamespace(const std::string &name);
         void installCore();
@@ -345,6 +374,17 @@ namespace dk3
         void installFiles();
         void installLibrary();
         void installStdlib();
+        // Generator pipelines (map/filter/...) and Collectors, implemented as DotK functions in streamLibrary.
+        void installStreams();
+        // ImageCodec: stb_image decoding and RGBA resizing; the Image class wrapping it lives in std/image.k3.
+        void installImage();
+        // NDKernel: strided float kernels over List<Float> buffers for the NDArray class in std/ndarray.k3.
+        void installNDArray();
+        Object *streamLibrary = nullptr;
+        Value streamFunction(const char *name);
+        Value streamCall(const char *name, Value items, const std::vector<Argument> &arguments, const Span &span);
+        // Startup object count, set once construction finishes; the maximum until then so startup is never limited.
+        size_t builtinObjects = std::numeric_limits<size_t>::max();
         void installRequests();
         void installNativeMethods();
         void registerPrimitiveMethod(const std::string &typeName, NativePrimitiveMethod method);
@@ -353,6 +393,7 @@ namespace dk3
         Value callNativeMethod(Object *receiver, const NativeMethod &method, const std::vector<Argument> &arguments, const Span &span);
         Value call(Value function, const std::vector<Argument> &arguments, const Span &span, Object *receiver, Object *methodOwner);
         friend class JsonReader;
+        friend struct NativeBridge;
         friend struct NativeMethods;
         friend struct ListMethods;
         friend struct MapMethods;
@@ -379,10 +420,9 @@ namespace dk3
         struct ByteFrame
         {
             std::vector<Value> locals, stack;
-            std::vector<bool> initialized;
+            std::vector<unsigned char> initialized;
             std::vector<MethodTarget> methods;
-            std::vector<Binding *> nameResolutions; // per-call name cache; stable for one invocation
-            std::vector<Value> deferred;            // LIFO deferred callables (ByteOp::Defer)
+            std::vector<Value> deferred; // LIFO deferred callables (ByteOp::Defer)
         };
         std::deque<ByteFrame> byteFrames;
         std::deque<std::vector<Argument>> argumentPool;
@@ -415,6 +455,7 @@ namespace dk3
         };
         void requireRunning() const;
         void captureFailure(std::exception_ptr failure) noexcept;
+        void captureNativeFailure(std::exception_ptr failure, size_t unwound) noexcept;
         void debugPoint(const Ast &node, Object *environment, const std::string &kind = "");
         std::vector<DebugVariable> debugVariables(Object *environment);
         void implement(const Ast &node, Object *environment);
@@ -423,13 +464,43 @@ namespace dk3
         template <bool profiled>
         Value executeBytecodeLoop(const Bytecode &code, Object *environment, const std::vector<Argument> &arguments, const Span &span, const std::vector<Value> *captured, const Value *positional = nullptr, size_t positionalCount = 0, Object *self = nullptr);
         Value callFunctionFast(Object *function, const Value *arguments, size_t count, const Span &span, Object *receiver = nullptr);
+        // Native code skips steps and safe points, so it only runs when nothing could observe them.
+        bool nativeAllowed() const { return !config.stepLimit && !config.interrupted && !config.profiler && !config.debug && !currentTask && !cleanupDepth; }
+        std::optional<Value> callNative(const NativeFunction &native, Object *function, const Value *arguments, size_t count, Object *receiver);
+        // Runs a top-level statement's native code; false when its direct callees are not all defined yet.
+        bool runNativeStatement(const NativeFunction &native, Object *environment);
+        Value enterNative(const NativeFunction &native, Object *environment, Object *function, const uint64_t *raw, const Value *self);
+        // Active native calls; their shadow-stack frames are GC roots.
+        std::vector<NativeContext *> nativeContexts;
+        // Exception raised inside a runtime helper, rethrown when generated code returns to callNative.
+        std::exception_ptr nativeFailure;
+        // Closure code for lambdas created by native code, keyed by lambda node.
+        std::unordered_map<const Node *, std::shared_ptr<const Bytecode>> nativeClosureCode;
+        // Failed direct native calls recorded while unwinding (callee name, caller's call site), innermost first.
+        std::vector<std::pair<std::string, Span>> nativeUnwind;
         void define(Object *environment, const std::string &name, Value value, bool mutableBinding,
                     const std::string &type, const Span &span);
         Binding &lookup(Object *environment, const std::string &name, const Span &span);
         void mark(Value value);
-        void collectionSafePoint();
-        void tick(const Span &span);
-        void tickExecution(const Span &span);
+        void collectionSafePoint()
+        {
+            if (collectionRequested || heap.size() >= nextCollection)
+                collectNow();
+        }
+        void collectNow();
+        // Inline so per-byte step accounting costs nothing when no profiler, budget or task is active.
+        void tick(const Span &span)
+        {
+            if (config.profiler || cleanupDepth || currentTask || config.stepLimit || config.interrupted)
+                tickSlow(span);
+        }
+        void tickSlow(const Span &span);
+        void tickExecution(const Span &span)
+        {
+            if (cleanupDepth || currentTask || config.stepLimit || config.interrupted)
+                tickChecked(span);
+        }
+        void tickChecked(const Span &span);
         bool boolean(Value value, const Span &span);
         int64_t integer(Value value, const Span &span);
         double floating(Value value, const Span &span, bool explicitConversion = false);
@@ -439,6 +510,10 @@ namespace dk3
         Value binary(const std::string &operation, Value left, Value right, const Span &span);
         std::string stringify(Value value, const Span &span);
         bool overloaded(const std::string &operation, Value receiver, const std::vector<Argument> &arguments, const Span &span, Value &result);
+        // Cheap pre-check for overloaded(): false when the receiver's class defines no operator hooks.
+        bool mayOverload(const Value &receiver);
+        // Calls with positional arguments, entering bytecode/native code directly for plain functions.
+        Value callPositional(Value callable, const Value *arguments, size_t count, const Span &span);
         Value member(Value value, const std::string &name, const Span &span, bool nativeOnly = false, MethodTarget *target = nullptr);
         Binding *classBinding(Object *type, const std::string &name, Object **owner = nullptr);
         void requireAccess(const Binding &binding, const Span &span) const;
@@ -495,6 +570,10 @@ namespace dk3
         bool lookupEntry(Value map, Value key, Value &value, const Span &span);
         void setEntry(Value map, Value key, Value value, const Span &span);
         bool removeEntry(Value map, Value key, const Span &span);
+        // Position of the first entry whose key equals key, or entries.size() when absent.
+        size_t entryPosition(Object *map, const Value &key);
+        // Charges `count` steps exactly as a per-entry scan would, skipping the loop when nothing observes steps.
+        void tickEntries(const Span &span, size_t count);
         void registerNative(const std::string &name, std::function<Value(const std::vector<Argument> &, const Span &)> function);
         void registerNativeMethod(const NativeMethod &method);
         void registerModule(const std::string &name, const std::string &documentation, const std::vector<NativeExport> &exports);
@@ -502,7 +581,8 @@ namespace dk3
                             std::function<std::optional<uint64_t>(const std::string &)> info, size_t limit);
         bool next(Value iterable, Value &result, size_t &cursor, const Span &span);
         void collect();
-        size_t liveObjects() const { return heap.size(); }
+        // Objects beyond the runtime's own startup set; Config::objectLimit bounds this count.
+        size_t liveObjects() const { return heap.size() > builtinObjects ? heap.size() - builtinObjects : 0; }
         size_t retain(Value value);
         void release(size_t handle);
         Value retained(size_t handle) const;

@@ -1,0 +1,14 @@
+var x = 0.0
+var y = 1.0
+var vx = 0.5
+var vy = 0.0
+let dt = 0.001
+for (var step = 0; step < 1000000; step++) {
+    let r2 = x * x + y * y
+    let inv = 1.0 / (r2 * Math.sqrt(r2))
+    vx = vx - x * inv * dt
+    vy = vy - y * inv * dt
+    x = x + vx * dt
+    y = y + vy * dt
+}
+System.print(Math.toInt(x * 1000000.0), Math.toInt(y * 1000000.0))

@@ -1,0 +1,56 @@
+# Decoded raster images. ImageCodec (built in) decodes JPEG (baseline and progressive), PNG, GIF (first frame),
+# BMP and TGA from Bytes; this class wraps the result. Pixels are always 8-bit RGBA, row-major.
+
+export class Image {
+    let width: Int
+    let height: Int
+    # Channels in the source file: 1 gray, 2 gray + alpha, 3 RGB, 4 RGBA.
+    let channels: Int
+    let pixels: Bytes
+
+    constructor(width: Int, height: Int, pixels: Bytes, channels: Int = 4) {
+        if width < 1 or height < 1 or pixels.length() != width * height * 4 {
+            throw Error(Error.Kind.Value, f"Image needs {width * height * 4} RGBA bytes for {width}x{height}, got {pixels.length()}")
+        }
+        self.width = width
+        self.height = height
+        self.pixels = pixels
+        self.channels = channels
+    }
+
+    static fn decode(data: Bytes) -> Image {
+        let info = ImageCodec.info(data)
+        return Image(info[0], info[1], ImageCodec.decode(data), info[2])
+    }
+
+    # Reads and decodes a file (subject to the same --files-root rules as Files.readBytes).
+    static fn read(path: String) -> Image {
+        return Image.decode(Files.readBytes(path))
+    }
+
+    # (red, green, blue, alpha), each 0-255.
+    fn pixel(x: Int, y: Int) -> Tuple<Int> {
+        if x < 0 or y < 0 or x >= self.width or y >= self.height {
+            throw Error(Error.Kind.Index, f"Pixel ({x}, {y}) is outside the {self.width}x{self.height} image")
+        }
+        let at = (y * self.width + x) * 4
+        return (self.pixels[at], self.pixels[at + 1], self.pixels[at + 2], self.pixels[at + 3])
+    }
+
+    # Area-averages down (or repeats pixels up) to exactly width x height.
+    fn resize(width: Int, height: Int) -> Image {
+        return Image(width, height, ImageCodec.resize(self.pixels, self.width, self.height, width, height), self.channels)
+    }
+
+    # Scales to fit inside maxWidth x maxHeight keeping the aspect ratio; never enlarges.
+    fn fit(maxWidth: Int, maxHeight: Int) -> Image {
+        if self.width <= maxWidth and self.height <= maxHeight {
+            return self
+        }
+        let scaleByWidth = maxWidth * self.height <= maxHeight * self.width
+        if scaleByWidth {
+            return self.resize(maxWidth, (self.height * maxWidth // self.width).coerceAtLeast(1))
+        }
+        return self.resize((self.width * maxHeight // self.height).coerceAtLeast(1), maxHeight)
+    }
+}

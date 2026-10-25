@@ -48,6 +48,32 @@ int main() {
     auto modern = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"modern.k3", "from System import print as say\nrecord Point { x: Int }"}));
     assert(modern->children[0]->kind == "from_import" && modern->children[0]->names[1] == "say");
     assert(modern->children[1]->kind == "record");
+    // Bitwise precedence binds tighter than comparison; `>>` is joined from adjacent `>` tokens so nested generics still close.
+    auto bits = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"bits.k3", "let a = x & 1 == 0\nlet b = 1 | 2 ^ 3 & 4 << 1 + 2\nlet c: List<List<Int>> = [[y >> 2]]\nz >>= 1\nz <<= 2\nlet d = ~-x"}));
+    assert(bits->children[0]->children[0]->text == "==" && bits->children[0]->children[0]->children[0]->text == "&");
+    const auto &bitChain = bits->children[1]->children[0];
+    assert(bitChain->text == "|" && bitChain->children[1]->text == "^" && bitChain->children[1]->children[1]->text == "&" && bitChain->children[1]->children[1]->children[1]->text == "<<" && bitChain->children[1]->children[1]->children[1]->children[1]->text == "+");
+    assert(bits->children[2]->children[0]->children[0]->children[0]->text == ">>");
+    assert(bits->children[3]->children[0]->text == ">>=" && bits->children[4]->children[0]->text == "<<=");
+    assert(bits->children[5]->children[0]->text == "~" && bits->children[5]->children[0]->children[0]->text == "-");
+    // a[i, j] indexes with a tuple; a slice among several subscripts, or any slice assignment, calls a slice hook.
+    auto subscripts = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"subscripts.k3", "a[i, j]\na[1:2]\na[::2, 0]\na[1:] = v\na[0, :] = v\na[i, j] += 1"}));
+    const auto &pair = subscripts->children[0]->children[0];
+    assert(pair->kind == "index" && pair->children[1]->kind == "tuple" && pair->children[1]->children.size() == 2);
+    assert(subscripts->children[1]->children[0]->kind == "slice");
+    const auto &mixed = subscripts->children[2]->children[0];
+    assert(mixed->kind == "call" && mixed->children[0]->text == "__getslice__" && mixed->children[1]->kind == "tuple");
+    const auto &stepKey = mixed->children[1]->children[0];
+    assert(stepKey->kind == "call" && stepKey->children[0]->text == "Slice" && stepKey->children[0]->children[0]->text == "Collections");
+    assert(stepKey->children[1]->text == "null" && stepKey->children[3]->text == "2" && mixed->children[1]->children[1]->text == "0");
+    const auto &single = subscripts->children[3]->children[0];
+    assert(single->kind == "call" && single->children[0]->text == "__setslice__" && single->children.size() == 3 && single->children[1]->children.size() == 1);
+    assert(subscripts->children[4]->children[0]->children[0]->text == "__setslice__");
+    assert(subscripts->children[5]->children[0]->kind == "assignment" && subscripts->children[5]->children[0]->children[0]->children[1]->kind == "tuple");
+    for (const char *invalid : {"a[1:] += 1", "a[0, :] *= 2", "a[1:]++", "a[]", "a[1,]", "a[1, 2"}) {
+        bool rejected = false; try { dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"subscripts-invalid.k3", invalid})); } catch (const dk3::Error &) { rejected = true; }
+        assert(rejected);
+    }
     auto documented = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"docs.k3", "record Point {\n\"\"\"A point.\nImmutable data.\"\"\"\nx: Int\n}\nfn name() { \"\"\"A function.\"\"\"\nreturn 1 }"}));
     assert(documented->children[0]->documentation == "A point.\nImmutable data.");
     assert(documented->children[1]->documentation == "A function.");
@@ -81,7 +107,8 @@ int main() {
         catch (const dk3::Error &) { rejected = true; }
         assert(rejected);
     }
-    for (const char *unsupported : {"struct Point { x: Int }", "let struct = 1", "trait Length {}", "impl Length {}", "class C { var self: Int }", "class C { fn f(self) {} }", "class C { var x: Int; fn x() {} }", "let value = 1 '+' 2", "let value = true 'and' false"}) {
+    for (const char *unsupported : {"struct Point { x: Int }", "let struct = 1", "trait Length {}", "impl Length {}", "class C { var self: Int }", "class C { fn f(self) {} }", "class C { var x: Int; fn x() {} }", "let value = 1 '+' 2", "let value = true 'and' false",
+                                    "enum E { A = 1, B }", "enum E: Int { A }", "enum E { A = 1, B(Int) }", "enum E<T> { A = 1 }"}) {
         rejected = false;
         try { dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"unsupported.k3", unsupported})); }
         catch (const dk3::Error &) { rejected = true; }
@@ -141,6 +168,23 @@ int main() {
     auto functionTypeAlias = parseSource("type Callback = fn(Int) -> Int\nlet type = 1\nlet is_ok = type\nSystem.print(Reflection.type(1))");
     assert(functionTypeAlias->children[0]->typeExpr->kind == dk3::TypeKind::Function && functionTypeAlias->children[1]->kind == "binding");
     for (const char *invalid : {"let x: List<Int = []", "let x: Int | = 1", "fn f<T, T>() {}", "fn f<>() {}", "let x: List<? extends> = []", "let x = y as", "let is = 1", "class C extends Base<Int>? {}", "type = 1 2", "type Alias<T> Tuple<T, T>"})
+        assert(rejects(invalid));
+
+    auto annotated = parseSource("@route('/x', verb: 'GET')\n@deprecated\nexport fn handler(@meta(1) id: Int) -> Null {}\n@model class User { @column('n', -2) var name: String = ''; @override fn show() -> Null {}; @key static let shared: Int = 1 }\ntrait T { @pure fn read() -> Int }\nimpl T for User { @inline fn read() -> Int { return 1 } }");
+    const auto &handler = annotated->children[0];
+    assert(handler->exported && handler->annotations.size() == 2 && handler->annotations[0].name == "route" && !handler->annotations[0].builtin);
+    assert(handler->annotations[0].expression->kind == "call" && handler->annotations[0].expression->names[1] == "verb");
+    assert(handler->annotations[1].builtin && handler->annotations[1].expression->kind == "name" && handler->parameters[0].annotations[0].name == "meta");
+    const auto &user = annotated->children[1];
+    assert(user->annotations[0].name == "model" && user->parameters[0].annotations[0].name == "column");
+    assert(user->children[0]->annotations[0].name == "override" && user->children[1]->annotations[0].name == "key");
+    assert(annotated->children[2]->children[0]->annotations[0].name == "pure" && annotated->children[3]->children[0]->annotations[0].name == "inline");
+    assert(parseSource("@a.b.c fn f() -> Null {}")->children[0]->annotations[0].name == "a.b.c");
+    assert(parseSource("@trace('a') @trace('b') fn f() -> Null {}")->children[0]->annotations.size() == 2);
+    auto generic = parseSource("@memo<Int, Int>\n@cache<String>('k') fn f(x: Int) -> Int { return x }")->children[0];
+    assert(generic->annotations[0].expression->kind == "name" && generic->annotations[0].expression->typeArgs.size() == 2);
+    assert(generic->annotations[1].expression->kind == "call" && generic->annotations[1].expression->children[0]->typeArgs.size() == 1);
+    for (const char *invalid : {"@x let y = 1", "@x System.print(1)", "@x fn(a) => a", "@test @test fn f() -> Null {}", "@ fn f() -> Null {}", "@1 fn f() -> Null {}", "@x"})
         assert(rejects(invalid));
 
     std::cout << "parser: PASS\n";

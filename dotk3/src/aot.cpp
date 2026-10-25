@@ -201,13 +201,13 @@ namespace dk3
             // Use the provided source if the file matches, else create a stub source.
             if (src && src->file == s.file)
             {
-                node->span = {src, 0, 0, s.line, static_cast<int>(s.col)};
+                node->span = {src, 0, 0, static_cast<int>(s.line), static_cast<int>(s.col)};
             }
             else if (!s.file.empty())
             {
                 auto stub = std::make_shared<Source>();
                 const_cast<Source *>(stub.get())->file = s.file;
-                node->span = {stub, 0, 0, s.line, static_cast<int>(s.col)};
+                node->span = {stub, 0, 0, static_cast<int>(s.line), static_cast<int>(s.col)};
             }
             node->kind = s.kind;
             node->text = s.text;
@@ -387,6 +387,8 @@ namespace dk3
                 if (r.u8())
                     db = readBytecode(r, src);
             }
+            bc->maxStack = operandStackDepth(*bc);
+            prepareSites(*bc);
 
             return bc;
         }

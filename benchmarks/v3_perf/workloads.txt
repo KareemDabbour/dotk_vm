@@ -1,0 +1,7 @@
+# DotK3 interpreter performance workloads (paths relative to repo root).
+benchmarks/v3_perf/fib.k3
+benchmarks/v3_perf/int_loop.k3
+benchmarks/v3_perf/float_nbody.k3
+benchmarks/v3_perf/oop_methods.k3
+benchmarks/v3_perf/collections.k3
+benchmarks/v3_perf/strings.k3

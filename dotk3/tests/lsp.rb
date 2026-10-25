@@ -233,7 +233,7 @@ Timeout.timeout(15) do
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: memberUri, version: 3 }, contentChanges: [{ text: 'Reflection.' }] } })
     receive_message(reader)
     send_message(writer, { jsonrpc: '2.0', id: 'core', method: 'textDocument/completion', params: { textDocument: { uri: memberUri }, position: { line: 0, character: 11 } } })
-    raise 'Core namespace completion missing' unless receive_message(reader)['result'].map { |item| item['label'] }.sort == ['binding', 'bindings', 'doc', 'get', 'has', 'id', 'isInstance', 'members', 'type']
+    raise 'Core namespace completion missing' unless receive_message(reader)['result'].map { |item| item['label'] }.sort == ['annotation', 'annotations', 'binding', 'bindings', 'doc', 'get', 'has', 'id', 'isInstance', 'members', 'type']
     filesUri = 'untitled:FilesCapability'
     send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: filesUri, languageId: 'dotk3', version: 1, text: "Files." } } })
     receive_message(reader)
@@ -516,6 +516,10 @@ Timeout.timeout(15) do
       receive_message(reader)
       send_message(writer, { jsonrpc: '2.0', id: 'importAlias', method: 'textDocument/completion', params: { textDocument: { uri: importedUri }, position: { line: 2, character: 6 } } })
       raise 'Imported record alias completion missing' unless receive_message(reader)['result'].map { |item| item['label'] } == ['x']
+      send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: importedUri, version: 3 }, contentChanges: [{ text: "from model import *\nlet point = Point(1)\npoint." }] } })
+      receive_message(reader)
+      send_message(writer, { jsonrpc: '2.0', id: 'importWildcard', method: 'textDocument/completion', params: { textDocument: { uri: importedUri }, position: { line: 2, character: 6 } } })
+      raise 'Wildcard import completion missing' unless receive_message(reader)['result'].map { |item| item['label'] } == ['x']
       send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: moduleUri, languageId: 'dotk3', version: 1, text: 'export record Point { unsaved: String }' } } })
       receive_message(reader)
       send_message(writer, { jsonrpc: '2.0', id: 'unsaved', method: 'textDocument/completion', params: { textDocument: { uri: importedUri }, position: { line: 2, character: 6 } } })
@@ -532,6 +536,30 @@ Timeout.timeout(15) do
 end
 output, error, status = Open3.capture3(ARGV.fetch(0), stdin_data: "Content-Length: 20000000\r\n\r\n")
 raise 'Oversized message did not fail safely' unless !status.success? && output.empty? && error.include?('Content-Length')
+# Imports resolve through DOTK3_PATH like the CLI.
+Dir.mktmpdir('dotk3-lsp-path') do |directory|
+  FileUtils.mkdir_p(File.join(directory, 'lib', 'std'))
+  FileUtils.mkdir_p(File.join(directory, 'app'))
+  File.write(File.join(directory, 'lib', 'std', 'shapes.k3'), "export record Square { side: Int }\n")
+  Timeout.timeout(10) do
+    Open3.popen3({ 'DOTK3_PATH' => File.join(directory, 'lib') }, ARGV.fetch(0)) do |writer, reader, _error, process|
+      send_message(writer, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+      receive_message(reader)
+      appUri = "file://#{directory}/app/main.k3"
+      send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri: appUri, languageId: 'dotk3', version: 1, text: "from std.shapes import *\nlet square = Square(2)\nSystem.print(square.side)" } } })
+      raise 'DOTK3_PATH import reported errors' unless receive_message(reader).dig('params', 'diagnostics') == []
+      send_message(writer, { jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri: appUri, version: 2 }, contentChanges: [{ text: "from std.shapes import *\nlet square = Square(2)\nsquare." }] } })
+      receive_message(reader)
+      send_message(writer, { jsonrpc: '2.0', id: 'pathCompletion', method: 'textDocument/completion', params: { textDocument: { uri: appUri }, position: { line: 2, character: 7 } } })
+      raise 'DOTK3_PATH import completion missing' unless receive_message(reader)['result'].map { |item| item['label'] } == ['side']
+      send_message(writer, { jsonrpc: '2.0', id: 2, method: 'shutdown', params: nil })
+      receive_message(reader)
+      send_message(writer, { jsonrpc: '2.0', method: 'exit' })
+      writer.close
+      raise 'DOTK3_PATH server failed' unless process.value.success?
+    end
+  end
+end
 output, error, status = Open3.capture3(ARGV.fetch(0), stdin_data: '')
 raise 'Unexpected EOF was reported as success' unless status.exitstatus == 1 && output.empty? && error.include?('shutdown/exit handshake')
 Timeout.timeout(10) do

@@ -10,6 +10,24 @@ SHA-256: `aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63`
 The server uses this parser for JSON-RPC data; it does not parse JSON by splitting
 strings. Message/document bounds do not constitute a hostile-code sandbox.
 
+## Image Decoding
+
+The built-in `ImageCodec` module uses the unmodified single-header `stb_image.h`
+v2.30 from nothings/stb (public domain / MIT, dual-licensed in the header). It is
+compiled once as C in `stb_image_impl.c` with file I/O, HDR, PSD, PIC and PNM disabled
+and a 32768-pixel dimension cap; the wrapper in `src/image_module.cpp` adds a 64
+million pixel cap, copies results into Bytes and sanitizes error text. The upstream
+decoder is not sanitizer-instrumented in `MODE=stress` builds. A fuzz run of random
+byte corruption and truncation over JPEG, PNG, BMP and gray PNG inputs produced only
+decoded images or `value` errors.
+
+- Source: https://github.com/nothings/stb/blob/master/stb_image.h
+- stb_image.h SHA-256: `594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3`
+
+stb_image has a history of memory-safety advisories on malformed input; this is a
+best-effort fuzz check, not a security certification, so decode untrusted images in
+a process you can afford to lose.
+
 ## HTTP Parser
 
 The core Http module links unchanged picohttpparser C/header sources from h2o at

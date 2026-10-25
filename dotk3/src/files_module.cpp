@@ -72,7 +72,7 @@ void Runtime::installFiles() {
         auto file = fileOf(values[0], span);
         if (file->closed) throw Error(span, "File is closed", "state");
         return guarded(span, [&]() -> Value {
-            auto line = file->readLine(config.maxInputBytes);
+            auto line = file->readLine(config.maxFileBytes);
             if (!line) return {};
             return text(std::move(*line), false, span);
         });

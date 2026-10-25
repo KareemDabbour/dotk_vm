@@ -101,15 +101,17 @@ expect 'check: PASS' "$output"
 grep -Fq 'readText' "$work/file-ast"
 output=$("$binary" --files-root "$work/files" -e 'System.print(Files.size("large.dat"))')
 expect '4194305' "$output"
-if "$binary" --files-root "$work/files" -e 'Files.readBytes("large.dat")' >"$work/files-output" 2>"$work/files-error"; then exit 1; else exit_code=$?; fi
-test "$exit_code" -eq 65
-grep -Fq 'read limit' "$work/files-error"
+output=$("$binary" --files-root "$work/files" -e 'System.print(Files.readBytes("large.dat").length())')
+expect '4194305' "$output"
 if "$binary" --files-root >"$work/files-output" 2>"$work/files-error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 64
 mkdir -p "$work/rw"
 output=$("$binary" --files-root "$work/rw" --files-write -e 'let f = Files.open("a.txt", "w"); Files.write(f, "one\ntwo"); Files.close(f); Files.close(f); let r = Files.open("a.txt"); System.print(Files.readLine(r), Files.readLine(r), Files.readLine(r)); Files.close(r); Files.append("a.txt", "!"); Files.mkdir("d"); Files.rename("a.txt", "d/b.txt"); System.print(Files.list("d"), Files.size("d/b.txt"), Files.isDirectory("d")); Files.remove("d/b.txt")')
 expect 'one two null
 [b.txt] 8 true' "$output"
+ruby -e 'File.binwrite(ARGV[0], "x" * 200000 + "\r\nend")' "$work/rw/long.txt"
+output=$("$binary" --files-root "$work/rw" -e 'let r = Files.open("long.txt"); System.print(Files.readLine(r)?.length(), Files.read(r, 9223372036854775807).length(), Files.read(r, 9223372036854775807).length()); Files.close(r)')
+expect '200000 3 0' "$output"
 test ! -e "$work/rw/d/b.txt"
 for code in 'Files.writeText("x", "y")' 'Files.open("x", "w")' 'Files.mkdir("x")'; do
     output=$("$binary" --files-root "$work/files" -e "try { $code } catch error { System.print(error.kind) }")
@@ -133,7 +135,7 @@ expect '1709214330250 2024-02-29T13:45:30Z 4 true 1969-12-31T23:59:59Z' "$output
 output=$("$binary" -e 'System.print(Path.join("a", "b/", "c.txt"), Path.name("/x/y.tar.gz"), Path.stem("/x/y.tar.gz"), Path.extension("y.tar.gz"), Path.parent("/x/y"), Path.normalize("/a/./b/../c//d"))')
 expect 'a/b/c.txt y.tar.gz y.tar .gz /x /a/c/d' "$output"
 output=$("$binary" -e 'System.print(Encoding.toBase64("Many hands"), Encoding.fromBase64("YQ=="), Encoding.toHex("hi"), Encoding.urlEncode("a b"), Hash.sha256("abc"), Hash.crc32("123456789"))')
-expect 'TWFueSBoYW5kcw== b"\x61" 6869 a%20b ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad 3421780262' "$output"
+expect 'TWFueSBoYW5kcw== b"a" 6869 a%20b ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad 3421780262' "$output"
 output=$("$binary" -e 'fn describe(v: Object?) -> String { return match v { n: Int => f"int {n}", s: String => s, xs: List<?> => "list", _: Null => "null", _ => "other" } }; System.print(describe(1), describe("a"), describe([1]), describe(null), describe(2.5))')
 expect 'int 1 a list null other' "$output"
 if "$binary" -e 'let v: Int | String = 1; System.print(match v { n: Int => 1 })' >"$work/match-output" 2>"$work/match-error"; then exit 1; else exit_code=$?; fi
@@ -206,6 +208,74 @@ printf '%s\n' 'export let answer = 19' >"$work/nested/library.k3"
 printf '%s\n' 'import nested.library as dotted' 'System.print(dotted.answer)' >"$work/dotted.k3"
 output=$("$binary" "$work/dotted.k3")
 expect '19' "$output"
+printf '%s\n' 'from nested.library import *' 'from Math import *' 'System.print(answer, sqrt(9.0))' >"$work/wildcard.k3"
+output=$("$binary" "$work/wildcard.k3")
+expect '19 3' "$output"
+printf '%s\n' 'from nested.library import *' 'let answer = 1' >"$work/wildcard_clash.k3"
+if "$binary" "$work/wildcard_clash.k3" >"$work/output" 2>&1; then
+    printf '%s\n' 'Wildcard import clash was accepted' >&2; exit 1
+fi
+grep -Fq "Duplicate declaration 'answer'" "$work/output"
+# Image decoding (vendored stb_image) through std.image and drawing through std.canvas.
+cat >"$work/images.k3" <<'EOF'
+from std.image import *
+from std.canvas import *
+let png = Image.read("rgba.png")
+let gray = Image.read("gray.png")
+let bmp = Image.read("b.bmp")
+let jpg = Image.read("g.jpg")
+System.print(png.width, png.channels, png.pixel(1, 1), gray.channels, gray.pixel(1, 0), bmp.pixel(0, 0), jpg.width, jpg.channels, jpg.pixel(0, 0))
+System.print(png.resize(1, 1).pixel(0, 0), jpg.fit(4, 100).height, jpg.fit(100, 100) == jpg, Image.decode(Files.readBytes("rgba.png")).pixels.length())
+let plain = TerminalCanvas.fromImage(jpg, 4, CanvasStyle.Ascii).render()
+let blocks = TerminalCanvas.fromImage(png, 2, CanvasStyle.Blocks).render()
+System.print(plain.split("\n").length(), plain.split("\n")[0].length(), blocks.contains("\x1b[38;2;255;0;0;48;2;0;0;255m"))
+EOF
+output=$("$binary" --files-root tests/fixtures "$work/images.k3")
+expect '2 4 (255, 255, 255, 128) 1 (64, 64, 64, 255) (0, 0, 255, 255) 8 3 (1, 0, 128, 255)
+(109, 109, 109, 223) 4 true 16
+2 4 true' "$output"
+printf '%s\n' 'from std.image import *' 'try { Image.decode(b"not an image") } catch error { System.print(error.kind) }' 'Image.read("../cli.sh")' >"$work/image_errors.k3"
+if "$binary" --files-root tests/fixtures "$work/image_errors.k3" >"$work/output" 2>&1; then
+    printf '%s\n' 'Image.read escaped the files root' >&2; exit 1
+fi
+grep -Fq 'value' "$work/output"
+# std.ndarray: NumPy-style arrays over the native NDKernel, including image round trips.
+cat >"$work/arrays.k3" <<'EOF'
+import std.ndarray as np
+from std.image import *
+let a = np.arange(6.0).reshape(2, 3)
+System.print(a)
+System.print(a[1, 2], a[:, 1:].toNested(), a.transpose().shape, a.sumAxis(0), a.mean(), (2 * a - 1).max(), (0.5 < a).sum())
+a[0, :] = np.array([7.0, 8.0, 9.0])
+System.print(a.dot(np.ones(3)), a.argmax(), np.eye(2).dot(a).allClose(a), np.linspace(0, 1, 5), np.scalar(2.0) ** 3)
+let png = Image.read("rgba.png")
+System.print(np.fromImage(png).shape, np.toImage(np.fromImage(png)).pixels == png.pixels, np.fromImage(Image.read("gray.png"), true).shape)
+try { a[2, 0] } catch error { System.print(error.kind) }
+try { a + np.ones(2) } catch error { System.print(error.kind) }
+EOF
+output=$("$binary" --files-root tests/fixtures "$work/arrays.k3")
+expect '[[0. 1. 2.]
+ [3. 4. 5.]]
+5 [[1, 2], [4, 5]] (3, 2) [3. 5. 7.] 2.5 9 5
+[24. 12.] 2 true [0.   0.25 0.5  0.75 1.  ] 8.0
+(2, 2, 4) true (2, 4)
+index
+value' "$output"
+"$binary" --check "$work/arrays.k3" >/dev/null
+# DOTK3_PATH roots are searched after the script directory, in order.
+mkdir -p "$work/root1/std" "$work/root2" "$work/elsewhere"
+printf '%s\n' 'export fn shared() -> String { return "root1" }' >"$work/root1/shared.k3"
+printf '%s\n' 'export fn shared() -> String { return "root2" }' >"$work/root2/shared.k3"
+printf '%s\n' 'export let tool = "std tool"' >"$work/root1/std/tool.k3"
+printf '%s\n' 'from shared import *' 'from std.tool import tool' 'System.print(shared(), tool)' >"$work/elsewhere/main.k3"
+output=$(DOTK3_PATH="$work/missing:$work/root1:$work/root2" "$binary" "$work/elsewhere/main.k3")
+expect 'root1 std tool' "$output"
+printf '%s\n' 'export fn shared() -> String { return "local" }' >"$work/elsewhere/shared.k3"
+output=$(DOTK3_PATH="$work/root1" "$binary" "$work/elsewhere/main.k3")
+expect 'local std tool' "$output"
+if "$binary" -e 'import nested.library' >"$work/output" 2>&1; then
+    printf '%s\n' 'Module outside the script directory and DOTK3_PATH was found' >&2; exit 1
+fi
 output=$(printf '%s\n' 'fn worker() { defer System.print("shutdown")' 'yield null' '}' 'Tasks.spawn(worker())' 'Tasks.pump(1)' ':quit' | "$binary" --repl)
 case "$output" in
     *shutdown) ;;
@@ -232,6 +302,25 @@ expect '3' "$output"
 grep -Fq 'Warning: Parameter' "$work/warning"
 if "$binary" -e 'fn f(a) { return a }' >"$work/output" 2>"$work/error"; then exit 1; else exit_code=$?; fi
 test "$exit_code" -eq 65
+printf '%s\n' 'fn add(a: Int, b: Int) -> Int { return a + b }' '@test fn adds() -> Null { if add(2, 2) != 4 { throw Error(Error.Kind.Value, "bad") } }' \
+    '@test fn breaks() -> Null { let items = [1]; System.print(items[3]) }' 'System.print("setup")' >"$work/suite.k3"
+if "$binary" --test "$work/suite.k3" >"$work/test-output" 2>"$work/test-error"; then exit 1; else exit_code=$?; fi
+test "$exit_code" -eq 1
+expect 'setup
+PASS adds
+FAIL breaks
+test: 1 passed, 1 failed' "$(cat "$work/test-output")"
+grep -Fq 'IndexError: Index out of range' "$work/test-error"
+printf '%s\n' '@test fn ok() -> Null {}' >"$work/passing.k3"
+output=$("$binary" --test "$work/passing.k3")
+expect 'PASS ok
+test: 1 passed, 0 failed' "$output"
+printf '%s\n' '@deprecated("use b") fn a() -> Int { return 1 }' 'System.print(a())' >"$work/deprecated.k3"
+output=$("$binary" "$work/deprecated.k3" 2>"$work/deprecated-error")
+expect '1' "$output"
+test ! -s "$work/deprecated-error"
+"$binary" --check "$work/deprecated.k3" >/dev/null 2>"$work/deprecated-error"
+grep -Fq "Warning: 'a' is deprecated: use b" "$work/deprecated-error"
 printf '%s\n' 'cli: PASS'
 printf '%s\n' 'fn add(value: Int) -> Int {' 'let local = value + 1' 'return local' '}' 'var result = add(2)' 'result += 1' 'System.print(result)' >"$work/debug.k3"
 printf '%s\n' 'b 3' 'breakpoints' 'c' 'locals' 'bt' 'frame 1' 'locals' 'frame 0' 'p local' 'p missing()' 'f' 'locals' 'n' 'globals' 'c' | "$binary" --debug "$work/debug.k3" >"$work/debug-output"

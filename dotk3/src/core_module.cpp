@@ -75,6 +75,16 @@ namespace dk3
         };
         errorType->code->parameters = {
             {"kind", "Error.Kind", {}, false}, {"message", "String", {}, false}, {"file", "String", defaultLiteral("", TokenKind::String), false}, {"line", "Int", defaultLiteral("0", TokenKind::Integer), false}, {"column", "Int", defaultLiteral("0", TokenKind::Integer), false}};
+        sliceType = allocate(Kind::RecordType, coreSpan());
+        sliceType->text = "Slice";
+        sliceType->parent = prelude;
+        sliceType->code = std::make_shared<Node>();
+        sliceType->code->kind = "record";
+        sliceType->code->text = "Slice";
+        sliceType->code->span = coreSpan();
+        for (const char *bound : {"start", "stop", "step"})
+            sliceType->code->parameters.push_back({bound, "Int?", defaultLiteral("null", TokenKind::Name), false});
+        define(coreNamespace("Collections"), "Slice", sliceType, false, "", coreSpan());
 
         // Define primitive type objects for method references like Int::toString
         auto makeClassType = [&](const std::string &name) -> Object *
@@ -93,6 +103,24 @@ namespace dk3
         makeClassType("Float");
         makeClassType("Bool");
         makeClassType("String");
+        Object *bytesType = makeClassType("Bytes");
+        define(bytesType, "of", native("Bytes.of", [this](const auto &arguments, const Span &span) -> Value
+                                      {
+            auto values = positional(arguments, span);
+            if (values.size() != 1) throw Error(span, "Bytes.of expects one iterable of Int", "call");
+            std::string bytes;
+            Value item;
+            size_t cursor = 0, scratch = roots.size();
+            while (next(values[0], item, cursor, span))
+            {
+                tick(span);
+                if (!std::holds_alternative<int64_t>(item) || std::get<int64_t>(item) < 0 || std::get<int64_t>(item) > 255)
+                    throw Error(span, "Bytes.of values must be Int from 0 to 255, got " + display(item), "value");
+                bytes += static_cast<char>(std::get<int64_t>(item));
+            }
+            roots.resize(scratch);
+            return text(std::move(bytes), true, span); }), false, "", coreSpan());
+        bytesType->bindings.at("of").staticMember = true;
 
         sizedTrait = allocate(Kind::TraitType, coreSpan());
         roots.push_back(sizedTrait);
@@ -108,6 +136,9 @@ namespace dk3
         installFiles();
         installLibrary();
         installStdlib();
+        installStreams();
+        installImage();
+        installNDArray();
         registerNative("System.print", [this](const auto &arguments, const Span &span) -> Value
                        {
         auto values = positional(arguments, span);
@@ -332,6 +363,73 @@ namespace dk3
         Object *value = object(values[0], span);
         if (value->kind == Kind::Record || value->kind == Kind::Instance || value->kind == Kind::Variant || value->kind == Kind::Constructor) value = value->origin;
         return text(value->code ? value->code->documentation : value->documentation, false, span); });
+        // Annotations of a function/type/instance, or of one of its members (field, method, static field) or parameters.
+        auto annotationsOf = [](const std::vector<Value> &values, size_t memberIndex, const Span &span) -> const std::vector<Annotation> *
+        {
+            if (!std::holds_alternative<Object *>(values[0]))
+                return nullptr;
+            Object *value = object(values[0], span);
+            if (value->kind == Kind::BoundMethod)
+                value = value->origin;
+            if (value->kind == Kind::Record || value->kind == Kind::Instance)
+                value = value->origin;
+            if (values.size() <= memberIndex || std::holds_alternative<std::monostate>(values[memberIndex]))
+                return value && value->code ? &value->code->annotations : nullptr;
+            if (typeOf(values[memberIndex]) != "String")
+                throw Error(span, "Annotation member must be a String", "type");
+            const std::string &member = object(values[memberIndex], span)->text;
+            for (Object *type = value; type; type = type->baseClass)
+            {
+                if (!type->code)
+                    continue;
+                for (const auto &parameter : type->code->parameters)
+                    if (parameter.name == member)
+                        return &parameter.annotations;
+                for (const auto &child : type->code->children)
+                    if (child->text == member && (child->kind == "function" || child->kind == "binding" || child->kind == "signature"))
+                        return &child->annotations;
+            }
+            return nullptr;
+        };
+        registerNative("Reflection.annotations", [this, annotationsOf](const auto &arguments, const Span &span) -> Value
+                       {
+        auto values = positional(arguments, span);
+        if (values.empty() || values.size() > 2) throw Error(span, "annotations expects a value and an optional member name", "call");
+        Object *names = allocate(Kind::List, span); roots.push_back(names);
+        if (const auto *annotations = annotationsOf(values, 1, span))
+            for (const auto &annotation : *annotations) names->items.push_back(text(annotation.name, false, span));
+        return names; });
+        registerNative("Reflection.annotation", [this, annotationsOf](const auto &arguments, const Span &span) -> Value
+                       {
+        auto values = positional(arguments, span);
+        if (values.size() < 2 || values.size() > 3 || typeOf(values[1]) != "String") throw Error(span, "annotation expects a value, a name and an optional member name", "call");
+        const auto *annotations = annotationsOf(values, 2, span);
+        const Annotation *found = annotations ? findAnnotation(*annotations, object(values[1], span)->text) : nullptr;
+        if (!found) return Value{};
+        Object *result = allocate(Kind::List, span); roots.push_back(result);
+        if (found->expression->kind != "call") return result;
+        for (size_t index = 1; index < found->expression->children.size(); index++)
+        {
+            const Ast &argument = found->expression->children[index];
+            const Ast &literal = argument->kind == "unary" ? argument->children[0] : argument;
+            bool numeric = literal->literalKind == TokenKind::Integer || literal->literalKind == TokenKind::Float;
+            if (literal->kind != "literal" || (argument->kind == "unary" && (argument->text != "-" || !numeric)))
+                throw Error(argument->span, "Annotation arguments must be literal constants", "type");
+            Value item;
+            if (literal->literalKind == TokenKind::Float)
+            {
+                double number = std::get<double>(literalValue(literal));
+                item = argument->kind == "unary" ? -number : number;
+            }
+            else if (literal->literalKind == TokenKind::Integer)
+                item = argument->kind == "unary" ? literalValue(argument, true) : literalValue(literal);
+            else if (literal->literalKind == TokenKind::String || literal->literalKind == TokenKind::Bytes)
+                item = text(literal->text, literal->literalKind == TokenKind::Bytes, span);
+            else if (literal->text != "null")
+                item = literal->text == "true";
+            result->items.push_back(item);
+        }
+        return result; });
         registerNative("Text.str", [this](const auto &arguments, const Span &span) -> Value
                        {
         auto values = positional(arguments, span);

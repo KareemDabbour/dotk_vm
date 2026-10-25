@@ -1,4 +1,5 @@
 #include "aot.hpp"
+#include "native_jit.hpp"
 #include "file_cli.hpp"
 #include "http_cli.hpp"
 #include "native_search.hpp"
@@ -11,8 +12,10 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -27,8 +30,24 @@
 #ifdef _WIN32
 #include <io.h>
 #else
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char **environ;
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
+// Executables produced by `dotk3 --build` override this with their embedded program.
+extern "C"
+{
+#ifdef _WIN32
+    const dk3::EmbeddedProgram *dk3_embedded_program = nullptr;
+#else
+    __attribute__((weak)) const dk3::EmbeddedProgram *dk3_embedded_program = nullptr;
+#endif
+}
 
 static std::string readFile(const std::filesystem::path &path)
 {
@@ -64,6 +83,10 @@ static std::string readBoundedFile(const std::filesystem::path &path, size_t lim
     if (!file)
         throw std::runtime_error("Cannot open requested file");
     std::string bytes;
+    std::error_code sizeError;
+    auto expected = std::filesystem::file_size(path, sizeError);
+    if (!sizeError)
+        bytes.reserve(static_cast<size_t>(std::min<uintmax_t>(expected, limit)));
     char buffer[65536];
     for (;;)
     {
@@ -108,14 +131,20 @@ static const char *usage =
     "       dotk3 --steps N [usual CLI arguments] (0 disables step limit)\n"
     "       dotk3 --engine bytecode [usual CLI arguments]\n"
     "       dotk3 -O0|-O1|-O2 [usual CLI arguments] (default -O2)\n"
+    "       dotk3 --jit [usual CLI arguments] (compile functions and methods natively; @jit opts in one function; needs make LLVM=1)\n"
+    "       dotk3 --jit-report [usual CLI arguments] (list natively compiled functions and why others stay interpreted)\n"
+    "       dotk3 --emit-llvm FILE [usual CLI arguments] (write the optimized LLVM IR of native code to FILE; also with --build)\n"
     "       dotk3 --byte-code FILE.k3 (print compiled bytecode and exit)\n"
+    "       dotk3 --test FILE.k3 (run FILE, then each top-level @test function; nonzero exit on failure)\n"
     "       dotk3 --compile FILE.k3 [-o FILE.dotbc] (compile to portable bytecode)\n"
+    "       dotk3 [options] --build FILE.k3 [-o OUT] (build a standalone executable with native typed functions; needs make LLVM=1)\n"
     "       dotk3 FILE.dotbc (run a pre-compiled .dotbc file)\n"
     "       dotk3 --profile [--profile-output FILE] [usual CLI arguments]\n"
     "       dotk3 --profile-vm simple|verbose [--profile-trace FILE] [usual CLI arguments]\n"
     "       dotk3 --profile-interval-ms N [profiling arguments]\n"
     "       dotk3 --profile-samples N [profiling arguments]\n"
-    "       dotk3 --help | --version\n";
+    "       dotk3 --help | --version\n"
+    "Imports not found beside the script are searched in each DOTK3_PATH directory; `import std.x` then falls back to the built-in std directory.\n";
 
 static bool terminalInput()
 {
@@ -147,26 +176,65 @@ static bool debuggerStopped(const std::exception &error, const dk3::Debugger &de
     return debugger.quitting() && language && language->category == "cancelled" &&
            std::string(language->what()) == "Debugger stopped execution";
 }
+// Calls each top-level @test function of an already executed program in source order.
+static int runTests(dk3::Runtime &runtime, const dk3::Ast &program)
+{
+    size_t passed = 0, failed = 0;
+    for (const auto &statement : program->children)
+    {
+        if (statement->kind != "function" || !dk3::findAnnotation(statement->annotations, "test"))
+            continue;
+        try
+        {
+            runtime.invoke(runtime.get(statement->text), {});
+            std::cout << "PASS " << statement->text << std::endl;
+            passed++;
+        }
+        catch (const std::exception &error)
+        {
+            std::cout << "FAIL " << statement->text << std::endl;
+            report(error);
+            failed++;
+        }
+    }
+    std::cout << "test: " << passed << " passed, " << failed << " failed" << std::endl;
+    return failed ? 1 : 0;
+}
 using SessionHandle = std::shared_ptr<std::shared_ptr<dk3::TypeSession>>;
 static bool noCheck = false; // --no-check: diagnostics become warnings and the program runs without type annotations
 static NativePlugins nativePlugins;
 
+// `dotk3 --build` records each module source it reads; built executables serve those copies instead of the disk.
+static std::vector<std::pair<std::string, std::string>> *recordedModules = nullptr;
+
+static std::shared_ptr<dk3::Source> loadModule(const std::filesystem::path &directory, const std::string &name)
+{
+    std::filesystem::path relative(name);
+    if (relative.is_absolute() || name.find("..") != std::string::npos)
+        throw std::runtime_error("Module paths must remain below the script directory");
+    std::string filename = name;
+    if (relative.extension() != ".k3")
+    {
+        std::replace(filename.begin(), filename.end(), '.', '/');
+        filename += ".k3";
+    }
+    std::filesystem::path path = directory / filename;
+    if (const dk3::EmbeddedProgram *embedded = dk3_embedded_program)
+        for (uint64_t index = 0; index < embedded->moduleCount; index++)
+            if (filename == embedded->modules[index].name)
+                return std::make_shared<dk3::Source>(dk3::Source{path.string(), std::string(embedded->modules[index].source, embedded->modules[index].sourceLength)});
+    path = findModule(directory, filename);
+    auto source = std::make_shared<dk3::Source>(dk3::Source{path.string(), readFile(path)});
+    if (recordedModules && std::none_of(recordedModules->begin(), recordedModules->end(), [&](const auto &module)
+                                        { return module.first == filename; }))
+        recordedModules->push_back({filename, source->text});
+    return source;
+}
+
 static dk3::ModuleLoader moduleLoader(const std::filesystem::path &directory)
 {
-    return [directory](const std::string &name)
-    {
-        std::filesystem::path relative(name);
-        if (relative.is_absolute() || name.find("..") != std::string::npos)
-            throw std::runtime_error("Module paths must remain below the script directory");
-        std::string filename = name;
-        if (relative.extension() != ".k3")
-        {
-            std::replace(filename.begin(), filename.end(), '.', '/');
-            filename += ".k3";
-        }
-        std::filesystem::path path = directory / filename;
-        return std::make_shared<const dk3::Source>(dk3::Source{path.string(), readFile(path)});
-    };
+    return [directory](const std::string &name) -> std::shared_ptr<const dk3::Source>
+    { return loadModule(directory, name); };
 }
 
 // Prints diagnostics and returns true when there were no errors.
@@ -201,12 +269,16 @@ static void loadImportedNatives(const dk3::Ast &node, const std::filesystem::pat
         bool plain = !name.empty() && name.find_first_of("./\\") == std::string::npos;
         if (plain && seen.insert(name).second)
         {
-            std::filesystem::path source = directory / (name + ".k3");
-            if (std::filesystem::is_regular_file(source))
+            std::filesystem::path source = findModule(directory, name + ".k3");
+            bool embedded = false;
+            if (dk3_embedded_program)
+                for (uint64_t index = 0; index < dk3_embedded_program->moduleCount; index++)
+                    embedded = embedded || name + ".k3" == dk3_embedded_program->modules[index].name;
+            if (embedded || std::filesystem::is_regular_file(source))
             {
                 try
                 {
-                    loadImportedNatives(dk3::parse(std::make_shared<dk3::Source>(dk3::Source{source.string(), readFile(source)})), directory, seen);
+                    loadImportedNatives(dk3::parse(loadModule(directory, name + ".k3")), directory, seen);
                 }
                 catch (const std::exception &)
                 {
@@ -368,6 +440,12 @@ static void printBytecode(const dk3::Bytecode &code, const std::string &label, i
             if (ins.operand < code.locals.size())
                 std::cout << " (" << code.locals[ins.operand].name << ')';
             break;
+        case dk3::ByteOp::AddLocalInt:
+            std::cout << ' ' << ins.operand;
+            if (ins.operand < code.locals.size())
+                std::cout << " (" << code.locals[ins.operand].name << ')';
+            std::cout << ' ' << ins.node->text << ' ' << ins.integer;
+            break;
         case dk3::ByteOp::LoadName:
         case dk3::ByteOp::StoreName:
         case dk3::ByteOp::DeclareName:
@@ -377,9 +455,12 @@ static void printBytecode(const dk3::Bytecode &code, const std::string &label, i
             break;
         case dk3::ByteOp::Jump:
         case dk3::ByteOp::JumpFalse:
+        case dk3::ByteOp::BranchFalse:
+        case dk3::ByteOp::BranchCompare:
         case dk3::ByteOp::JumpTrue:
         case dk3::ByteOp::JumpPresent:
         case dk3::ByteOp::JumpNull:
+        case dk3::ByteOp::NativeStatement:
             std::cout << ' ' << ins.operand;
             break;
         case dk3::ByteOp::Call:
@@ -637,7 +718,154 @@ static int shell(std::unique_ptr<dk3::Runtime> &runtime, const dk3::Config &conf
     return 0;
 }
 
-int main(int argc, char **argv)
+static std::filesystem::path executablePath(const char *argv0)
+{
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buffer(size, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) == 0)
+        return std::filesystem::canonical(buffer.c_str());
+#elif defined(__linux__)
+    std::error_code error;
+    auto path = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error)
+        return path;
+#endif
+    return std::filesystem::absolute(argv0);
+}
+
+#ifndef _WIN32
+// Runs a program directly (no shell) and returns its exit status, or -1 when it could not run.
+static int spawnProcess(const std::vector<std::string> &arguments)
+{
+    std::vector<char *> pointers;
+    for (const auto &argument : arguments)
+        pointers.push_back(const_cast<char *>(argument.c_str()));
+    pointers.push_back(nullptr);
+    pid_t child;
+    if (posix_spawnp(&child, pointers[0], nullptr, nullptr, pointers.data(), environ) != 0)
+        return -1;
+    int result = 0;
+    while (waitpid(child, &result, 0) < 0)
+        if (errno != EINTR)
+            return -1;
+    return WIFEXITED(result) ? WEXITSTATUS(result) : -1;
+}
+#endif
+
+static void reportNative(const dk3::NativeReport &report, bool verbose)
+{
+    for (const auto &skipped : report.interpreted)
+        if (verbose || dk3::findAnnotation(skipped.first->annotations, "jit"))
+        {
+            const dk3::Ast &node = skipped.first;
+            std::string at = std::to_string(node->span.line) + ":" + std::to_string(node->span.column);
+            std::string name = node->kind != "function" ? "loop@" + at : node->text.empty() ? "lambda@" + at : node->text;
+            std::cerr << "Warning: native tier keeps '" << name << "' interpreted: it " << skipped.second << '\n';
+        }
+    if (verbose)
+        for (const auto &name : report.compiled)
+            std::cerr << "native: " << name << '\n';
+}
+
+// Emits the program's native object, then links it against the runtime archive installed next to this binary.
+static int buildExecutable(dk3::NativeTier &tier, const dk3::Ast &program, const std::string &filename, const std::string &text, const std::vector<std::string> &options,
+                           std::vector<std::pair<std::string, std::string>> modules, const std::optional<std::filesystem::path> &output, const char *argv0, bool verbose)
+{
+#ifdef _WIN32
+    throw std::runtime_error("--build is not supported on this platform");
+#else
+    std::filesystem::path home = executablePath(argv0).parent_path();
+    std::filesystem::path archive = home / "libdotk3-run.a", flagsFile = home / "libdotk3-run.flags";
+    if (!std::filesystem::is_regular_file(archive) || !std::filesystem::is_regular_file(flagsFile))
+        throw std::runtime_error("Missing " + archive.string() + "; rebuild dotk3 with make LLVM=1");
+    std::filesystem::path target = output.value_or(std::filesystem::path(filename).stem());
+    std::string objectPath = (std::filesystem::temp_directory_path() / "dotk3-build-XXXXXX.o").string();
+    int descriptor = mkstemps(objectPath.data(), 2);
+    if (descriptor < 0)
+        throw std::runtime_error("Cannot create a temporary object file");
+    close(descriptor);
+    struct Cleanup
+    {
+        std::string path;
+        ~Cleanup() { std::remove(path.c_str()); }
+    } cleanup{objectPath};
+    dk3::NativeReport report = tier.emitObject(program, {std::filesystem::absolute(filename).lexically_normal().string(), text, options, std::move(modules)}, objectPath);
+    reportNative(report, verbose);
+    const char *compiler = std::getenv("CXX");
+    std::vector<std::string> command{compiler && *compiler ? compiler : "c++", objectPath};
+#ifdef __APPLE__
+    command.push_back("-Wl,-force_load," + archive.string());
+#else
+    command.insert(command.end(), {"-Wl,--whole-archive", archive.string(), "-Wl,--no-whole-archive"});
+#endif
+    std::istringstream flags(readFile(flagsFile));
+    for (std::string flag; flags >> flag;)
+        command.push_back(flag);
+    command.push_back("-o");
+    command.push_back(target.string());
+    int result = spawnProcess(command);
+    if (result != 0)
+        throw std::runtime_error("Linking " + target.string() + " failed: " + command[0] + (result < 0 ? " could not run" : " exited with status " + std::to_string(result)));
+    std::cout << "Built " << filename << " -> " << target.string() << " (" << report.compiled.size() << " native functions)\n";
+    return 0;
+#endif
+}
+
+// Attaches the embedded executable's native entries to the freshly parsed copy of its own source.
+static void bindEmbedded(const dk3::Ast &program, const std::shared_ptr<const dk3::Source> &source)
+{
+    static std::vector<dk3::NativeSite> sites;
+    static std::deque<dk3::NativeFunction> functions;
+    const dk3::EmbeddedProgram &embedded = *dk3_embedded_program;
+    for (uint64_t index = 0; index < embedded.siteCount; index++)
+    {
+        const dk3::EmbeddedSite &site = embedded.sites[index];
+        dk3::Span span{source, site.offset, site.length, static_cast<int>(site.line), static_cast<int>(site.column)};
+        sites.push_back({span, site.message, site.category});
+    }
+    auto bind = [&](const dk3::Ast &statement)
+    {
+        bool loop = statement->kind != "function";
+        for (uint64_t index = 0; index < embedded.functionCount; index++)
+        {
+            const dk3::EmbeddedFunction &function = embedded.functions[index];
+            if ((function.method == 2) != loop || (!loop && statement->text != function.name) || statement->span.line != static_cast<int>(function.line) ||
+                statement->span.column != static_cast<int>(function.column) || statement->parameters.size() != std::char_traits<char>::length(function.parameters))
+                continue;
+            dk3::NativeFunction native{function.entry, function.parameters, static_cast<char>(function.result), &sites, {}, function.method == 1};
+            for (uint64_t dependency = 0; dependency < function.dependencyCount; dependency++)
+                native.dependencies.push_back(function.dependencies[dependency]);
+            functions.push_back(std::move(native));
+            statement->native = &functions.back();
+            return;
+        }
+    };
+    std::map<size_t, dk3::Ast> lambdas;
+    std::function<void(const dk3::Ast &)> walk = [&](const dk3::Ast &node)
+    {
+        if (!node)
+            return;
+        if (node->kind == "function")
+        {
+            bind(node);
+            if (node->text.empty())
+                lambdas[node->span.offset] = node;
+        }
+        for (const auto &child : node->children)
+            walk(child);
+    };
+    walk(program);
+    for (const auto &statement : program->children)
+        if (statement->kind == "while" || statement->kind == "for_c" || statement->kind == "for")
+            bind(statement);
+    for (auto &site : sites)
+        if (site.category == "closure")
+            site.closure = lambdas[site.span.offset];
+}
+
+static int run(int argc, char **argv)
 {
     bool terminal = terminalInput();
     int start = 1;
@@ -647,6 +875,8 @@ int main(int argc, char **argv)
     std::vector<std::string> nativePaths;
     uint64_t stepLimit = 0;
     unsigned optimizationLevel = 2;
+    bool jitMode = false, jitReport = false;
+    std::string irPath;
     dk3::ProfileOptions profileOptions;
     std::optional<std::filesystem::path> profileOutput, profileTrace;
     while (start < argc)
@@ -662,6 +892,26 @@ int main(int argc, char **argv)
         {
             noCheck = true;
             start++;
+        }
+        else if (std::string(argv[start]) == "--jit")
+        {
+            jitMode = true;
+            start++;
+        }
+        else if (std::string(argv[start]) == "--jit-report")
+        {
+            jitReport = true;
+            start++;
+        }
+        else if (std::string(argv[start]) == "--emit-llvm")
+        {
+            if (start + 1 >= argc || !*argv[start + 1])
+            {
+                std::cerr << usage;
+                return 64;
+            }
+            irPath = argv[start + 1];
+            start += 2;
         }
         else if (std::string(argv[start]) == "--profile")
         {
@@ -808,6 +1058,8 @@ int main(int argc, char **argv)
     }
     bool byteCodeOnly = first == "--byte-code";
     bool compileOnly = first == "--compile";
+    bool buildMode = first == "--build";
+    bool testMode = first == "--test";
     std::optional<std::filesystem::path> compileOutput;
     bool astOnly = first == "--ast", checkOnly = first == "--check";
     bool profiling = profileOptions.source || profileOptions.vm != dk3::VMProfile::Off;
@@ -816,7 +1068,7 @@ int main(int argc, char **argv)
         std::cerr << "dotk3: Source and VM trace exports need different paths\n";
         return 64;
     }
-    if ((profileTrace && profileOptions.vm != dk3::VMProfile::Verbose) || (profiling && (astOnly || byteCodeOnly || checkOnly || first == "--debug")))
+    if ((profileTrace && profileOptions.vm != dk3::VMProfile::Verbose) || (profiling && (astOnly || byteCodeOnly || checkOnly || testMode || first == "--debug")))
     {
         std::cerr << "dotk3: Profiling requires execution without --debug; --profile-trace requires --profile-vm verbose\n";
         return 64;
@@ -827,19 +1079,34 @@ int main(int argc, char **argv)
     // Detect .dotbc run mode: dotk3 FILE.dotbc
     bool dotbcRun = remaining >= 1 && std::filesystem::path(first).extension() == ".dotbc" && first[0] != '-';
     bool repl = first == "--repl" || (!remaining && terminal) || (interactiveAfter && remaining == 1);
-    int index = start + (astOnly || byteCodeOnly || compileOnly || checkOnly || evaluate || interactiveAfter || debug || first == "--" ? 1 : 0);
-    // --compile may have -o <output> after the source file
-    if (compileOnly && index + 1 < argc && std::string(argv[index + 1]) == "-o" && index + 2 < argc)
+    int index = start + (astOnly || byteCodeOnly || compileOnly || buildMode || checkOnly || testMode || evaluate || interactiveAfter || debug || first == "--" ? 1 : 0);
+    // --compile and --build may have -o <output> after the source file
+    if ((compileOnly || buildMode) && index + 1 < argc && std::string(argv[index + 1]) == "-o" && index + 2 < argc)
     {
         compileOutput = argv[index + 2];
     }
-    if ((first == "--repl" && remaining != 1) || (astOnly && remaining != 2) || (byteCodeOnly && remaining != 2) || (compileOnly && remaining < 2) || (checkOnly && remaining < 2) ||
+    if ((first == "--repl" && remaining != 1) || (astOnly && remaining != 2) || (byteCodeOnly && remaining != 2) || (compileOnly && remaining < 2) || (checkOnly && remaining < 2) || (testMode && remaining < 2) ||
+        (buildMode && remaining != 2 && !(remaining == 4 && compileOutput)) || (buildMode && std::filesystem::path(argv[index]).extension() != ".k3") ||
         (evaluate && remaining < 2) || (debug && (remaining < 2 || std::string(argv[start + 1]) == "-")) || (first == "--" && remaining < 2) ||
         (!repl && remaining && index == start && first != "-" && !first.empty() && first[0] == '-'))
     {
         std::cerr << usage;
         return 64;
     }
+    if ((jitMode || jitReport || buildMode || !irPath.empty()) && !dk3::NativeTier::available())
+    {
+        std::cerr << "dotk3: --jit, --emit-llvm and --build require a build with the LLVM native tier (make LLVM=1)\n";
+        return 64;
+    }
+    if (buildMode && (noCheck || profiling))
+    {
+        std::cerr << "dotk3: --build needs type checking and cannot bake in profiling\n";
+        return 64;
+    }
+    bool embeddedRun = dk3_embedded_program && remaining && index == start && first == dk3_embedded_program->file;
+    dk3::NativeTier nativeTier;
+    if (!irPath.empty())
+        nativeTier.setIRPath(irPath);
     std::unique_ptr<dk3::Runtime> runtime;
     dk3::Debugger debugger;
     std::shared_ptr<dk3::Profiler> profiler;
@@ -969,19 +1236,7 @@ int main(int argc, char **argv)
             config.resolveProgram = [session](const std::string &name) -> dk3::Ast
             { return (*session)->module(name); };
         config.resolveSource = [directory](const std::string &name)
-        {
-            std::filesystem::path relative(name);
-            if (relative.is_absolute() || name.find("..") != std::string::npos)
-                throw std::runtime_error("Module paths must remain below the script directory");
-            std::string filename = name;
-            if (relative.extension() != ".k3")
-            {
-                std::replace(filename.begin(), filename.end(), '.', '/');
-                filename += ".k3";
-            }
-            std::filesystem::path path = directory / filename;
-            return std::make_shared<dk3::Source>(dk3::Source{path.string(), readFile(path)});
-        };
+        { return loadModule(directory, name); };
         if (!repl)
         {
             std::string text;
@@ -993,9 +1248,36 @@ int main(int argc, char **argv)
                 input << std::cin.rdbuf();
                 text = input.str();
             }
+            else if (embeddedRun)
+                text.assign(dk3_embedded_program->source, dk3_embedded_program->sourceLength);
             else
                 text = readFile(filename);
             auto source = std::make_shared<dk3::Source>(dk3::Source{filename, text});
+            if (buildMode)
+            {
+                std::vector<std::pair<std::string, std::string>> modules;
+                recordedModules = &modules;
+                dk3::Ast program = dk3::parse(source);
+                {
+                    std::set<std::string> seen;
+                    loadImportedNatives(program, directory, seen);
+                }
+                nativePlugins.declare(**session);
+                bool clean = printDiagnostics((*session)->check(program, false), false);
+                recordedModules = nullptr;
+                if (!clean)
+                    return 65;
+                std::vector<std::string> options;
+                for (int option = 1; option < start; option++)
+                {
+                    std::string flag = argv[option];
+                    if (flag == "--emit-llvm")
+                        option++;
+                    else if (flag != "--jit" && flag != "--jit-report")
+                        options.push_back(argv[option]);
+                }
+                return buildExecutable(nativeTier, program, filename, text, options, std::move(modules), compileOutput, argv[0], jitReport);
+            }
             if (astOnly)
             {
                 printAst(dk3::parse(source));
@@ -1084,10 +1366,21 @@ int main(int argc, char **argv)
             {
                 if (!printDiagnostics((*session)->check(checked, false), false))
                     return 65;
+                if (embeddedRun)
+                    bindEmbedded(checked, source);
+                else if (dk3::NativeTier::available())
+                {
+                    auto compileStart = std::chrono::steady_clock::now();
+                    reportNative(nativeTier.compile(checked, jitMode), jitReport);
+                    if (jitReport)
+                        std::cerr << "native compile: " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - compileStart).count() / 1000.0 << " ms\n";
+                }
                 runtime = std::make_unique<dk3::Runtime>(config);
                 nativePlugins.attach(*runtime);
                 runtime->run(checked);
             }
+            if (testMode)
+                exitCode = runTests(*runtime, checked);
         }
         else
         {
@@ -1171,4 +1464,20 @@ int main(int argc, char **argv)
         }
     }
     return exitCode;
+}
+
+int main(int argc, char **argv)
+{
+    const dk3::EmbeddedProgram *embedded = dk3_embedded_program;
+    if (!embedded || embedded->version != dk3::embeddedProgramVersion)
+        return run(argc, argv);
+    // Built executables run as: dotk3 [baked options] SOURCE [user args...]
+    std::vector<char *> arguments{argv[0]};
+    for (uint64_t index = 0; index < embedded->optionCount; index++)
+        arguments.push_back(const_cast<char *>(embedded->options[index]));
+    arguments.push_back(const_cast<char *>(embedded->file));
+    for (int index = 1; index < argc; index++)
+        arguments.push_back(argv[index]);
+    arguments.push_back(nullptr);
+    return run(static_cast<int>(arguments.size() - 1), arguments.data());
 }

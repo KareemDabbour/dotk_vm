@@ -22,9 +22,12 @@ namespace dk3
             Value item = snapshot->items[index];
             Value mapped;
             if constexpr (operation == Transform::Reduce)
-                mapped = runtime.call(callback, {{"", accumulator}, {"", item}}, span);
+            {
+                Value pair[2] = {accumulator, item};
+                mapped = runtime.callPositional(callback, pair, 2, span);
+            }
             else
-                mapped = runtime.call(callback, {{"", item}}, span);
+                mapped = runtime.callPositional(callback, &item, 1, span);
             if constexpr (operation == Transform::Map)
                 result->items.push_back(mapped);
             else if constexpr (operation == Transform::Reduce)

@@ -1,0 +1,123 @@
+# A pixel canvas that renders to the terminal. Pixels are averaged into square cells;
+# each text line shows two cell rows, since terminal characters are about twice as tall as wide.
+
+from std.image import *
+
+export enum CanvasStyle {
+    Ascii
+    ColorAscii
+    Blocks
+}
+
+let ramp = " .:-=+*#%@"
+
+export class TerminalCanvas {
+    let width: Int
+    let height: Int
+    let style: CanvasStyle
+    let cellSize: Int
+    let columns: Int
+    let rows: Int
+    var red: List<Int>
+    var green: List<Int>
+    var blue: List<Int>
+    var counts: List<Int>
+
+    constructor(width: Int, height: Int, maxColumns: Int = 100, style: CanvasStyle = CanvasStyle.Blocks) {
+        self.width = width
+        self.height = height
+        self.style = style
+        self.cellSize = ((width + maxColumns - 1) // maxColumns).coerceAtLeast(1)
+        self.columns = ((width + self.cellSize - 1) // self.cellSize).coerceAtLeast(1)
+        self.rows = ((height + self.cellSize - 1) // self.cellSize).coerceAtLeast(1)
+        let cells = self.columns * self.rows
+        self.red = Collections.range(cells).map(fn(i: Int) -> Int => 0)
+        self.green = Collections.range(cells).map(fn(i: Int) -> Int => 0)
+        self.blue = Collections.range(cells).map(fn(i: Int) -> Int => 0)
+        self.counts = Collections.range(cells).map(fn(i: Int) -> Int => 0)
+    }
+
+    # Shows an image at most maxColumns characters wide. The native resize averages the pixels first,
+    # so decoding cost does not depend on maxColumns. Transparent pixels are drawn over black.
+    static fn fromImage(image: Image, maxColumns: Int = 100, style: CanvasStyle = CanvasStyle.Blocks) -> TerminalCanvas {
+        let small = image.fit(maxColumns, image.height)
+        let canvas = TerminalCanvas(small.width, small.height, small.width, style)
+        for y in Collections.range(small.height) {
+            for x in Collections.range(small.width) {
+                let at = (y * small.width + x) * 4
+                let alpha = small.pixels[at + 3]
+                canvas.drawPixel(x, y, small.pixels[at] * alpha // 255, small.pixels[at + 1] * alpha // 255, small.pixels[at + 2] * alpha // 255)
+            }
+        }
+        return canvas
+    }
+
+    # Channels are 0-255; pixels outside the canvas are ignored.
+    fn drawPixel(x: Int, y: Int, red: Int, green: Int, blue: Int) -> Null {
+        if x < 0 or y < 0 or x >= self.width or y >= self.height {
+            return null
+        }
+        let cell = (y // self.cellSize) * self.columns + x // self.cellSize
+        self.red[cell] += red
+        self.green[cell] += green
+        self.blue[cell] += blue
+        self.counts[cell] += 1
+        return null
+    }
+
+    # Average colour of `span` cell rows starting at `row` in one column; unpainted cells are black.
+    fn colorOf(row: Int, span: Int, column: Int) -> Tuple<Int> {
+        var r = 0
+        var g = 0
+        var b = 0
+        var n = 0
+        for offset in Collections.range(span) {
+            if row + offset < self.rows {
+                let cell = (row + offset) * self.columns + column
+                r += self.red[cell]
+                g += self.green[cell]
+                b += self.blue[cell]
+                n += self.counts[cell]
+            }
+        }
+        if n == 0 {
+            return (0, 0, 0)
+        }
+        return (r // n, g // n, b // n)
+    }
+
+    fn render() -> String {
+        var lines: List<String> = []
+        for line in Collections.range((self.rows + 1) // 2) {
+            var parts: List<String> = []
+            # Escape codes are only emitted when the colour changes.
+            var previous = ""
+            for column in Collections.range(self.columns) {
+                var code = ""
+                var glyph = "▀"
+                if self.style == CanvasStyle.Blocks {
+                    let top = self.colorOf(2 * line, 1, column)
+                    let bottom = self.colorOf(2 * line + 1, 1, column)
+                    code = f"\x1b[38;2;{top[0]};{top[1]};{top[2]};48;2;{bottom[0]};{bottom[1]};{bottom[2]}m"
+                } else {
+                    let rgb = self.colorOf(2 * line, 2, column)
+                    let brightness = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) // 1000
+                    glyph = ramp[brightness * (ramp.length() - 1) // 255]
+                    if self.style == CanvasStyle.ColorAscii {
+                        code = f"\x1b[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
+                    }
+                }
+                if code != previous {
+                    parts.append(code)
+                    previous = code
+                }
+                parts.append(glyph)
+            }
+            if self.style != CanvasStyle.Ascii {
+                parts.append("\x1b[0m")
+            }
+            lines.append("".join(parts))
+        }
+        return "\n".join(lines)
+    }
+}

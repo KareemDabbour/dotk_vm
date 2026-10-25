@@ -95,6 +95,51 @@ Bool, mutation/type checks, evaluation order, source spans and execution budgets
 They control script-bytecode optimization, separately from the C++ build's flags.
 There is no fake/aggressive `-O3` that removes safety checks.
 
+### Native Code (LLVM JIT and Executables)
+
+```bash
+make -C dotk3 LLVM=1                      # needs llvm-config on PATH (or LLVM_CONFIG=...)
+B=dotk3/build/release-llvm/dotk3
+$B --jit program.k3                       # JIT every eligible function
+$B --jit-report program.k3                # list compiled functions and why others stay interpreted
+$B --jit --emit-llvm out.ll program.k3    # also write the optimized LLVM IR (works with --build too)
+$B --steps 50000 --build program.k3 -o app   # standalone executable; options before --build are baked in
+./app arg1 arg2
+```
+
+The native tier compiles top-level functions, class/record/impl methods (not
+constructors, `init` hooks or trait defaults), lambdas, and top-level `while`/`for`
+loops of the script itself. Parameters must not have defaults or rest. `Int`,
+`Float` and `Bool` values stay unboxed in machine code (lambda parameter and result
+types may come from inference); every other value (strings, collections, instances,
+nullable/union types) lives in GC-rooted slots of the native frame and is handled by
+the same runtime operations bytecode uses: globals (through inline caches), member
+reads/writes (inline field caches), indexing, slices, method and function calls, string and
+collection literals, interpolation, `for ... in`, `??`, `?.`, `!!`, `is`/`as`,
+lambdas with by-value captures, and `throw`. List/Tuple indexing and stores,
+`.length()` on builtin collections, `.append`, string `+`, and `for ... in` over
+lists, tuples, sets and `Collections.range` run inline once a cached check confirms
+the collection type has no `__getitem__`-style hooks (an `impl` adding one is picked
+up immediately). Functions using `try`, `match`,
+`defer`, `yield` or `super` stay in the bytecode VM. Without `--jit`, only `@jit`
+functions (and lambdas inside them) are compiled; `@nojit` opts a function out.
+Native code also runs when builtins such as `map`/`filter` call back into compiled
+lambdas. Direct native-to-native calls are limited to top-level code; methods
+dispatch through the runtime's inline caches, so subclass overrides always apply.
+Native code keeps interpreter semantics (wrapping `Int` arithmetic, error kinds,
+source spans and stack traces, call-depth limits, GC safe points in loops). It is
+bypassed while a step limit, profiler, debugger or task is active. Numeric and
+method-heavy code gains most; code dominated by string or collection builtins runs
+at roughly interpreter speed. The JIT optimizes at `-O1` and generates machine code
+for each function on its first call, so startup cost stays a few milliseconds and
+uncalled functions cost nothing; `--jit-report` prints the compile time.
+
+`--build` type-checks the program, compiles every eligible function ahead of time,
+and links it with `libdotk3-run.a` (installed next to `dotk3`, LLVM-free) using
+`$CXX` or `c++`. The executable embeds its source and imported `.k3` modules, so
+it runs without them, and does not depend on LLVM at runtime. Native plugin
+libraries are still loaded from disk. Code targets the build machine's CPU.
+
 The AST is only frontend/source/type metadata, not an interpreter. `--engine ast`
 is rejected. Closures, methods/constructors, defaults/rest parameters, iterable and
 C-style for, handlers/defers, generators, slices, matches, interpolation and compound
@@ -158,6 +203,12 @@ System.print(add(second: 3, first: 1))
   operand uses `pow` and rejects nonfinite results. Potentially lossy mixed
   arithmetic/order comparisons require explicit `Math.toFloat(...)`. Mixed numeric
   equality compares exactly representable values without rounding an Int first.
+- Bitwise `&`, `|`, `^`, `~`, `<<`, `>>` (and `&=`, `|=`, `^=`, `<<=`, `>>=`)
+  take Int operands. They bind tighter than comparisons, so `flags & mask == 0`
+  is `(flags & mask) == 0`; from loosest: `|`, `^`, `&`, shifts, then `+`/`-`.
+  `>>` is arithmetic (sign-filling); `<<` keeps the low 64 bits; shifts
+  by 64 or more give 0 (or -1 for a negative `>>`), and a negative count fails.
+  Int literals may be hex or binary (`0xFF`, `0b1010`, `_` separators allowed).
 - Conditions/logical operands require Bool. Use `value != null`, not truthiness.
   `??` provides null fallback. Concatenation requires matching String/Bytes/List
   types; other values require explicit `Text.str(...)`.
@@ -170,6 +221,15 @@ System.print(add(second: 3, first: 1))
 - String is validated UTF-8 and indexes code points, not bytes or graphemes.
   Bytes is distinct, such as `b"a\0b"`; byte indexing returns Int. Use
   `encode`/`decode`. Unicode normalization and grapheme segmentation are deferred.
+- Bytes print with printable ASCII as text (`b"\xff\xd8JFIF\x00"`). Integers:
+  `data[2:4].toInt()` reads the whole value and `data.readInt(offset, size)`
+  reads 1-8 bytes in place without slicing; both are unsigned and big-endian by
+  default, with `toSignedInt`/`readSignedInt` for two's complement and an
+  `order` of `"little"` for little-endian (`data.readInt(0, 4, order: "little")`).
+  `n.toBytes(size, order = "big")` encodes an Int in 1-8 bytes (signed or
+  unsigned range). `Bytes.of([0xFF, 0xD8])` builds from Ints 0-255 and
+  `b"".join(parts)` concatenates without repeated copying. `find(needle,
+  start = 0)` (-1 when absent), `contains`, `startsWith` and `endsWith` search.
 - Named calls use `name: value`; duplicate positional/named binding fails.
   Defaults are evaluated each call and can use earlier parameters. `*rest`
   receives a list. Parameters are immutable bindings.
@@ -475,8 +535,11 @@ Named methods opt into operator dispatch without new declaration syntax:
 | --- | --- |
 | `+`, `-`, `*`, `/`, `//`, `%`, `**` | `__add__`, `__sub__`, `__mul__`, `__div__`, `__floordiv__`, `__mod__`, `__pow__` |
 | `<`, `<=`, `>`, `>=` | `__lt__`, `__le__`, `__gt__`, `__ge__` |
-| Unary `-`, unary `+` | `__neg__`, `__pos__` |
+| `&`, `\|`, `^`, `<<`, `>>` | `__and__`, `__or__`, `__xor__`, `__lshift__`, `__rshift__` |
+| Unary `-`, unary `+`, `~` | `__neg__`, `__pos__`, `__invert__` |
 | `value[key]`, `value[key] = item` | `__getitem__`, `__setitem__` |
+| `value[1:3]`, `value[:, 0]`, `value[1:] = item` | `__getslice__`, `__setslice__` |
+| `2 * value` (left operand has no hook) | `__radd__`, `__rsub__`, `__rmul__`, `__rdiv__`, `__rfloordiv__`, `__rmod__`, `__rpow__` |
 
 ```text
 record Vector {
@@ -490,21 +553,44 @@ value *= 2
 System.print(value)
 ```
 
-Binary hooks receive the right operand and dispatch only from the left operand's
-class/record; unary hooks receive no arguments. Index getters receive key; setters
-receive key/value and must return Null. Indexed compound assignments evaluate
-receiver/key once, get the old value, compute the result and invoke the setter.
-They must be public synchronous
-instance methods of the expected arity, without rest parameters. Comparison results
-must be actual Bool. Normal method parameter/return contracts, inheritance, GC and
-visibility still apply. Compound assignments use the corresponding binary hook,
-then enforce the destination contract. Existing primitive operators remain unchanged.
+Binary hooks receive the right operand and dispatch from the left operand's
+class/record. When the left operand has no hook for the operator (an Int, say),
+the right operand's reflected hook runs with the left one as its argument, and a
+comparison such as `0 < value` runs `value.__gt__(0)`. String `+` concatenation
+keeps priority. Unary hooks receive no arguments. Index getters receive key;
+setters receive key/value and must return Null. Indexed compound assignments
+evaluate receiver/key once, get the old value, compute the result and invoke the
+setter. They must be public synchronous instance methods of the expected arity,
+without rest parameters. Comparison hooks may return any type, so `array > 0` can
+give an element-wise mask; `if`, `while` and sorting still require Bool. Normal
+method parameter/return contracts, inheritance, GC and visibility still apply.
+Compound assignments use the corresponding binary hook, then enforce the
+destination contract. Existing primitive operators remain unchanged.
+
+Several subscripts index with a tuple: `grid[x, y]` is `grid[(x, y)]`, so
+`__getitem__` receives `(x, y)`. A slice subscript `start:stop:step` (each part
+optional) becomes a `Collections.Slice(start, stop, step)` record with null for the
+missing parts. Built-in sequences keep their own single slices; on a class,
+`value[1:3]` calls `__getslice__((Collections.Slice(1, 3, null),))`, and any slice
+among several subscripts calls `__getslice__` with all of them, as in
+`value[:, 0]` -> `__getslice__((Collections.Slice(null, null, null), 0))`.
+Assigning to a slice calls `__setslice__(key, item)`, which must return Null;
+compound assignment to a slice is a syntax error.
+
+```text
+class Board {
+  fn __getitem__(cell: Tuple<Int>) -> String { return "cell" }
+  fn __getslice__(key: Tuple<Int | Collections.Slice>) -> List<String> { return [] }
+}
+let board = Board()
+System.print(board[1, 2], board[0, :])
+```
 
 The checker validates known hook signatures/operands/results, and the LSP discovers
-declared result members without running methods. No reflected/right-hand fallback,
-equality/hash/truthiness overload, or automatic String concatenation is
-introduced. Equality and collection membership retain existing identity/structural
-rules. See [examples/operators.k3](examples/operators.k3).
+declared result members without running methods. No equality/hash/truthiness
+overload or automatic String concatenation is introduced. Equality and collection
+membership retain existing identity/structural rules. See
+[examples/operators.k3](examples/operators.k3).
 
 ## Anonymous Functions
 
@@ -566,15 +652,18 @@ API; explicit host-created global names remain a host policy, not core aliases.
 Type annotations such as Int/Float/Error are still type names, not global native
 conversion functions. See [examples/core_services.k3](examples/core_services.k3).
 
-Explicit imports opt into top-level immutable aliases; there are no wildcard
-imports or implicit flat function aliases. For a script beside model_types.k3
-(or evaluation from the examples directory):
+Explicit imports opt into top-level immutable aliases; there are no implicit flat
+function aliases. `from M import *` imports every export of a `.k3` module (or
+every member of a built-in/native module); clashes with other names are
+duplicate-declaration errors, like explicit imports. For a script beside
+model_types.k3 (or evaluation from the examples directory):
 
 ```text
 from System import print, gc
 from Reflection import members as fields
 from "model_types.k3" import Point
-print(fields(Point(3)))
+from Math import *
+print(fields(Point(3)), sqrt(2.0))
 ```
 
 The same `from` syntax works for exported declarations in user modules. Imported
@@ -624,6 +713,35 @@ bounded exported metadata from direct imported modules. This is static discovery
 not execution-based reflection. Javadoc tags, parameter/field doc comments and
 generated documentation are not implemented.
 
+## Annotations and Decorators
+
+`@name`, `@a.b` or `@name(literal, key: literal)` may precede function and type
+declarations, class members (methods, fields, static fields), trait/impl methods
+and parameters. Arguments must be literal constants. Generic decorators infer
+their type arguments from the decorated declaration (`@memo`) or take them
+explicitly (`@memo<Int, Int>`), as a call would.
+
+- On top-level functions, user annotations are decorators: decorator expressions
+  are evaluated top-down, applied bottom-up, and the name is rebound to the result
+  (`@memo fn fib(...)` means `fib = memo(fib)`; recursion goes through the new
+  binding). The checker types the application, so the decorated function needs an
+  explicit return type. Decorators on nested functions are rejected.
+- On types, decorators are called with the type (for registration/validation);
+  the name keeps referring to the declared type.
+- On methods, fields and parameters, annotations are metadata only.
+- `Reflection.annotations(value, member?)` lists annotation names;
+  `Reflection.annotation(value, name, member?)` returns its literal arguments or
+  null. `value` may be a function, type, instance or bound method; `member` names a
+  field, method, static field or parameter. Decorated names hold the decorator's
+  result, so reflect on the declaration's type/members rather than a wrapper.
+
+Built-in directives are reserved: `@deprecated("message")` (checker warnings at
+uses, shown by `--check` and the LSP), `@override` (instance methods must override a
+base or trait method), `@test` (top-level functions without required parameters,
+run by `dotk3 --test FILE.k3`), and `@pure`, `@inline`, `@jit`, `@nojit`
+(validated function/method metadata for future compiler tiers; no runtime effect
+yet). See [examples/annotations.k3](examples/annotations.k3).
+
 ## Data and Errors
 
 ```text
@@ -661,6 +779,21 @@ The checker now validates known record/enum constructors and payload patterns,
 preserves typed fields/payload bindings, and reports missing variants in matches
 whose enum type is known locally. Duplicate/unreachable arms and immutable field
 writes are diagnosed. Dynamic and module-derived values remain runtime-checked.
+
+Enums can instead give every variant a fixed value of one type (`Int`, `Float`,
+`String` or `Bytes`), declared after the name or inferred from a literal first
+value. Values are evaluated once at declaration (they may use earlier constants
+and variants) and must be distinct. `.value` reads a variant's value and
+`Type.fromValue(v)` returns the matching variant or `null`:
+
+```text
+enum Marker: Bytes { SOI = b"\xFF\xD8", EOI = b"\xFF\xD9" }
+enum Status { Ok = 200, NotFound = 404 }
+let marker: Marker? = Marker.fromValue(data[0:2])
+System.print(Status.NotFound.value, marker == Marker.SOI)
+```
+
+Valued enums cannot have payload variants or type parameters.
 See [examples/records_enums.k3](examples/records_enums.k3).
 
 `match` also tests run-time types with `name: Type` arms. The name is bound to the
@@ -952,13 +1085,13 @@ against that root, not the process/script directory; absolute/parent paths and
 resolved symlink escapes are rejected. `readText(path) -> String` validates UTF-8;
 `readBytes(path) -> Bytes` preserves binary/NUL bytes. `exists(path) -> Bool`
 reports regular-file presence, and `size(path) -> Int` reports bytes or an error
-for a missing/nonregular file. Reads default to 4 MiB (inclusive); metadata may
-report larger sizes without reading. Empty files are valid.
+for a missing/nonregular file. Reads are unlimited by default (embedding hosts may
+set a cap) and use buffered 64 KiB chunks; metadata never reads. Empty files are valid.
 
 Calls require one positional, nonempty, NUL-free String path. Access denial is
 `Error.kind == "capability"`, host/path/missing-file failures are `io`, invalid
-UTF-8 retains the existing `value` category, and oversize reads are noncatchable
-`limit` failures. Errors point at the script call. Explicit `from Files import
+UTF-8 retains the existing `value` category, and reads above a host-set cap are
+noncatchable `limit` failures. Errors point at the script call. Explicit `from Files import
 readText` works; checker/AST/LSP operations never invoke the provider. REPL reset
 retains the configured root.
 
@@ -971,8 +1104,37 @@ invalidating existing results. Details are in
 
 This is not a hostile-code sandbox: filesystem checks/open have a TOCTOU race,
 native I/O may block and is not preempted by script budgets, and existing script/
-module loading policies are unchanged. Read limits bound result bytes, not total
-process memory. Async I/O is not implemented. See [examples/files.k3](examples/files.k3).
+module loading policies are unchanged. Host read caps bound result bytes, not total
+process memory. For large files, stream with `Files.open` + `readLine`/`read`
+instead of loading everything. Async I/O is not implemented. See [examples/files.k3](examples/files.k3).
+
+## Images
+
+The built-in `ImageCodec` decodes images held in `Bytes` using the vendored
+`stb_image` library (see [vendor/README.md](vendor/README.md)): JPEG (baseline and
+progressive), PNG, BMP, GIF (first frame) and TGA. It has three functions:
+`ImageCodec.info(data) -> (width, height, channels)` reads only the header,
+`ImageCodec.decode(data) -> Bytes` returns 8-bit RGBA pixels (row-major,
+`width * height * 4` bytes), and `ImageCodec.resize(pixels, width, height,
+newWidth, newHeight) -> Bytes` area-averages RGBA pixels down (alpha-weighted) or
+repeats them up. `std/image.k3` wraps these in an `Image` class:
+
+```text
+from std.image import *
+from std.canvas import *
+
+let image = Image.read("photo.jpg")        # or Image.decode(bytes); reads obey --files-root
+System.print(image.width, image.height, image.channels, image.pixel(10, 20))
+let small = image.fit(160, 120)            # keeps the aspect ratio, never enlarges
+System.print(TerminalCanvas.fromImage(image, 100, CanvasStyle.Blocks).render())
+```
+
+`channels` is the source file's channel count (1 gray, 2 gray + alpha, 3 RGB,
+4 RGBA); `pixels` is always RGBA. Corrupt, truncated or unsupported data, and images
+above 64 million pixels, fail with catchable `value` errors rather than crashing.
+`TerminalCanvas` (`std/canvas.k3`) draws pixels to the terminal as half-block
+true colour, coloured brightness characters, or plain ASCII; see
+[examples/image_view.k3](examples/image_view.k3).
 
 ### File Handles and Writes
 
@@ -1001,6 +1163,56 @@ rules as `readText` apply to every path. C++ hosts supply `Config::fileSystem`.
 ```bash
 dotk3 --files-root . --files-write script.k3
 ```
+
+## NumPy-style Arrays
+
+`std/ndarray.k3` provides `NDArray`, an n-dimensional array of Float in the style
+of NumPy. The element loops run in the native `NDKernel`, so whole-array
+operations are fast; reading single elements from DotK costs a method call each.
+
+```text
+import std.ndarray as np
+
+let a = np.arange(6.0).reshape(2, 3)     # [[0. 1. 2.] [3. 4. 5.]]
+System.print(a * 2 + 1, 1 - a, a.sumAxis(0), a.mean(), a.dot(a.transpose()))
+System.print(a[1, 2])                    # one Float
+let column = a[:, 1]                     # a view: shape (2,)
+column[0] = 10                           # also changes a[0, 1]
+a[1, :] = np.array([7.0, 8.0, 9.0])
+System.print(np.where(a > 5, a, 0.0), (a > 5).sum())
+```
+
+- Creation: `array(values, *shape)`, `fromNested(rows)`, `zeros`, `ones`,
+  `full(value, *shape)`, `eye(n)`, `arange(stop)` / `arange(start, stop, step)`,
+  `linspace(start, stop, count)`, `random(*shape)` and `normal(mean, deviation,
+  *shape)` (both repeatable with `Random.seed`), `scalar(value)` (0-d) and
+  `concatenate(arrays, axis)`.
+- Shape: `shape`, `ndim()`, `size()`, `length()`, `reshape(*shape)` (one `-1` is
+  inferred), `transpose(*axes)`, `flatten()`, `row(i)`, `column(j)`,
+  `select(axis, i)`, `copy()`, `toList()`, `toNested()`, `item()`.
+- Indexing: integer subscripts read and write one `Float`, with one index per axis
+  (`a[i]` only on 1-d arrays). Any slice returns a view sharing the data, and
+  integer subscripts in it drop their axis: `a[0, :]`, `a[::-1]`, `a[1:, 2]`.
+  Slice assignment broadcasts: `a[:, 0] = 0`, `a[1:] = other`.
+- Arithmetic `+ - * / // % **`, unary `-`, and comparisons `< <= > >=` work
+  element-wise between arrays and numbers on either side, broadcasting shapes as
+  NumPy does. Comparisons give 1.0/0.0 masks; `&`, `|`, `^` and `~` combine masks.
+  `==` stays structural equality, so use `eq(other)`, `ne(other)` or
+  `allClose(other)`.
+- Reductions: `sum()`, `prod()`, `mean()`, `min()`, `max()`, `variance()`, `std()`
+  return a Float and `argmin()`/`argmax()` an Int; `sumAxis(axis, keepDims)` and the
+  other `...Axis` forms reduce one axis to an array. `any()`/`all()` test masks.
+- Functions: `sqrt`, `exp`, `log`, `log2`, `log10`, `abs`, `sin`, `cos`, `tan`,
+  `tanh`, `floor`, `ceil`, `round` (halves to even), `sign`, `isnan`, `maximum`,
+  `minimum`, `atan2`, `where(mask, a, b)`, `dot`/`matmul` (also methods), and the
+  methods `clip(low, high)` and `map(fn)`.
+- Images: `fromImage(image, gray)` gives `(height, width, 4)` RGBA, or
+  `(height, width)` luminance, from 0 to 1; `toImage(array)` converts back.
+
+Element-wise maths follows IEEE rules as NumPy does: dividing by zero gives `inf`
+or `nan` rather than an error. Arrays hold at most 2^25 elements. Printing
+follows NumPy, summarising arrays above 1,000 elements. See
+[examples/ndarray.k3](examples/ndarray.k3), which also draws the edges of an image.
 
 ## System, GC, Reflection and Collections
 
@@ -1041,10 +1253,10 @@ is compact. Embedded null characters are escaped normally. Both calls are
 positional-only and expose shared checker/LSP signatures without editor execution.
 
 The implementation reuses pinned nlohmann/json 3.12.0: public SAX parsing converts
-directly into rooted runtime objects. Nesting is capped at 64 containers and input/
-returned output at 4 MiB. Conversion consumes step budgets; serialization also uses
-a conservative preflight byte estimate that may reject below the returned-byte cap.
-Native lexing/dumping and transient allocations are not a wall-clock/memory sandbox.
+directly into rooted runtime objects. Neither call limits size or nesting: parsing
+and encoding are iterative (no C++ recursion), and stringify writes straight into
+one output buffer instead of building an intermediate tree. Conversion consumes
+step budgets. Memory use is bounded only by the process.
 The existing vendored header is now also linked into the runtime library; its pinned
 hash/version are unchanged. See [examples/json.k3](examples/json.k3).
 
@@ -1063,11 +1275,23 @@ for value in stream() { System.print(value) }
 
 Modules expose only `export` declarations and have separate lexical scopes based
 on the prelude, not the caller's globals. CLI resolution reads `.k3` files below
-the script directory; this policy is not a symlink-hardened sandbox. Hosts supply
+the script directory first (`a.b` is `a/b.k3`), then each directory in
+`DOTK3_PATH` (`:`-separated, `;` on Windows), and finally serves `std.*` modules
+from `dotk3/std/` (the Makefile's `DK3_LIBRARY_DIR`, default `dotk3/`), so
+`from std.promise import *` works from any script. The language server resolves
+the same way; `--build` embeds whichever files were used. This policy is not a
+symlink-hardened sandbox. Hosts supply
 their own resolver. Empty-module resolution and explicit import-cycle diagnostics
 need refinement. Namespace fields cannot be reassigned.
 
 Generators are lazy. Exhaustion is a separate boolean, so yielded null is valid.
+`Collections.stream(items)` wraps any iterable in a generator, and generators
+chain lazily: `map`, `filter`, `flatMap`, `take`, `skip`, `takeWhile` and
+`dropWhile` return generators that pull only what is consumed; `toList`, `toSet`,
+`toMap`, `forEach`, `count`, `first`, `reduce`, `any` and `all` consume. For
+example `Collections.stream(parts).flatMap(fn(b: Bytes) -> Bytes => b).toList()`
+flattens a list of Bytes into their Int values. `Collectors.toList/toSet/count/
+joining/toMap/groupBy/partitionBy` take any iterable directly.
 Generator bodies support bindings, expressions, nested blocks, if/while/for,
 yield, return, break/continue, defer, and try/catch/finally. Deferred calls retain
 their captured callable/arguments through suspension and GC. Scope exits unwind
@@ -1281,7 +1505,8 @@ synchronize destruction and keep callbacks/handles within their owner lifetime.
 Handles released while the VM lives are rejected; they are invalid after destroy.
 The API is experimental and does not promise binary compatibility with DotK 2.
 
-Object limits count managed objects, not total bytes or process memory. AST step
+Object limits count managed objects, not total bytes or process memory, and exclude
+the runtime's own startup objects, so a limit of N always leaves N for the program. AST step
 limits do not preempt parsing or native callbacks. OOM poisons the instance.
 There is no hostile-code sandbox, general native capability library, dynamic
 binary-module loader or production scheduler. Collection/resource inspection and

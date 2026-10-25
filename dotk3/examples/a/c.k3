@@ -1,0 +1,508 @@
+from System import print
+from Collections import *
+from std.canvas import *
+
+var pic = Files.readBytes("examples/a/p.jpeg")
+
+enum JFIFMarkers: Bytes {
+    SOI = b"\xFF\xD8"
+    APP0 = b"\xFF\xE0"
+    DQT = b"\xFF\xDB"
+    DCT = b"\xFF\xC0"
+    DHT = b"\xFF\xC4"
+    SOS = b"\xFF\xDA"
+    EOI = b"\xFF\xD9"
+    DRI = b"\xFF\xDD"
+}
+
+class JPEG{
+    var bytes: Bytes;
+    var hTables: Map<Int,HuffmanTable> = {}
+    var dqtTables: Map<Int,List<Int>> = {}
+    var qMapping :List<Int> = []
+    var hSampling: List<Int> = []
+    var vSampling: List<Int> = []
+    var restartInterval: Int = 0
+    var height: Int = 0
+    var width: Int = 0
+    var canvasStyle: CanvasStyle = CanvasStyle.Blocks
+    # Terminal columns for the render; larger values keep more detail (the image is averaged down to fit).
+    var canvasColumns: Int = 10
+
+    constructor(bytes: Bytes) {
+        self.bytes = bytes
+    }
+
+    # data starts at the SOS length field; the compressed scan follows the header and runs to the next marker.
+    fn decodeSOS(data: Bytes) -> Int {
+        let headerLength = data.readInt(0, 2)
+        let count = data[2]
+        var dcTables: List<Int> = []
+        var acTables: List<Int> = []
+        for c in range(count) {
+            let selector = data[4 + c * 2]
+            dcTables.append(selector >> 4)
+            acTables.append(selector & 0x0F)
+        }
+        let scanLength = entropyLength(data[headerLength:])
+        let segments = restartSegments(data[headerLength:headerLength + scanLength])
+
+        # An MCU holds hSampling x vSampling blocks of each component, covering maxH*8 x maxV*8 pixels.
+        var maxH :Int = 1
+        var maxV = 1
+        for c in range(count) {
+            maxH = maxH.coerceAtLeast(self.hSampling[c])
+            maxV = maxV.coerceAtLeast(self.vSampling[c])
+        }
+        let mcusAcross = (self.width + 8 * maxH - 1) // (8 * maxH)
+        let mcusDown = (self.height + 8 * maxV - 1) // (8 * maxV)
+
+        var canvas = TerminalCanvas(self.width, self.height, self.canvasColumns, self.canvasStyle)
+        var predictions: List<Int> = range(count).map(fn(c: Int) -> Int => 0)
+        var segment = 0
+        var st = Stream(segments[0])
+        for m in range(mcusAcross * mcusDown) {
+            # Each restart interval starts byte-aligned in its own segment with DC predictions reset.
+            if self.restartInterval > 0 and m > 0 and m % self.restartInterval == 0 {
+                segment += 1
+                st = Stream(segments[segment])
+                predictions = range(count).map(fn(c: Int) -> Int => 0)
+            }
+            var blocks: List<List<List<Int>>> = []
+            for c in range(count) {
+                var componentBlocks: List<List<Int>> = []
+                for b in range(self.hSampling[c] * self.vSampling[c]) {
+                    var built = self.buildMatrix(st, dcTables[c], acTables[c], self.dqtTables[self.qMapping[c]], predictions[c])
+                    componentBlocks.append((built[0] as IDCT).base)
+                    predictions[c] = built[1] as Int
+                }
+                blocks.append(componentBlocks)
+            }
+            self.drawMCU(canvas, (m % mcusAcross) * 8 * maxH, (m // mcusAcross) * 8 * maxV, blocks, maxH, maxV)
+        }
+
+        print(canvas.render())
+        return headerLength + scanLength
+    }
+
+    # Upsamples each component over the MCU: component c spans hSampling[c] x vSampling[c] blocks.
+    fn drawMCU(canvas: TerminalCanvas, left: Int, top: Int, blocks: List<List<List<Int>>>, maxH: Int, maxV: Int) -> Null {
+        for py in range(8 * maxV) {
+            for px in range(8 * maxH) {
+                if left + px >= self.width or top + py >= self.height {
+                    continue
+                }
+                let y = self.sample(blocks, 0, px, py, maxH, maxV)
+                var rgb = colorConversion(y, 0, 0)
+                if blocks.length() >= 3 {
+                    rgb = colorConversion(y, self.sample(blocks, 1, px, py, maxH, maxV), self.sample(blocks, 2, px, py, maxH, maxV))
+                }
+                canvas.drawPixel(left + px, top + py, rgb[0], rgb[1], rgb[2])
+            }
+        }
+        return null
+    }
+
+    fn sample(blocks: List<List<List<Int>>>, c: Int, px: Int, py: Int, maxH: Int, maxV: Int) -> Int {
+        let sx = px * self.hSampling[c] // maxH
+        let sy = py * self.vSampling[c] // maxV
+        return blocks[c][(sy >> 3) * self.hSampling[c] + (sx >> 3)][(sy & 7) * 8 + (sx & 7)]
+    }
+
+    fn decodeDRI(data: Bytes) -> Int {
+        self.restartInterval = data.readInt(0, 2)
+        return data.length()
+    }
+
+    fn decodeHT(data: Bytes) -> Int {
+        var offset = 0
+        # var chunkLength = data.readInt(0, 2) + 2
+        # # let sf = offset + chunkLength
+        
+        # var chunk = data[2:chunkLength]
+        var header = data[0]
+        offset += 1
+
+        var lengthsB = data[offset:offset+16]
+        var lengths: List<Int> = []
+        offset += 16
+
+        var elems: List<Bytes> = []
+        for i in lengthsB {
+            lengths.append(i)
+            elems.append(data[offset:offset+i])
+            offset += i
+        }
+        # var e2 = Collections.stream(elems).flatMap(fn(x: Bytes) -> Bytes { return x }).toList()
+        # Bytes.
+        var dds = stream(b"".join(elems)).map(fn(x: Int) -> Int => x).toList()
+        # print(
+        #     f"\theader: {header}\n\tlengths: {lengths} \n\telems: {dds[:5]}"
+        # ) 
+
+        var h = HuffmanTable()
+        h.getHuffmanBits(lengths, dds)
+        self.hTables[header] = h
+        return data.length()
+        
+    }
+
+    fn decodeDQT(data: Bytes) -> Int {
+        var offset = 0
+
+        var header = data[0]
+
+        offset += 1
+        print(f"\tDecoding DQT with header: {header}: {data[offset:offset+4]}")
+        
+        self.dqtTables[header] = stream(data[offset:offset+64]).map(fn(x: Int) -> Int => x).toList()
+
+        return data.length()
+    }
+
+    fn decodeDCT(data: Bytes) -> Int {
+        var offset = 0
+        var header = data[0]
+        offset += 1
+        self.height = data.readInt(offset, 2)
+        offset += 2
+        self.width = data.readInt(offset, 2)
+        offset += 2
+        var components = data[offset]
+        offset += 1
+
+        for i in range(components){
+            var slice = data[6+i*3:9+i*3]
+            var id = slice[0]
+            var samp = slice[1]
+            var QtbId = slice[2]
+            self.qMapping.append(QtbId)
+            self.hSampling.append(samp >> 4)
+            self.vSampling.append(samp & 0x0F)
+            print(f"\t\tComponent {i}: id={id}, samp={samp}, QtbId={QtbId}, hSampling={self.hSampling[-1]}, vSampling={self.vSampling[-1]}")
+
+        }
+        print(f"\t\tDecoding DCT with header: {header}: height={self.height}, width={self.width}, components={components}")
+        return data.length()
+    }
+
+    fn decodeChuckWithHeader(data: Bytes, f: fn(Bytes) -> Int) -> Int {
+        var chunkLength = data.readInt(0, 2) + 2
+        var chunk = data[2:chunkLength]
+        return f(chunk) + 2
+    }
+
+    fn decodeFromMarker(marker: JFIFMarkers?, data: Bytes) -> Int {
+        if (marker == null) {return data.readInt(0, 2) + 2}
+        print(f"Decoding from marker: {marker}")
+        return match (marker) {
+            JFIFMarkers.DHT => self.decodeChuckWithHeader(data, self.decodeHT)
+            JFIFMarkers.DQT => self.decodeChuckWithHeader(data, self.decodeDQT)
+            JFIFMarkers.DCT => self.decodeChuckWithHeader(data, self.decodeDCT)
+            JFIFMarkers.SOI => 2
+            JFIFMarkers.SOS => self.decodeSOS(data) + 2
+            JFIFMarkers.EOI => 2
+            JFIFMarkers.DRI => self.decodeChuckWithHeader(data, self.decodeDRI)
+            _ => data.readInt(0, 2) + 2
+        }
+    }
+
+    fn buildMatrix(st:Stream, dcTable:Int, acTable:Int, quant:List<Int>, olddccoeff:Int) -> Tuple<IDCT | Int> {
+        var i = IDCT();
+        var code = self.hTables[dcTable].getCode(st)
+        var bits = st.getBitN(code)
+        # print(f"Building matrix with idx={idx}, olddccoeff={olddccoeff}")
+        var dccoeff = decodeNumber(code, bits) + olddccoeff
+
+        i.base[0] = (dccoeff) * quant[0]
+        var l = 1
+        while (l < 64){
+
+            code = self.hTables[16 + acTable].getCode(st)
+            if code == 0{
+                break
+            }
+
+            # The first part of the AC quantization table
+            # is the number of leading zeros
+            if (code > 15)
+                {l += code >> 4
+                code = code & 0x0F}
+
+            bits = st.getBitN(code)
+
+            if (l < 64){
+                var coeff = decodeNumber(code, bits)
+                i.base[l] = coeff * quant[l]
+                l += 1
+            }
+
+            
+        }
+        i.rearrange_using_zigzag()
+        i.perform_IDCT()
+        return (i, dccoeff)
+
+    }
+
+    fn decode(){
+        var i = 0
+        while (i < self.bytes.length()) {
+            let marker = self.bytes[i:i+2]
+            var value = JFIFMarkers.fromValue(marker)
+            if (value != null){
+                print(f"{i}:{i+2}: {value}: {value.value}")
+            }
+            var o = self.decodeFromMarker(value, self.bytes[i+2:])
+            print(f"Offset {o}: {i}->{o + i}")
+            i += o
+        }
+    }
+}
+
+fn decodeNumber(code:Int, bits:Int) -> Int{
+    # print(f"decodeNumber: code={code}, bits={bits}")
+    # A zero-size code carries no bits and means 0 (Python got this from 2**-1 == 0.5).
+    if code == 0 {
+        return 0
+    }
+    var l = 1 << (code - 1)
+    if bits>=l{
+        return bits
+    } else {
+        return bits-(2*l-1)
+    }
+}
+
+# Bytes before the next marker: an 0xFF not followed by 0x00 or a restart marker (0xD0-0xD7).
+fn entropyLength(data: Bytes) -> Int {
+    var i = data.find(b"\xFF")
+    while i != -1 and i + 1 < data.length() and (data[i + 1] == 0 or (data[i + 1] >= 0xD0 and data[i + 1] <= 0xD7)) {
+        i = data.find(b"\xFF", i + 2)
+    }
+    if i == -1 {
+        return data.length()
+    }
+    return i
+}
+
+# The scan split at its restart markers, each piece unstuffed.
+fn restartSegments(scan: Bytes) -> List<Bytes> {
+    var segments: List<Bytes> = []
+    var start = 0
+    var i = scan.find(b"\xFF")
+    while i != -1 and i + 1 < scan.length() {
+        if scan[i + 1] >= 0xD0 and scan[i + 1] <= 0xD7 {
+            segments.append(unstuff(scan[start:i]))
+            start = i + 2
+        }
+        i = scan.find(b"\xFF", i + 2)
+    }
+    segments.append(unstuff(scan[start:]))
+    return segments
+}
+
+# Inside the scan every literal 0xFF byte is written as 0xFF 0x00.
+fn unstuff(data: Bytes) -> Bytes {
+    var parts: List<Bytes> = []
+    var start = 0
+    var i = data.find(b"\xFF\x00")
+    while i != -1 {
+        parts.append(data[start:i + 1])
+        start = i + 2
+        i = data.find(b"\xFF\x00", start)
+    }
+    parts.append(data[start:])
+    return b"".join(parts)
+}
+
+fn clamp(value: Float) -> Int {
+    return value.toInt().clamp(0, 255)
+}
+
+# Level-shifted YCbCr (each centred on 0) to 0-255 RGB.
+fn colorConversion(y: Int, cb: Int, cr: Int) -> Tuple<Int> {
+    let r = cr * (2 - 2 * 0.299) + y
+    let b = cb * (2 - 2 * 0.114) + y
+    let g = (y - 0.114 * b - 0.299 * r) / 0.587
+    return (clamp(r + 128), clamp(g + 128), clamp(b + 128))
+}
+
+class HuffmanTable{
+    var root: List<List<Int> | Int> = []
+    var elements: List<Int> = []
+
+    fn getBits(root: Object, element: Int, position: Int) -> Bool{
+        if root is Int {
+            return false
+        }else if root is List<?>{
+
+            if position == 0 {
+                if root.length() < 2 {
+                    (root as List<Object>).append(element)
+                    return true
+                }
+                return false
+            }        
+            for i in range(2){
+                if root.length() == i {
+                    (root as List<Object>).append(List<?>())
+                }
+                if self.getBits(root[i], element, position - 1) {
+                    return true
+                }
+            }
+            
+        }
+
+        return false
+    }
+
+    fn getHuffmanBits(lengths: List<Int>, elements: List<Int>){
+        self.elements = elements
+        var ii = 0
+        for i in range(lengths.length()){
+            for j in range(lengths[i]){
+                self.getBits(self.root, elements[ii], i)
+                ii+=1
+            }
+        }
+    }
+
+    fn getCode(st: Stream) -> Int{
+        while(true){
+
+            var res = self.find(st)
+            if res == 0 {
+                return 0
+            } else if ( res != -1) {
+                return res
+            }
+        }
+    }
+
+    fn find(st: Stream) -> Int{
+
+        var r : Object = self.root
+        while r is List<?> {
+            r = (r as List<Object>)[st.readBit()]
+        }
+        return r as Int;
+    }
+
+}
+
+class Stream{
+    var data: Bytes
+    var position: Int = 0
+    constructor(data: Bytes){
+        self.data = data
+    }
+
+    fn readBit() -> Int{
+        var b = self.data[self.position >> 3]
+        var s = 7-(self.position & 0x7)
+        self.position+=1
+        return (b >> s) & 1
+    }
+
+    fn getBitN(l: Int) -> Int{
+        var val = 0
+        for i in range(l){
+            val = val*2 + self.readBit()
+        }
+        return val
+    }
+}
+
+class IDCT{
+    var base: List<Int>
+    var zigzag: List<List<Int>>
+    var idct_precision: Int
+    var idct_table: List<List<Float>>
+
+    constructor(){
+        self.base = range(64).map(fn(x) => 0);
+        self.zigzag = [
+            [0, 1, 5, 6, 14, 15, 27, 28],
+            [2, 4, 7, 13, 16, 26, 29, 42],
+            [3, 8, 12, 17, 25, 30, 41, 43],
+            [9, 11, 18, 24, 31, 40, 44, 53],
+            [10, 19, 23, 32, 39, 45, 52, 54],
+            [20, 22, 33, 38, 46, 51, 55, 60],
+            [21, 34, 37, 47, 50, 56, 59, 61],
+            [35, 36, 48, 49, 57, 58, 62, 63],
+        ]
+        self.idct_precision = 8
+        self.idct_table = range(self.idct_precision).map(fn(u) => range(self.idct_precision).map(fn(x) => (self.NormCoeff(u) * Math.cos(((2.0 * x + 1.0) * u * Math.PI) / 16.0))
+            )
+        )
+        # [
+        #     [
+        #         (self.NormCoeff(u) * math.cos(((2.0 * x + 1.0) * u * math.pi) / 16.0))
+        #         for x in range(self.idct_precision)
+        #     ]
+        #     for u in range(self.idct_precision)
+        # ]
+    }
+
+    fn NormCoeff(n: Int) -> Float{
+        if (n == 0){
+            return 1.0 / Math.sqrt(2.0)
+        }
+        
+        return 1.0
+    }
+    fn rearrange_using_zigzag() -> List<List<Int>>{
+        for x in range(8){
+            for y in range(8){
+                self.zigzag[x][y] = self.base[self.zigzag[x][y]]
+            }
+        }
+        return self.zigzag
+    }
+
+    fn perform_IDCT() -> List<Int> {
+        # out = [list(range(8)) for i in range(8)]
+        var out: List<Int> = range(64).map(fn(j) => 0)
+
+        for x in range(8){
+
+            for y in range(8){
+                var local_sum = 0.0
+                for u in range(self.idct_precision){
+                    for v in range(self.idct_precision){
+                        local_sum += (
+                            self.zigzag[v][u] * self.idct_table[u][x]* self.idct_table[v][y]
+                        )
+                    }
+                }
+                
+                out[y*8 + x] = (local_sum // 4).toInt()
+            }
+        }   
+        self.base = out
+        return out
+    }
+    
+}
+var jpeg = JPEG(pic)
+jpeg.decode()
+# for table in jpeg.dqtTables.values() {
+#     print(table)
+# }
+
+
+
+
+# var h = HuffmanTable()
+# var lengths = [0, 2, 2, 3, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+# var elements = [5, 6, 3, 4, 2, 7, 8, 1, 0, 9]
+
+
+# h.getHuffmanBits(lengths, elements)
+
+# print(h.root)
+
+
+

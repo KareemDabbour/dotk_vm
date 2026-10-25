@@ -166,6 +166,28 @@ namespace dk3
                                                     std::reverse(result.begin(), result.end());
                                                     return runtime.text(result, false, span);
                                                 }});
+        runtime.registerPrimitiveMethod("Int", {"toBytes", "Bytes", 1, 2, [](Runtime &runtime, Value recv, const auto &args, const Span &span) -> Value
+                                                {
+                                                    int64_t value = std::get<int64_t>(recv), size = intArg(args[0].value, span);
+                                                    if (size < 1 || size > 8)
+                                                        throw Error(span, "toBytes size must be 1 to 8 bytes", "value");
+                                                    bool little = false;
+                                                    if (args.size() > 1)
+                                                    {
+                                                        const Value &order = args[1].value;
+                                                        const std::string *text = std::holds_alternative<Object *>(order) && std::get<Object *>(order)->kind == Kind::String ? &std::get<Object *>(order)->text : nullptr;
+                                                        if (!text || (*text != "big" && *text != "little"))
+                                                            throw Error(span, "Byte order must be \"big\" or \"little\"", "value");
+                                                        little = *text == "little";
+                                                    }
+                                                    // Accepts both the signed and unsigned range of the width.
+                                                    if (size < 8 && (value < -(int64_t{1} << (size * 8 - 1)) || value >= int64_t{1} << (size * 8)))
+                                                        throw Error(span, std::to_string(value) + " does not fit in " + std::to_string(size) + " bytes", "value");
+                                                    std::string bytes(static_cast<size_t>(size), '\0');
+                                                    for (int64_t index = 0; index < size; index++)
+                                                        bytes[static_cast<size_t>(little ? index : size - 1 - index)] = static_cast<char>(static_cast<uint64_t>(value) >> (index * 8) & 0xFF);
+                                                    return runtime.text(std::move(bytes), true, span);
+                                                }});
 
         // ---- Float --------------------------------------------------------------
         runtime.registerPrimitiveMethod("Float", {"abs", "Float", 0, 0, [](Runtime &, Value recv, const auto &, const Span &) -> Value

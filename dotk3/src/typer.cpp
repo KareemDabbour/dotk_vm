@@ -279,9 +279,20 @@ namespace dk3
                 }
                 if (node->kind == "enum")
                 {
+                    if (!node->type.empty())
+                        result += ": " + node->type;
                     result += " {";
                     for (const auto &child : node->children)
+                    {
                         result += "\n  " + child->text;
+                        const Ast &value = child->children.empty() ? nullptr : child->children[0];
+                        if (value && value->span.source && value->span.length <= 80)
+                        {
+                            std::string text = value->span.source->text.substr(value->span.offset, value->span.length);
+                            if (text.find_first_of("\r\n") == std::string::npos)
+                                result += " = " + text;
+                        }
+                    }
                     result += "\n}";
                 }
                 if (node->kind == "trait")
@@ -592,6 +603,9 @@ namespace dk3
             std::set<std::string> loading;
             bool builtinMode = false;
             bool sessionMode = false, replacingCore = false;
+            size_t blockDepth = 0;
+            bool applyingDecorators = false;
+            std::set<const Node *> decoratedFunctions;
             Ty stringType = nullptr, bytesType = nullptr, errorType = nullptr;
             ClassInfo *listInfo = nullptr, *mapInfo = nullptr, *setInfo = nullptr, *tupleInfo = nullptr, *generatorInfo = nullptr, *iterableInfo = nullptr;
             ClassInfo *intInfo = nullptr, *floatInfo = nullptr, *boolInfo = nullptr;
@@ -926,6 +940,36 @@ namespace dk3
                     error(span, "Duplicate member '" + name + "' in " + info->name);
             }
 
+            // The type of `.value` for an enum with values (declared after ':' or taken from a literal first value); null otherwise.
+            Ty enumValueType(const Ast &node)
+            {
+                bool valued = !node->type.empty();
+                for (const auto &child : node->children)
+                    valued = valued || !child->children.empty();
+                if (!valued)
+                    return nullptr;
+                Ty raw = nullptr;
+                if (!node->type.empty())
+                    raw = resolveType(node->typeExpr);
+                else
+                {
+                    const Ast &first = node->children[0]->children[0];
+                    const Ast &literal = first->kind == "unary" && first->text == "-" && !first->children.empty() ? first->children[0] : first;
+                    if (literal->kind != "literal")
+                    {
+                        error(first->span, "Cannot infer the value type of enum " + node->text + "; declare it as 'enum " + node->text + ": Type'");
+                        return ty.error();
+                    }
+                    raw = expr(first);
+                }
+                if (raw != ty.integer() && raw != ty.floating() && raw != stringType && raw != bytesType && raw->tag != TypeTag::Error)
+                {
+                    error(node->span, "Enum values must be Int, Float, String or Bytes, not " + show(raw));
+                    return ty.error();
+                }
+                return raw;
+            }
+
             void classMembers(const Ast &node)
             {
                 ClassInfo *info = classOf[node.get()];
@@ -957,6 +1001,20 @@ namespace dk3
                         info->variants.push_back(variant);
                         addMember(info, child->text, std::move(member), child->span);
                     }
+                    if (Ty raw = enumValueType(node))
+                    {
+                        Member value;
+                        value.type = raw;
+                        addMember(info, "value", std::move(value), node->span);
+                        Member lookup;
+                        lookup.isStatic = true;
+                        lookup.type = ty.function({raw}, ty.nullable(info->self));
+                        lookup.signature = std::make_shared<Signature>();
+                        lookup.signature->type = lookup.type;
+                        lookup.signature->names = {"value"};
+                        lookup.signature->defaults = {false};
+                        addMember(info, "fromValue", std::move(lookup), node->span);
+                    }
                 }
                 else
                 {
@@ -967,6 +1025,7 @@ namespace dk3
                         member.mutableBinding = info->kind == ClassKind::Class && field.mutableBinding;
                         member.visibility = field.visibility;
                         member.hasDefault = static_cast<bool>(field.defaultValue);
+                        member.annotations = &field.annotations;
                         info->fieldOrder.push_back(field.name);
                         addMember(info, field.name, std::move(member), node->span);
                     }
@@ -979,6 +1038,7 @@ namespace dk3
                             member.type = resolveType(child->typeExpr);
                             member.mutableBinding = child->mutableBinding;
                             member.visibility = child->visibility;
+                            member.annotations = &child->annotations;
                             addMember(info, child->text, std::move(member), child->span);
                         }
                         else if (child->kind == "function" || child->kind == "signature")
@@ -989,6 +1049,7 @@ namespace dk3
                             member.type = member.signature->type;
                             member.isStatic = child->staticMember;
                             member.visibility = child->visibility;
+                            member.annotations = &child->annotations;
                             addMember(info, child->text, std::move(member), child->span);
                         }
                     }
@@ -1325,7 +1386,8 @@ namespace dk3
                 }
                 Ty declared = node->typeExpr ? resolveType(node->typeExpr) : resultHint;
                 Ty result = checkFunctionBody(node, parameters, declared, {}, nullptr, false, nullptr);
-                return ty.function(std::move(parameters), result);
+                node->resolved = ty.function(std::move(parameters), result);
+                return node->resolved;
             }
 
             Ty checkFunctionBody(const Ast &function, const std::vector<Ty> &parameterTypes, Ty declaredResult, const std::vector<Ty> &typeParams, ClassInfo *owner, bool constructor, Ty self, bool isStatic = false)
@@ -1446,14 +1508,233 @@ namespace dk3
                         declareSymbol(statement->text, std::move(symbol), statement->span);
                     }
                 }
+                if (!builtinMode)
+                    for (const auto &statement : statements)
+                        checkAnnotations(statement, functions.empty() && blockDepth == 0);
                 for (const auto &statement : statements)
                     this->statement(statement);
+            }
+
+            // ---- annotations ------------------------------------------------------------------------
+
+            enum class AnnotationTarget
+            {
+                Function,
+                NestedFunction,
+                Method,
+                Type,
+                Field,
+                Parameter
+            };
+
+            static const char *targetName(AnnotationTarget target)
+            {
+                switch (target)
+                {
+                case AnnotationTarget::Function:
+                    return "function";
+                case AnnotationTarget::NestedFunction:
+                    return "nested function";
+                case AnnotationTarget::Method:
+                    return "method";
+                case AnnotationTarget::Type:
+                    return "type";
+                case AnnotationTarget::Field:
+                    return "field";
+                default:
+                    return "parameter";
+                }
+            }
+
+            static bool constantArgument(const Ast &argument)
+            {
+                if (argument->kind == "literal")
+                    return true;
+                return argument->kind == "unary" && argument->text == "-" && argument->children.size() == 1 && argument->children[0]->kind == "literal" &&
+                       (argument->children[0]->literalKind == TokenKind::Integer || argument->children[0]->literalKind == TokenKind::Float);
+            }
+
+            void validateAnnotations(const std::vector<Annotation> &annotations, AnnotationTarget target, const Ast &declaration)
+            {
+                for (const auto &annotation : annotations)
+                {
+                    const Ast &expression = annotation.expression;
+                    size_t arguments = expression->kind == "call" ? expression->children.size() - 1 : 0;
+                    if (expression->kind == "call")
+                        for (size_t index = 1; index < expression->children.size(); index++)
+                            if (!constantArgument(expression->children[index]))
+                                error(expression->children[index]->span, "Annotation arguments must be literal constants");
+                    if (!annotation.builtin)
+                    {
+                        if (target == AnnotationTarget::NestedFunction)
+                            error(annotation.span, "Decorators apply only to top-level functions and types");
+                        else if (target != AnnotationTarget::Function && target != AnnotationTarget::Type)
+                        {
+                            Ty type = expr(expression);
+                            auto signature = signatureOf.find(declaration.get());
+                            if (target == AnnotationTarget::Method && type->tag == TypeTag::Function && type->args.size() == 1 && signature != signatureOf.end() &&
+                                signature->second->type && ty.isSubtype(signature->second->type, type->args[0]))
+                                warn(annotation.span, "@" + annotation.name + " is not applied: annotations on methods are metadata only; decorators work on top-level functions and types");
+                        }
+                        continue;
+                    }
+                    const std::string &name = annotation.name;
+                    bool function = target == AnnotationTarget::Function || target == AnnotationTarget::NestedFunction || target == AnnotationTarget::Method;
+                    bool allowed = name == "deprecated" ? target != AnnotationTarget::Parameter
+                                   : name == "test"     ? target == AnnotationTarget::Function
+                                   : name == "override" ? target == AnnotationTarget::Method
+                                                        : function;
+                    if (!allowed)
+                        error(annotation.span, "@" + name + " cannot be applied to a " + targetName(target));
+                    if (name == "deprecated")
+                    {
+                        if (arguments > 1 || (arguments == 1 && (expression->children[1]->kind != "literal" || expression->children[1]->literalKind != TokenKind::String)))
+                            error(annotation.span, "@deprecated takes an optional String message");
+                    }
+                    else if (arguments)
+                        error(annotation.span, "@" + name + " takes no arguments");
+                    if (expression->kind == "call" && std::any_of(expression->names.begin(), expression->names.end(), [](const std::string &argument)
+                                                                  { return !argument.empty(); }))
+                        error(annotation.span, "@" + name + " does not accept named arguments");
+                    if (name == "test" && allowed)
+                        for (const auto &parameter : declaration->parameters)
+                            if (!parameter.defaultValue)
+                                error(annotation.span, "@test functions cannot have required parameters");
+                    if (name == "override" && declaration->staticMember)
+                        error(annotation.span, "@override requires an instance method");
+                }
+                if (findAnnotation(annotations, "jit") && findAnnotation(annotations, "nojit"))
+                    error(declaration->span, "@jit and @nojit cannot be combined");
+            }
+
+            void checkOverride(const Ast &method, ClassInfo *owner, ClassInfo *trait)
+            {
+                if (!findAnnotation(method->annotations, "override") || method->staticMember)
+                    return;
+                bool overrides = false;
+                if (trait)
+                    overrides = findMember(trait, method->text) != nullptr;
+                else if (owner)
+                {
+                    if (owner->super && owner->super->tag == TypeTag::Named)
+                        if (const Member *base = findMember(owner->super->info, method->text))
+                            overrides = base->isMethod && !base->isStatic;
+                    for (Ty implemented : owner->traits)
+                        if (implemented->tag == TypeTag::Named && findMember(implemented->info, method->text))
+                            overrides = true;
+                }
+                if (!overrides)
+                    error(method->span, "'" + method->text + "' is marked @override but does not override an inherited or trait method");
+            }
+
+            // Types `d1(d2(name))` for decorators applied bottom-up; returns null when there are none.
+            Ty applyDecorators(const Ast &declaration)
+            {
+                Ast value;
+                for (auto annotation = declaration->annotations.rbegin(); annotation != declaration->annotations.rend(); ++annotation)
+                {
+                    if (annotation->builtin)
+                        continue;
+                    if (!value)
+                    {
+                        value = std::make_shared<Node>();
+                        value->kind = "name";
+                        value->text = declaration->text;
+                        value->span = declaration->span;
+                    }
+                    Ast call = std::make_shared<Node>();
+                    call->kind = "call";
+                    call->span = annotation->span;
+                    call->children = {annotation->expression, value};
+                    call->names = {""};
+                    value = call;
+                }
+                if (!value)
+                    return nullptr;
+                applyingDecorators = true;
+                Ty result = expr(value);
+                applyingDecorators = false;
+                return result;
+            }
+
+            void checkAnnotations(const Ast &node, bool topLevel)
+            {
+                if (node->kind == "function" && !node->text.empty())
+                {
+                    validateAnnotations(node->annotations, topLevel ? AnnotationTarget::Function : AnnotationTarget::NestedFunction, node);
+                    for (const auto &parameter : node->parameters)
+                        validateAnnotations(parameter.annotations, AnnotationTarget::Parameter, node);
+                    if (!topLevel || std::all_of(node->annotations.begin(), node->annotations.end(), [](const Annotation &annotation)
+                                                 { return annotation.builtin; }))
+                        return;
+                    auto signature = signatureOf[node.get()];
+                    if (signature && signature->pendingResult)
+                    {
+                        error(node->span, "Decorated functions need an explicit return type");
+                        return;
+                    }
+                    Ty decorated = applyDecorators(node);
+                    Symbol *symbol = lookup(node->text);
+                    if (!decorated || !symbol || symbol->declaration != node)
+                        return;
+                    decoratedFunctions.insert(node.get());
+                    symbol->kind = SymbolKind::Value;
+                    symbol->type = symbol->declared = decorated;
+                    symbol->signature = nullptr;
+                }
+                else if (classOf.count(node.get()))
+                {
+                    ClassInfo *info = classOf[node.get()];
+                    validateAnnotations(node->annotations, AnnotationTarget::Type, node);
+                    for (const auto &field : node->parameters)
+                        validateAnnotations(field.annotations, AnnotationTarget::Field, node);
+                    for (const auto &child : node->children)
+                    {
+                        if (child->kind == "binding")
+                            validateAnnotations(child->annotations, AnnotationTarget::Field, child);
+                        else if (child->kind == "function" || child->kind == "signature")
+                        {
+                            validateAnnotations(child->annotations, AnnotationTarget::Method, child);
+                            for (const auto &parameter : child->parameters)
+                                validateAnnotations(parameter.annotations, AnnotationTarget::Parameter, child);
+                            checkOverride(child, info, nullptr);
+                        }
+                    }
+                    applyDecorators(node);
+                }
+                else if (node->kind == "impl")
+                {
+                    Symbol *trait = lookup(node->text);
+                    for (const auto &child : node->children)
+                    {
+                        validateAnnotations(child->annotations, AnnotationTarget::Method, child);
+                        for (const auto &parameter : child->parameters)
+                            validateAnnotations(parameter.annotations, AnnotationTarget::Parameter, child);
+                        if (trait && trait->kind == SymbolKind::Class)
+                            checkOverride(child, nullptr, trait->info);
+                    }
+                }
+            }
+
+            void deprecation(const std::vector<Annotation> *annotations, const Span &span, const std::string &name)
+            {
+                if (!annotations || applyingDecorators || builtinMode)
+                    return;
+                const Annotation *found = findAnnotation(*annotations, "deprecated");
+                if (!found)
+                    return;
+                std::string message = "'" + name + "' is deprecated";
+                if (found->expression->kind == "call" && found->expression->children.size() == 2)
+                    message += ": " + found->expression->children[1]->text;
+                warn(span, message);
             }
 
             void block(const Ast &node)
             {
                 pushScope();
+                blockDepth++;
                 blockStatements(node->children);
+                blockDepth--;
                 popScope();
             }
 
@@ -1476,6 +1757,10 @@ namespace dk3
                     declareValue(field.name, member.type, false, node->span);
                 }
                 popScope();
+                auto rawValue = info->kind == ClassKind::Enum ? info->members.find("value") : info->members.end();
+                for (const auto &child : node->children)
+                    if (child->kind == "variant" && !child->children.empty() && rawValue != info->members.end() && !rawValue->second.isStatic)
+                        assignable(expr(child->children[0], rawValue->second.type), rawValue->second.type, child->children[0]->span);
                 for (const auto &child : node->children)
                 {
                     if (child->kind == "binding")
@@ -1638,24 +1923,37 @@ namespace dk3
                     declareSymbol(node->names[0], std::move(alias), node->span);
                     return;
                 }
-                for (size_t index = 0; index + 1 < node->names.size(); index += 2)
+                std::vector<std::string> names = node->names;
+                if (wildcard(node))
                 {
-                    const Member *member = findMember(module->info, node->names[index]);
+                    names.clear();
+                    for (const auto &[name, member] : module->info->members)
+                        if (member.isStatic)
+                            names.insert(names.end(), {name, name});
+                    std::string prefix = module->info->name + "_";
+                    for (const auto &[name, symbol] : scopes[0].symbols)
+                        if (symbol.kind == SymbolKind::Class && name.size() > prefix.size() && name.compare(0, prefix.size(), prefix) == 0 &&
+                            !module->info->members.count(name.substr(prefix.size())))
+                            names.insert(names.end(), {name.substr(prefix.size()), name.substr(prefix.size())});
+                }
+                for (size_t index = 0; index + 1 < names.size(); index += 2)
+                {
+                    const Member *member = findMember(module->info, names[index]);
                     if (!member)
                     {
-                        Symbol *nested = lookup(module->info->name + "_" + node->names[index]);
+                        Symbol *nested = lookup(module->info->name + "_" + names[index]);
                         if (!nested && module->info->name == "Collections")
-                            nested = lookup(node->names[index]);
+                            nested = lookup(names[index]);
                         if (nested && nested->kind == SymbolKind::Class)
                         {
                             Symbol alias = *nested;
-                            declareSymbol(node->names[index + 1], std::move(alias), node->span);
+                            declareSymbol(names[index + 1], std::move(alias), node->span);
                             continue;
                         }
                     }
                     if (!member || !member->isStatic)
                     {
-                        error(node->span, node->text + " has no member '" + node->names[index] + "'");
+                        error(node->span, node->text + " has no member '" + names[index] + "'");
                         continue;
                     }
                     Symbol symbol;
@@ -1664,16 +1962,18 @@ namespace dk3
                         symbol.kind = SymbolKind::Function;
                         symbol.signature = member->signature;
                         symbol.type = member->signature->type;
-                        symbol.native = module->info->name + "." + node->names[index];
+                        symbol.native = module->info->name + "." + names[index];
                     }
                     else
                     {
                         symbol.type = symbol.declared = member->type;
                         symbol.global = true;
                     }
-                    declareSymbol(node->names[index + 1], std::move(symbol), node->span);
+                    declareSymbol(names[index + 1], std::move(symbol), node->span);
                 }
             }
+
+            static bool wildcard(const Ast &node) { return node->kind == "from_import" && node->names.size() == 2 && node->names[0] == "*"; }
 
             std::shared_ptr<Exports> loadModule(const std::string &name, const Span &span)
             {
@@ -1760,6 +2060,12 @@ namespace dk3
                     space.kind = SymbolKind::Module;
                     space.exports = exports;
                     declareSymbol(node->names[0], std::move(space), node->span);
+                    return;
+                }
+                if (wildcard(node))
+                {
+                    for (const auto &[name, symbol] : *exports)
+                        declareSymbol(name, symbol, node->span);
                     return;
                 }
                 for (size_t index = 0; index + 1 < node->names.size(); index += 2)
@@ -1866,6 +2172,7 @@ namespace dk3
                     member.signature = makeSignature(child, false);
                     member.type = member.signature->type;
                     member.visibility = child->visibility;
+                    member.annotations = &child->annotations;
                     addMember(target, child->text, std::move(member), child->span);
                 }
                 popScope();
@@ -1944,15 +2251,18 @@ namespace dk3
             {
                 if (node->text.empty() || builtinMode)
                     return;
+                bool decorated = decoratedFunctions.count(node.get()) != 0;
                 Symbol *symbol = lookup(node->text);
-                if (!symbol || !symbol->signature || symbol->signature != signatureOf[node.get()])
+                if (!decorated && (!symbol || !symbol->signature || symbol->signature != signatureOf[node.get()]))
                     return;
-                std::shared_ptr<Signature> signature = symbol->signature;
+                std::shared_ptr<Signature> signature = decorated ? signatureOf[node.get()] : symbol->signature;
                 if (signature->pendingResult)
                     signature->inferring = true;
                 Ty declared = signature->pendingResult ? nullptr : signature->type->result;
                 Ty result = checkFunctionBody(node, signature->type->args, declared, signature->typeParams, nullptr, false, nullptr);
                 finishSignature(signature, result);
+                if (decorated)
+                    return;
                 if (Symbol *refreshed = lookup(node->text))
                     refreshed->type = signature->type;
             }
@@ -2374,6 +2684,8 @@ namespace dk3
                     return ty.error();
                 }
                 referenced[node.get()] = *symbol;
+                if (symbol->declaration && symbol->kind != SymbolKind::Alias)
+                    deprecation(&symbol->declaration->annotations, node->span, node->text);
                 switch (symbol->kind)
                 {
                 case SymbolKind::Value:
@@ -2429,6 +2741,15 @@ namespace dk3
                     return ty.boolean();
                 }
                 operand = bounded(operand);
+                if (op == "~")
+                {
+                    if (operand->tag == TypeTag::Int)
+                        return operand;
+                    if (Ty hooked = hookCall(operand, "__invert__", {}, node->span))
+                        return hooked;
+                    error(node->span, "Operator '~' requires an Int, got " + show(operand));
+                    return ty.error();
+                }
                 if (ty.isNumeric(operand))
                     return operand;
                 if (Ty hooked = hookCall(operand, op == "-" ? "__neg__" : "__pos__", {}, node->span))
@@ -2505,11 +2826,18 @@ namespace dk3
                     const char *hook = op == "<" ? "__lt__" : op == ">" ? "__gt__"
                                                           : op == "<="  ? "__le__"
                                                                         : "__ge__";
-                    if (hookCall(left, hook, {right}, node->span))
-                        return ty.boolean();
+                    if (Ty hooked = hookCall(left, hook, {right}, node->span))
+                        return hooked;
+                    const char *mirrored = op == "<" ? "__gt__" : op == ">" ? "__lt__"
+                                                              : op == "<="  ? "__ge__"
+                                                                            : "__le__";
+                    if (Ty hooked = hookCall(right, mirrored, {left}, node->span))
+                        return hooked;
                     error(node->span, "Cannot compare " + show(left) + " with " + show(right));
                     return ty.boolean();
                 }
+                if (Ty bits = bitwiseResult(op, left, right, node->span))
+                    return bits;
                 if (ty.isNumeric(left) && ty.isNumeric(right))
                 {
                     bool floating = left == ty.floating() || right == ty.floating();
@@ -2529,8 +2857,13 @@ namespace dk3
                 static const std::map<std::string, const char *> hooks{{"+", "__add__"}, {"-", "__sub__"}, {"*", "__mul__"}, {"/", "__div__"}, {"//", "__floordiv__"}, {"%", "__mod__"}, {"**", "__pow__"}};
                 auto hook = hooks.find(op);
                 if (hook != hooks.end())
+                {
                     if (Ty hooked = hookCall(left, hook->second, {right}, node->span))
                         return hooked;
+                    std::string reflected = std::string("__r") + (hook->second + 2);
+                    if (Ty hooked = hookCall(right, reflected.c_str(), {left}, node->span))
+                        return hooked;
+                }
                 error(node->span, "Operator '" + op + "' cannot be applied to " + show(left) + " and " + show(right));
                 return ty.error();
             }
@@ -2589,7 +2922,7 @@ namespace dk3
                     assignable(value, targetType, node->children[1]->span);
                     return ty.null();
                 }
-                Ty combined = compoundResult(op.substr(0, 1), targetType, value, node->span);
+                Ty combined = compoundResult(compoundOperator(op), targetType, value, node->span);
                 if (ty.isNumeric(bounded(targetType)) && ty.isNumeric(bounded(value)))
                     markNumeric(node, bounded(targetType), bounded(value), op == "/=");
                 assignable(combined, targetType, node->span);
@@ -2600,6 +2933,8 @@ namespace dk3
             {
                 left = bounded(left);
                 right = bounded(right);
+                if (Ty bits = bitwiseResult(op, left, right, span))
+                    return bits;
                 if (op == "+" && left == bytesType && right == bytesType)
                     return bytesType;
                 if (op == "+" && left->tag == TypeTag::Named && left->info == listInfo && ty.isSubtype(right, left))
@@ -2617,6 +2952,21 @@ namespace dk3
                 return ty.error();
             }
 
+            // Result of & | ^ << >> (Int only, or a hook); null when op is not bitwise.
+            Ty bitwiseResult(const std::string &op, Ty left, Ty right, const Span &span)
+            {
+                static const std::map<std::string, const char *> hooks{{"&", "__and__"}, {"|", "__or__"}, {"^", "__xor__"}, {"<<", "__lshift__"}, {">>", "__rshift__"}};
+                auto hook = hooks.find(op);
+                if (hook == hooks.end())
+                    return nullptr;
+                if (left->tag == TypeTag::Int && right->tag == TypeTag::Int)
+                    return ty.integer();
+                if (Ty hooked = hookCall(left, hook->second, {right}, span))
+                    return hooked;
+                error(span, "Operator '" + op + "' requires Int operands, got " + show(left) + " and " + show(right));
+                return ty.error();
+            }
+
             struct Resolved
             {
                 Ty type = nullptr;
@@ -2627,6 +2977,7 @@ namespace dk3
 
             bool visible(const Member &member, const Span &span, const std::string &name)
             {
+                deprecation(member.annotations, span, name);
                 if (member.visibility == Visibility::Public)
                     return true;
                 ClassInfo *current = functions.empty() ? nullptr : functions.back().owner;
@@ -2634,6 +2985,15 @@ namespace dk3
                 if (!allowed)
                     error(span, "'" + name + "' is " + (member.visibility == Visibility::Private ? "private" : "protected") + " in " + member.owner->name);
                 return allowed;
+            }
+
+            std::string missingMember(Ty receiver, const std::string &name)
+            {
+                if (name == "__getslice__")
+                    return show(receiver) + " cannot be sliced with several subscripts";
+                if (name == "__setslice__")
+                    return show(receiver) + " does not support slice assignment";
+                return show(receiver) + " has no member '" + name + "'";
             }
 
             // The class a name or qualified path (Outer.Nested) refers to, when it denotes a type rather than a value.
@@ -2717,7 +3077,7 @@ namespace dk3
                         const Member *m = findMember(primInfo, node->text);
                         if (!m || m->isStatic)
                         {
-                            error(node->span, show(receiver) + " has no member '" + node->text + "'");
+                            error(node->span, missingMember(receiver, node->text));
                             return result;
                         }
                         result.found = true;
@@ -2728,13 +3088,13 @@ namespace dk3
                 }
                 if (receiver->tag != TypeTag::Named)
                 {
-                    error(node->span, show(receiver) + " has no member '" + node->text + "'");
+                    error(node->span, missingMember(receiver, node->text));
                     return result;
                 }
                 const Member *member = findMember(receiver->info, node->text);
                 if (!member || member->isStatic)
                 {
-                    error(node->span, show(receiver) + " has no member '" + node->text + "'");
+                    error(node->span, missingMember(receiver, node->text));
                     return result;
                 }
                 visible(*member, node->span, node->text);
@@ -3009,6 +3369,17 @@ namespace dk3
                 bool sliceable = receiver == stringType || receiver == bytesType || (receiver->tag == TypeTag::Named && (receiver->info == listInfo || receiver->info == tupleInfo));
                 if (!sliceable)
                 {
+                    // Tuple is invariant, so pass the hook's own key type when it accepts a lone Slice.
+                    Ty slice = classType("Collections_Slice"), key = ty.named(tupleInfo, {slice});
+                    if (const Member *hook = receiver->tag == TypeTag::Named ? findMember(receiver->info, "__getslice__") : nullptr;
+                        hook && hook->signature && hook->signature->type->args.size() == 1)
+                    {
+                        Ty declared = hook->signature->type->args[0];
+                        if (declared->tag == TypeTag::Named && declared->info == tupleInfo && declared->args.size() == 1 && ty.isSubtype(slice, declared->args[0]))
+                            key = declared;
+                    }
+                    if (Ty hooked = hookCall(receiver, "__getslice__", {key}, node->span))
+                        return hooked;
                     error(node->span, show(receiver) + " cannot be sliced");
                     return ty.error();
                 }
@@ -3090,6 +3461,8 @@ namespace dk3
                 if (callee->kind == "name")
                 {
                     Symbol *symbol = lookup(callee->text);
+                    if (symbol && symbol->declaration && (symbol->kind == SymbolKind::Class || symbol->kind == SymbolKind::Function))
+                        deprecation(&symbol->declaration->annotations, callee->span, callee->text);
                     if (symbol && symbol->kind == SymbolKind::Class)
                         return construct(node, symbol->info, callee->typeArgs, expected);
                     if (symbol && symbol->kind == SymbolKind::Function)
@@ -3119,6 +3492,8 @@ namespace dk3
                 }
                 if (callee->kind == "member" && !isModuleAccess(callee))
                 {
+                    if (ClassInfo *nested = classReference(callee))
+                        return construct(node, nested, callee->typeArgs, expected);
                     Resolved resolved = resolveMember(callee);
                     if (!resolved.found)
                     {

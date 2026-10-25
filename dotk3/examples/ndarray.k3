@@ -1,0 +1,49 @@
+# NumPy-style arrays with std.ndarray: build, broadcast, slice, reduce, fit a line and find image edges.
+#   dotk3 examples/ndarray.k3
+#   dotk3 --files-root . examples/ndarray.k3 tests/fixtures/g.jpg    (also draws the edges of an image)
+
+import std.ndarray as np
+from std.image import *
+from std.canvas import *
+
+let grid = np.arange(12.0).reshape(3, 4)
+System.print("grid:")
+System.print(grid)
+System.print("column means:", grid.meanAxis(0), " row sums:", grid.sumAxis(1))
+System.print("centred and doubled:")
+System.print(2 * (grid - grid.mean()))
+System.print("odd columns of the last two rows:")
+System.print(grid[1:, 1::2])
+
+# Views share data: writing through a slice changes the original.
+grid[0, :] = -1
+grid[:, 3] = grid[:, 0] * 10
+System.print("after writing through views:")
+System.print(grid)
+System.print("mask of elements above 5:", (grid > 5).sum(), "of", grid.size())
+
+# Fit y = 3x + 2 to noisy samples by gradient descent; every step is a handful of vectorised operations.
+Random.seed(42)
+let x = np.linspace(0, 1, 200)
+let y = 3 * x + 2 + np.normal(0.0, 0.05, 200)
+var slope = 0.0
+var intercept = 0.0
+for step in Collections.range(2000) {
+    let error = slope * x + intercept - y
+    slope -= 0.5 * (error * x).mean()
+    intercept -= 0.5 * error.mean()
+}
+System.print("fit [slope, intercept]:", np.round(np.array([slope, intercept]) * 100) / 100)
+
+# Rotation matrices compose with dot.
+let turn = np.fromNested([[0.0, -1.0], [1.0, 0.0]])
+System.print("four quarter turns give the identity:", turn.dot(turn).dot(turn).dot(turn).allClose(np.eye(2)))
+
+# Edge strength from neighbouring-pixel differences, drawn on the terminal canvas.
+if System.args.length() > 0 {
+    let gray = np.fromImage(Image.read(System.args[0]).fit(160, 160), true)
+    let dx = gray[1:-1, 2:] - gray[1:-1, :-2]
+    let dy = gray[2:, 1:-1] - gray[:-2, 1:-1]
+    let edges = np.sqrt(dx * dx + dy * dy) * 2
+    System.print(TerminalCanvas.fromImage(np.toImage(edges.clip(0.0, 1.0)), 80).render())
+}

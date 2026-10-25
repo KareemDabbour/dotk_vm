@@ -8,7 +8,7 @@ export class Camera {
     var yaw: Float = 0.0
     var pitch: Float = 0.0
     var fov: Float = 70.0
-
+    
     # Moves on the ground plane relative to where the camera is facing; `lift` moves straight up.
     fn move(forward: Float, strafe: Float, lift: Float) -> Null {
         self.x += Math.sin(self.yaw) * forward + Math.cos(self.yaw) * strafe
@@ -32,6 +32,7 @@ export class Camera {
 
 let RAMP: String = " .:-=+*#%@"
 
+@nojit
 fn lowest(a: Float, b: Float, c: Float) -> Float {
     var result = a
     if b < result { result = b }
@@ -39,6 +40,8 @@ fn lowest(a: Float, b: Float, c: Float) -> Float {
     return result
 }
 
+
+@nojit
 fn highest(a: Float, b: Float, c: Float) -> Float {
     var result = a
     if b > result { result = b }

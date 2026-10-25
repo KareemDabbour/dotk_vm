@@ -113,6 +113,47 @@ int main() {
     rejects("enum Shape { Circle(Float), Empty }\nfn f(s: Shape) -> Float { return match s { Shape.Circle(r) => r } }", "not exhaustive");
     accepts("enum Opt<T> { Some(T), None }\nlet a: Opt<Int> = Opt.Some(3)\nlet b: Opt<String> = Opt.None\nfn get(o: Opt<Int>) -> Int { return match o { Opt.Some(v) => v, _ => 0 } }");
     rejects("enum Shape { Circle(Float) }\nlet s = Shape.Circle('x')", "Expected Float, got String");
+    accepts("enum Marker: Bytes { Start = b'\\xFF\\xD8', End = b'\\xFF\\xD9' }\nenum Code { Ok = 200, Gone = -410 }\nlet raw: Bytes = Marker.Start.value\nlet found: Marker? = Marker.fromValue(raw)\nlet code: Int = Code.Gone.value\nfn name(c: Code) -> String { return match c { Code.Ok => 'ok', Code.Gone => 'gone' } }");
+    accepts("let base = 2\nenum Flag: Int { A = base, B = Flag.A.value * 2 }\nlet b: Int = Flag.B.value");
+    rejects("enum Code { Ok = 200 }\nlet c: String = Code.Ok.value", "Expected String, got Int");
+    rejects("enum Code { Ok = 200 }\nlet c: Code = Code.fromValue(200)", "may be null");
+    rejects("enum Code: Int { Ok = 'x' }", "Expected Int, got String");
+    rejects("enum Code { Ok = 1, Bad = 'x' }", "Expected Int, got String");
+    rejects("enum Flag: Bool { On = true }", "Enum values must be Int, Float, String or Bytes");
+    rejects("let base = 1\nenum Flag { A = base }", "Cannot infer the value type of enum Flag");
+    rejects("enum Code { Ok = 1 }\nCode.Ok.value = 2", "Cannot assign");
+    rejects("enum Code { value = 1 }", "Duplicate member 'value'");
+    accepts("let a: Int = 0xF0 & 0x3C | 1 ^ 2\nlet b: Int = ~a << 2 >> 1\nvar c = 1\nc |= 4\nc <<= 1\nc >>= 1\nlet d: Bool = c & 1 == 1");
+    accepts("class B { let v: Int\nfn __and__(o: B) -> B { return B(self.v & o.v) }\nfn __invert__() -> B { return B(~self.v) } }\nlet x: B = ~(B(1) & B(3))");
+    rejects("let a = 1.5 & 1", "Operator '&' requires Int operands, got Float and Int");
+    rejects("let a = true | false", "requires Int operands");
+    rejects("let a = ~2.0", "Operator '~' requires an Int");
+    // Subscripts, slice hooks, reflected and non-Bool comparison hooks.
+    const std::string grid = "class G { fn __getitem__(key: Int | Tuple<Int>) -> Float { return 1.0 }\nfn __setitem__(key: Int | Tuple<Int>, value: Float) -> Null {}\n"
+                             "fn __getslice__(key: Tuple<Int | Collections.Slice>) -> G { return self }\nfn __setslice__(key: Tuple<Int | Collections.Slice>, value: G | Float) -> Null {}\n"
+                             "fn __rmul__(other: Float) -> G { return self }\nfn __gt__(other: Float) -> G { return self }\nfn __lt__(other: Float) -> G { return self } }\nlet g = G()\n";
+    accepts(grid + "let a: Float = g[1]\nlet b: Float = g[1, -2]\ng[0, 0] = 2\ng[0, 0] += 1.5\nlet c: G = g[1:3]\nlet d: G = g[::2, 0]\nlet e: G = g[:, 1:]\ng[1:] = 0.5\ng[0, :] = g\n"
+            "let f: G = 2 * g\nlet h: G = g > 0.5\nlet i: G = 0.5 < g\nlet s: Collections.Slice = Collections.Slice(1, null, -1)\nlet n: Int? = s.step");
+    rejects(grid + "let a: G = g[1, 2]", "Expected G, got Float");
+    rejects(grid + "g[0, 'x']", "Expected Int | Tuple<Int>");
+    rejects(grid + "g['a':]", "Expected Int, got String");
+    rejects(grid + "g[1:, 0] = 'x'", "Expected Float | G, got String");
+    rejects(grid + "let x = 'a' * g", "Expected Float, got String");
+    rejects(grid + "let x = g - 1", "cannot be applied");
+    rejects(grid + "if g > 1.0 { }", "Expected Bool, got G");
+    rejects("let xs = [1, 2]\nlet a = xs[0:1, 0]", "List<Int> cannot be sliced with several subscripts");
+    rejects("let xs = [1, 2]\nxs[0:1] = [3]", "List<Int> does not support slice assignment");
+    rejects("class N {}\nlet a = N()[1:]", "N cannot be sliced");
+    rejects("let xs = [1, 2]\nxs[0:1] += [3]", "PARSE: Compound assignment to a slice is not supported");
+    rejects("var a = 1\na ^= 'x'", "requires Int operands");
+    accepts("let data = b'\\x00\\x10'\nlet n: Int = data.toInt() + data.readInt(0, 2, order: 'little') + data.readSignedInt(0, 1)\nlet b: Bytes = Bytes.of([1, 2]) + n.toBytes(4) + b''.join([data])\nlet at: Int = data.find(b'\\x10', 1)");
+    rejects("let n: Bytes = b'\\x01'.toInt()", "Expected Bytes, got Int");
+    rejects("let n = b'\\x01'.readInt('0', 1)", "Expected Int, got String");
+    rejects("let b = Bytes.of(['x'])", "Expected");
+    accepts("let png = b'x'\nlet info: Tuple<Int> = ImageCodec.info(png)\nlet w: Int = info[0]\nlet rgba: Bytes = ImageCodec.decode(png)\nlet small: Bytes = ImageCodec.resize(rgba, w, info[1], 4, 4)");
+    rejects("let rgba = ImageCodec.decode('text')", "Expected Bytes");
+    rejects("let small = ImageCodec.resize(b'x', 1, 1, 1)", "argument");
+    rejects("let n: Bytes = ImageCodec.info(b'x')", "Expected Bytes");
 
     // Nullability, narrowing, unions, casts.
     accepts("fn f(s: String?) -> Int { if s != null { return s.length() }\nreturn 0 }\nfn g(s: String?) -> Int { if s == null { return 0 }\nreturn s.length() }\nfn h(s: String?) -> Int { return s?.length() ?? 0 }");
@@ -187,6 +228,43 @@ int main() {
     accepts("let a: Float = Math.sin(Math.PI / 2)\nlet b: Int = Math.floor(2.7)\nlet r: Range = Collections.range(4)\nSystem.print(a, b, r)\nlet s: List<String> = 'a,b'.split(',')\nfor x in r { System.print(x) }\nfor c in 'ab' { let t: String = c }");
     rejects("for x in 5 { }", "is not iterable");
     rejects("let a: String = Math.sin(1.0)", "Expected String, got Float");
+
+    // Annotations, directives and decorators.
+    const std::string decorators = "fn twice(f: fn(Int) -> Int) -> fn(Int) -> Int { return fn(x: Int) -> Int { return f(f(x)) } }\nfn tag(label: String) -> fn(Type) -> Type { return fn(t: Type) -> Type { return t } }\nfn meta(n: Int) -> Int { return n }\n";
+    accepts(decorators + "@twice fn inc(x: Int) -> Int { return x + 1 }\nlet y: Int = inc(1)\n@tag('m') class A { fn name() -> String { return 'a' } }\nclass B extends A { @override fn name() -> String { return 'b' }; @meta(-3) var n: Int = 0 }\n@test @pure @inline @jit fn t() -> Null {}");
+    accepts("trait R { fn read() -> Int }\nclass C implements R { @override fn read() -> Int { return 1 } }\nclass D {}\nimpl R for D { @override fn read() -> Int { return 2 } }");
+    const std::string memo = "fn memo<T, U>(f: fn(T) -> U) -> fn(T) -> U { return f }\n";
+    accepts(memo + "@memo fn a(n: Int) -> Int { return n }\n@memo<Int, Int> fn b(n: Int) -> Int { return n }\nlet x: Int = a(1) + b(2)");
+    rejects(memo + "@memo<Int, String> fn c(n: Int) -> Int { return n }", "Expected");
+    rejects(decorators + "@twice fn bad(x: Int) -> String { return 'x' }", "Expected");
+    rejects(decorators + "@twice fn inc(x: Int) -> Int { return x }\nlet s: String = inc(1)", "Expected String, got Int");
+    rejects("class A { @override fn nothing() -> Int { return 1 } }", "does not override");
+    rejects("class A { fn m() -> Null {} }\nclass B extends A { @override static fn m() -> Null {} }", "@override requires an instance method");
+    rejects("@test fn needs(x: Int) -> Null {}", "cannot have required parameters");
+    rejects("@jit @nojit fn both() -> Null {}", "cannot be combined");
+    rejects("@deprecated(3) fn bad() -> Null {}", "optional String message");
+    rejects("@pure(1) fn bad() -> Null {}", "@pure takes no arguments");
+    rejects("@override fn top() -> Null {}", "@override cannot be applied to a function");
+    rejects("@test class C {}", "@test cannot be applied to a type");
+    rejects("fn f(@pure x: Int) -> Null {}", "@pure cannot be applied to a parameter");
+    rejects("@missing fn m() -> Null {}", "Undefined name 'missing'");
+    rejects(decorators + "@twice fn noType(x: Int) { return x }", "explicit return type");
+    rejects("fn meta(n: Int) -> Int { return n }\nlet x = 1\nclass B { @meta(x) var y: Int = 0 }", "literal constants");
+    rejects(decorators + "fn outer() -> Null { @twice fn inner(x: Int) -> Int { return x } }", "only to top-level functions and types");
+    rejects("fn meta(n: Int) -> Int { return n }\nclass B { @meta('x') var y: Int = 0 }", "Expected Int, got String");
+    {
+        auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"deprecated.k3", "@deprecated('use b') fn a() -> Int { return 1 }\nclass K { @deprecated fn old() -> Null {}; @deprecated var v: Int = 0 }\n@deprecated class Gone {}\nlet x = a()\nlet k = K()\nk.old()\nlet v = k.v\nlet g = Gone()"}));
+        std::vector<std::string> warnings;
+        for (const auto &diagnostic : dk3::typeCheck(program, {})) if (diagnostic.warning) warnings.push_back(diagnostic.message);
+        assert(warnings.size() == 4 && warnings[0] == "'a' is deprecated: use b" && warnings[1] == "'old' is deprecated" && warnings[2] == "'v' is deprecated" && warnings[3] == "'Gone' is deprecated");
+    }
+    {
+        // Method annotations are metadata; one shaped like a decorator of the method is flagged as not applied.
+        auto program = dk3::parse(std::make_shared<dk3::Source>(dk3::Source{"method-decorator.k3", "fn twice(f: fn(Int) -> Int) -> fn(Int) -> Int { return f }\nfn tag(name: String) -> String { return name }\nclass C {\n    static fn log(f: fn(Int) -> Int) -> fn(Int) -> Int { return f }\n    @twice fn a(x: Int) -> Int { return x }\n    @C.log fn b(x: Int) -> Int { return x }\n    @tag('meta') fn c(x: Int) -> Int { return x }\n    @twice fn d(x: String) -> Int { return 1 }\n}"}));
+        std::vector<std::string> warnings;
+        for (const auto &diagnostic : dk3::typeCheck(program, {})) if (diagnostic.warning) warnings.push_back(diagnostic.message);
+        assert(warnings.size() == 2 && warnings[0].rfind("@twice is not applied", 0) == 0 && warnings[1].rfind("@C.log is not applied", 0) == 0);
+    }
 
     if (failures) { std::cerr << failures << " typer test(s) failed\n"; return 1; }
     std::cout << "typer: PASS\n";

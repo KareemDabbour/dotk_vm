@@ -1,0 +1,16 @@
+var checksum = 0
+for (var round = 0; round < 60; round++) {
+    let values: List<Int> = []
+    for (var i = 0; i < 5000; i++) { values.append((i * 31 + round) % 1013) }
+    let doubled = values.map(fn(v: Int) -> Int { return v * 2 })
+    let even = doubled.filter(fn(v: Int) -> Bool { return v % 4 == 0 })
+    var sum = 0
+    for v in even { sum += v }
+    let counts: Map<Int, Int> = {}
+    for v in values {
+        let key = v % 101
+        counts[key] = (counts.get(key) ?? 0) + 1
+    }
+    checksum = (checksum + sum + counts.length() + values[round]) % 1000000007
+}
+System.print(checksum)

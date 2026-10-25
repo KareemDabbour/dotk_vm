@@ -1,0 +1,27 @@
+# Shows an image file in the terminal (JPEG, PNG, GIF, BMP or TGA).
+#   dotk3 --files-root . examples/image_view.k3 [path] [columns] [ascii|color|blocks]
+
+from std.canvas import *
+from std.image import *
+
+var path = "examples/a/images.jpeg"
+var columns = 100
+var style = CanvasStyle.Blocks
+if System.args.length() > 0 {
+    path = System.args[0]
+}
+if System.args.length() > 1 {
+    columns = Text.parseInt(System.args[1])
+}
+if System.args.length() > 2 {
+    let name = System.args[2]
+    if name == "ascii" {
+        style = CanvasStyle.Ascii
+    } else if name == "color" {
+        style = CanvasStyle.ColorAscii
+    }
+}
+
+let image = Image.read(path)
+System.print(f"{path}: {image.width}x{image.height}, {image.channels} channel(s)")
+System.print(TerminalCanvas.fromImage(image, columns, style).render())

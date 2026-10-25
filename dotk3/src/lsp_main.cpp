@@ -246,7 +246,7 @@ class Server {
         std::string name = module;
         if (std::filesystem::path(name).is_absolute() || name.find("..") != std::string::npos) return nullptr;
         if (std::filesystem::path(name).extension() != ".k3") { std::replace(name.begin(), name.end(), '.', '/'); name += ".k3"; }
-        auto path = (parent->parent_path() / name).lexically_normal();
+        auto path = findModule(parent->parent_path(), name).lexically_normal();
         for (const auto &entry : documents) if (filePath(entry.first) == std::optional<std::filesystem::path>(path)) return entry.second.source;
         std::ifstream file(path, std::ios::binary); if (!file) return nullptr;
         std::string text(maxDocument + 1, '\0'); file.read(text.data(), static_cast<std::streamsize>(text.size()));
